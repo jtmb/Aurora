@@ -1,0 +1,13 @@
+{
+  "name": "@aurora/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./types": "./src/types/index.js"
+  },
+  "files": [
+    "src/**/*.js"
+  ],
+  "dependencies": {}
+}

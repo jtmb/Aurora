@@ -1,0 +1,281 @@
+/* @aurora/web - Global Styles with Tailwind Aurora Theming
+   Dark mode first, minimal design, high contrast for long reading sessions */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Aurora Color Palette (CSS custom properties) */
+:root {
+  /* Backgrounds */
+  --bg-primary: #0a0a0a;       /* void-like deep darkness */
+  --bg-secondary: #18181b;     /* zinc-900 */
+  
+  /* Text colors */
+  --text-primary: #fafafa;     /* zinc-100 */
+  --text-secondary: #a1a1aa;   /* zinc-500 */
+  
+  /* Accent color - vibrant indigo */
+  --accent: #6366f1;           /* indigo-500 */
+  --accent-hover: #4f46e5;     /* indigo-600 */
+  
+  /* Code block background */
+  --code-bg: #242427;          /* Dracula/GitHub dark theme match */
+  
+  /* Border colors */
+  --border-default: rgba(39, 39, 42, 0.4);  /* zinc-800/40 */
+  --border-hover: rgba(63, 63, 70, 0.4);    /* zinc-700/40 */
+}
+
+/* Font families */
+@font-face {
+  font-family: 'Geist Sans';
+  src: url('https://cdn.jsdelivr.net/npm/@geist-ui/geist-sans/dist/web/Geist-Sans-Regular.woff2') format('woff2');
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: 'Geist Sans';
+  src: url('https://cdn.jsdelivr.net/npm/@geist-ui/geist-sans/dist/web/Geist-Sans-Medium.woff2') format('woff2');
+  font-weight: 500;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('https://cdn.jsdelivr.net/npm/jetbrains-mono@latest/dist/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+}
+
+/* Base styles */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family: 'Geist Sans', system-ui, sans-serif;
+}
+
+/* Code block styling */
+pre {
+  background-color: var(--code-bg) !important;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+code {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+/* Selection color */
+::selection {
+  background-color: var(--accent);
+  color: white;
+}
+
+/* Message bubble styles */
+.user-message {
+  background-color: var(--text-primary) !important;
+  color: #18181b !important;
+  border-radius: 0.75rem;
+}
+
+.assistant-message {
+  background-color: rgba(24, 24, 27, 0.5) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Smooth transitions */
+*,
+*::before,
+*::after {
+  transition-property: background-color, border-color, color, fill, stroke, opacity, box-shadow;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 300ms;
+}
+
+/* Focus rings */
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 0.25rem;
+}
+
+/* Loading animation */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+.loading-dot {
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.loading-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.loading-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* Typing indicator */
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Hover lift effect for cards */
+.hover-lift {
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+
+.hover-lift:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+}
+
+/* Glass effect backdrop */
+.glass {
+  background-color: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(8px);
+}
+
+/* Gradient text for headings */
+.gradient-text {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Message container styles */
+.messages-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.message-content {
+  line-height: 1.75;
+  font-size: 1.125rem;
+}
+
+.message-content p:first-child {
+  margin-top: 0;
+}
+
+.message-content p:last-child {
+  margin-bottom: 0;
+}
+
+/* Code block with copy button */
+.code-block {
+  position: relative;
+}
+
+.copy-button {
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+.code-block:hover .copy-button {
+  opacity: 1;
+}
+
+.copy-button:active {
+  opacity: 0.7;
+}
+
+/* Input area styles */
+.input-transparent {
+  scrollbar-width: none;
+}
+
+.input-transparent::-webkit-scrollbar {
+  display: none;
+}
+
+/* Avatar styles */
+.model-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.aurora-avatar {
+  background: radial-gradient(circle at 30% 30%, #6366f1, #4f46e5);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+/* Timestamp styles */
+.timestamp {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+/* Markdown link styles */
+.markdown a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdown a:hover {
+  color: var(--accent-hover);
+}
+
+/* Blockquote styles */
+.blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 1rem;
+  margin: 0;
+  font-style: italic;
+  color: var(--text-secondary);
+}
+
+/* Horizontal rule */
+.markdown hr {
+  border-top: 1px solid #3f3f46;
+  border-bottom: none;
+  margin: 1.5rem 0;
+}
+
+/* Code inline styles */
+.markdown code {
+  background-color: rgba(99, 102, 241, 0.1);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  color: var(--accent);
+}

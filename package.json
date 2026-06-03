@@ -1,26 +1,29 @@
 {
-  "name": "local_ai_test",
-  "version": "0.1.0",
+  "name": "aurora-gateway",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "next": "16.2.7",
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "db:migrate": "turbo db:migrate",
+    "db:generate": "turbo db:generate",
+    "db:studio": "docker run --rm -e PGHOST=localhost -e PGPORT=5432 -e PGUSER=postgres -e PGPASSWORD=postgres -d postgres",
+    "backup": "./scripts/backup.sh"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.2.7",
-    "tailwindcss": "^4",
-    "typescript": "^5"
-  }
+    "@changesets/cli": "^2.27.10",
+    "turbo": "^2.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "packageManager": "npm@10.5.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ]
 }

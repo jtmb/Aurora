@@ -1,0 +1,200 @@
+// Aurora Gateway - Database Schema
+// PostgreSQL-compatible schema for storing users, chats, and usage analytics
+
+generator client {
+  provider = "pg"
+  config   = {
+    connection {
+      host     = "localhost"
+      port     = "5432"
+      database = "aurora_gateway"
+      user     = "postgres"
+      password = "postgres"
+    }
+  }
+}
+
+// Users table - Application users with OAuth/Email auth
+model User {
+  id            String   @default(uuid()) @Id
+  email         String   @unique
+  emailVerified DateTime?
+  name          String?
+  profileImage String?
+  
+  // One-to-one relationship with user's API key (for encrypted storage)
+  apiKey        ApiKey?
+  
+  // Sessions for WebSocket or long-lived connections
+  sessions      Session[]
+  
+  // Chats created by this user
+  chats         Chat[]
+  
+  // Saved prompt templates
+  promptTemplates PromptTemplate[]
+  
+  // Usage analytics records
+  usageMetrics   UsageMetric[]
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@map("users")
+}
+
+// API Keys table - Encrypted storage of provider API credentials
+model ApiKey {
+  id           String   @db.Uuid @Id
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  
+  provider     Provider // OPENAI|ANTHROPIC|OLLAMA|LM_STUDIO
+  key          String   @encrypted
+  
+  isPrimary    Boolean  @default(false)
+  name         String?  // Optional display name like "My OpenAI Key"
+  
+  lastRotated DateTime?
+  rotationCount Int     @default(0)
+  
+  revokedAt    DateTime?
+  
+  createdAt    DateTime @default(now())
+  
+  @@map("api_keys")
+}
+
+// Chat conversations with metadata
+model Chat {
+  id           String   @db.Uuid @Id
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  
+  title        String?
+  modelId      String?
+  provider     String?
+  
+  // Many-to-many relationship with messages (through message_ids)
+  messageIds   String[]
+  
+  isArchived   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  
+  @@map("chats")
+}
+
+// Messages within chat conversations
+model Message {
+  id           String   @db.Uuid @Id
+  chatId       String
+  chat         Chat     @relation(fields: [chatId], references: [id])
+  
+  role         Role     // USER|ASSISTANT|SYSTEM|FUNCTION
+  
+  content      String?  // Text content (nullable for function responses)
+  
+  // For assistant messages: response metadata
+  model        String?
+  finishReason FinishReason?
+  provider     String?  // Which provider generated this response
+  
+  // Token usage - normalized to OpenAI format
+  tokensUsed   Int      @default(0)
+  
+  createdAt    DateTime @default(now())
+  
+  @@index([chatId, createdAt]) // For chat history pagination
+  @@map("messages")
+}
+
+// Enum for message roles (OpenAI-compatible)
+enum Role {
+  USER
+  ASSISTANT
+  SYSTEM
+  FUNCTION
+}
+
+// Enum for finish reasons (when generation stops)
+enum FinishReason {
+  STOP
+  LENGTH
+  FUNCTION_CALL
+  CONTENT_FILTER
+  null
+}
+
+// Enum for supported model providers
+enum Provider {
+  OPENAI
+  ANTHROPIC
+  OLLAMA
+  LM_STUDIO
+}
+
+// Session table - For tracking active user sessions
+model Session {
+  id            String   @db.Uuid @Id
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  
+  token         String?  // Encrypted refresh token
+  
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  
+  @@map("sessions")
+}
+
+// Saved prompt templates per user or system-wide
+model PromptTemplate {
+  id            String   @db.Uuid @Id
+  
+  name          String   @unique
+  description   String?
+  content       String   // The actual prompt template with {{variables}}
+  
+  isSystem      Boolean  @default(false) // System-wide vs user-specific
+  
+  userId        String?  // If null, system-wide; if set, user-specific
+  
+  createdAt     DateTime @default(now())
+  
+  @@unique([isSystem, name])
+  @@map("prompt_templates")
+}
+
+// Usage metrics - Aggregated token usage for analytics
+model UsageMetric {
+  id            String   @db.Uuid @Id
+  
+  userId        String?
+  chatId        String?  // Null for system-wide or anonymous
+  
+  provider      String
+  model         String
+  tokensUsed    Int
+  costUSD       Float?
+  
+  timestamp     DateTime
+  
+  @@unique([timestamp, userId]) // One record per minute per user
+  @@index([timestamp, userId])
+  @@map("usage_metrics")
+}
+
+// Chat history cache - For quick pagination
+model ChatHistory {
+  id            String   @db.Uuid @Id
+  
+  chatId        String
+  title         String?
+  messageCount  Int      @default(0)
+  lastMessageAt DateTime
+  
+  createdAt     DateTime @default(now())
+  
+  @@index([chatId, createdAt])
+  @@map("chat_history")
+}

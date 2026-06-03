@@ -1,0 +1,17 @@
+{
+  "name": "@aurora/user-data",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./schema": "./src/schema/index.js",
+    "./prisma": "./src/prisma/index.js"
+  },
+  "files": [
+    "src/**/*.js",
+    "prisma/**/*"
+  ],
+  "dependencies": {
+    "@libsql/client": "^0.9.0"
+  }
+}

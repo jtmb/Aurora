@@ -1,0 +1,14 @@
+{
+  "name": "@aurora/auth-service",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./handlers": "./src/handlers/index.js",
+    "./routes": "./src/routes/index.js"
+  },
+  "files": [
+    "src/**/*.js"
+  ],
+  "dependencies": {}
+}
