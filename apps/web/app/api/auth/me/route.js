@@ -32,17 +32,12 @@ export async function GET(request) {
 
     const userId = decoded.userId;
     
-    // Try Redis first
+    // Look up user via Redis
     let user = null;
     if (isRedisAvailable()) {
       const redis = getRedis();
       user = await redis.hgetall(KEYS.USER_BY_ID(userId));
       if (!user || Object.keys(user).length === 0) user = null;
-    }
-    
-    // Fallback: demo user (works without Redis)
-    if (!user && userId === 'demo-user-id') {
-      user = { id: 'demo-user-id', email: 'demo@example.com', name: 'Demo User', role: 'user' };
     }
 
     if (!user) {

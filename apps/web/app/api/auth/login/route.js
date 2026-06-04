@@ -21,9 +21,9 @@ export async function POST(request) {
       );
     }
 
-    // Try Redis first, fall back to demo credentials for local dev
-    const redis = getRedis();
+    // Look up user via Redis
     let user = null;
+    const redis = getRedis();
     
     if (isRedisAvailable()) {
       user = await redis.hgetall(KEYS.USER_BY_EMAIL(body.email));
@@ -31,7 +31,7 @@ export async function POST(request) {
     }
     
     if (user) {
-      // Real user — verify password with bcrypt
+      // Verify password with bcrypt
       const valid = await bcrypt.compare(body.password, user.hashedPassword);
       if (!valid) {
         return NextResponse.json(
@@ -39,9 +39,6 @@ export async function POST(request) {
           { status: 401 }
         );
       }
-    } else if (body.email === 'demo@example.com' && body.password === 'password') {
-      // Demo fallback — works without Redis
-      user = { id: 'demo-user-id', email: 'demo@example.com', name: 'Demo User', role: 'user' };
     } else {
       return NextResponse.json(
         { error: { message: 'Invalid credentials' } },

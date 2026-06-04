@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 
+  Aurora Gateway Logo - Primary Version  
+  Design: Abstract "A" forming aurora-like wave with gradient
+  Colors: Indigo (#6366f1) to Cyan (#06b6d4) inspired by northern lights
+-->
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Aurora Gateway Logo">
+  <defs>
+    <!-- Aurora gradient: indigo to cyan, mimicking the northern lights glow -->
+    <linearGradient id="aurora-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1"/>
+      <stop offset="50%" style="stop-color:#8b5cf6;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#06b6d4;stop-opacity:1"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Outer glow effect -->
+  <path d="M73,209.6 L183,142.7 C185.3,140.6 185.3,137.4 183,135.3 L73,68.4" 
+        fill="none" stroke="url(#aurora-gradient)" stroke-width="20" stroke-linecap="round"/>
+  
+  <!-- Main logo mark - Abstract "A" shape forming aurora-like wave -->
+  <path d="M61,209.6 L75.5,195 L94,209.6 L94,233.6 H80 L80,199 L61.5,209.6 Z" 
+        fill="url(#aurora-gradient)" opacity="0.9"/>
+</svg>

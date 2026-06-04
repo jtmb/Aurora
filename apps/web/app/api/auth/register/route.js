@@ -5,7 +5,6 @@ import bcrypt from 'bcryptjs';
 import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
 import { KEYS } from '@aurora/shared/redis-keys';
 import { AuthHandler } from '@aurora/auth-service/handlers';
-import { seedDemoUser } from '@aurora/shared/seed';
 
 const authHandler = new AuthHandler();
 

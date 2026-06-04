@@ -1,14 +1,16 @@
-// @aurora/web/settings - Settings page with proper storage and model fetching
-// Supports custom LM Studio endpoint configuration
+// @aurora/web/settings — Professional tabbed settings with Aurora sidebar
 
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 
 export default function SettingsPage() {
+  const router = useRouter();
   const [activeTab, setActiveTab] = useState('providers');
-  
-  // Load settings from localStorage on mount - supports custom LM Studio endpoints
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+
+  // Load settings from localStorage
   const loadSettings = () => {
     try {
       return {
@@ -22,13 +24,8 @@ export default function SettingsPage() {
       };
     } catch {
       return {
-        openai: '',
-        anthropic: '',
-        ollamaBase: 'http://localhost:11434',
-        lmStudioHost: 'localhost',
-        lmStudioPort: '1234',
-        lmStudioUrl: '',
-        defaultProvider: 'openai'
+        openai: '', anthropic: '', ollamaBase: 'http://localhost:11434',
+        lmStudioHost: 'localhost', lmStudioPort: '1234', lmStudioUrl: '', defaultProvider: 'openai'
       };
     }
   };
@@ -36,404 +33,422 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState(loadSettings);
   const [showApiKey, setShowApiKey] = useState({ openai: false, anthropic: false });
   const [isLoading, setIsLoading] = useState(false);
-  
-  // Fetch available models on mount - only if API keys are configured
-  const [models, setModels] = useState([]);
-  const [isFetching, setIsFetching] = useState(true);
+  const [saved, setSaved] = useState(false);
+  const [user, setUser] = useState(null);
 
+  // Check auth on mount
   useEffect(() => {
-    fetchModels();
+    const token = localStorage.getItem('auth_token');
+    if (token) {
+      try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        setUser({ id: payload.userId, email: payload.email });
+      } catch {}
+    }
   }, []);
 
-  const fetchModels = async () => {
-    // Only fetch models if at least one API key is configured
-    try {
-      const openaiKey = localStorage.getItem('OPENAI_API_KEY');
-      const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
-      
-      if (!openaiKey && !anthropicKey) {
-        console.log('No API keys configured, skipping model fetch');
-        setIsFetching(false);
-        return;
-      }
-
-      setIsFetching(true);
-      const token = localStorage.getItem('auth_token') || '';
-      
-      // Don't send auth header to models API - it should work without authentication for discovery
-      const res = await fetch('/api/providers/models', {
-        headers: {}
-      });
-      
-      if (res.ok) {
-        const data = await res.json();
-        setModels(data.models || []);
-        
-        // Only hide loading state if we got models
-        if (data.models && data.models.length > 0) {
-          setIsFetching(false);
-        }
-      } else {
-        console.warn(`Models API returned ${res.status} - no models available`);
-        setIsFetching(false);
-      }
-    } catch (error) {
-      // Silently handle errors - just show empty models
-      console.debug('Fetch models error:', error.message);
-      setModels([]);
-      setIsFetching(false);
-    }
+  const handleSignOut = () => {
+    localStorage.removeItem('auth_token');
+    setUser(null);
+    setUserMenuOpen(false);
+    router.push('/');
   };
 
   const handleSaveSettings = async (e) => {
     e?.preventDefault();
-    
+    setIsLoading(true);
     try {
-      setIsLoading(true);
-      
-      // Save to localStorage immediately for immediate use
       if (settings.openai) localStorage.setItem('OPENAI_API_KEY', settings.openai);
       if (settings.anthropic) localStorage.setItem('ANTHROPIC_API_KEY', settings.anthropic);
       localStorage.setItem('OLLAMA_API_BASE', settings.ollamaBase);
-      
-      // Save LM Studio as separate host and port (for backward compatibility)
       localStorage.setItem('LM_STUDIO_HOST', settings.lmStudioHost || 'localhost');
       localStorage.setItem('LM_STUDIO_PORT', settings.lmStudioPort || '1234');
       localStorage.setItem('DEFAULT_PROVIDER', settings.defaultProvider);
-      
-      // NEW: Save full custom LM Studio URL with /v1 suffix (required for OpenAI-compatible endpoints)
-      const lmStudioUrl = `http://${settings.lmStudioHost || 'localhost'}:${settings.lmStudioPort || '1234'}/v1`;
-      localStorage.setItem('LM_STUDIO_URL', lmStudioUrl);
-      
-      // Save auth token if set (placeholder for now)
-      localStorage.setItem('auth_token', '');
-      
-      console.log('Settings saved. Models will load from:', lmStudioUrl);
-      
-      // Reload page to apply settings
-      window.location.href = '/';
+      localStorage.setItem('LM_STUDIO_URL', `http://${settings.lmStudioHost || 'localhost'}:${settings.lmStudioPort || '1234'}/v1`);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
     } catch (error) {
       console.error('Save error:', error);
-      alert('Failed to save settings');
     } finally {
       setIsLoading(false);
     }
   };
 
+  const tabs = [
+    { id: 'providers', label: 'Providers', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z' },
+    { id: 'account', label: 'Account', icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' },
+    { id: 'about', label: 'About', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' }
+  ];
+
   return (
     <div className="flex h-screen bg-zinc-950 text-white">
-      {/* LEFT SIDEBAR */}
+      {/* LEFT SIDEBAR — matches main page sidebar */}
       <aside className="w-[260px] flex-shrink-0 flex flex-col border-r border-zinc-800/40 bg-zinc-900 hidden md:flex">
-        <div className="flex-1 overflow-y-auto py-3">
-          {/* Back button */}
-          <button onClick={() => window.history.back()} className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20 transition-colors">
-            <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeWidth={1.5} d="M15 19l-7-7m0 0l7-7m-7 7v13" />
+        {/* Aurora Logo — static brand */}
+        <div className="px-3 pt-3 pb-2 border-b border-zinc-800/40">
+          <div className="w-full flex items-center gap-3 px-3 py-2.5">
+            <svg className="w-10 h-10 flex-shrink-0" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+              <defs>
+                <linearGradient id="aurora-stroke" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#818cf8" />
+                  <stop offset="100%" stopColor="#c084fc" />
+                </linearGradient>
+                <linearGradient id="aurora-stroke-2" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#a78bfa" />
+                  <stop offset="100%" stopColor="#e879f9" />
+                </linearGradient>
+                <linearGradient id="aurora-stroke-3" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#c4b5fd" />
+                  <stop offset="100%" stopColor="#f0abfc" />
+                </linearGradient>
+              </defs>
+              <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-stroke)" strokeWidth="1.5" opacity="0.9" />
+              <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-stroke-2)" strokeWidth="1.5" opacity="0.7" />
+              <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-stroke-3)" strokeWidth="1.5" opacity="0.5" />
             </svg>
-            Back
-          </button>
+            <div className="flex-1 text-left min-w-0">
+              <p className="text-sm font-semibold text-white tracking-tight">Aurora</p>
+              <p className="text-[10px] text-zinc-500 truncate">Multi-model Gateway</p>
+            </div>
+          </div>
+        </div>
 
-          {/* Settings content */}
+        {/* Nav tabs */}
+        <div className="flex-1 overflow-y-auto py-3">
+          <a href="/" className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20 transition-colors">
+            <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M15 19l-7-7 7-7" /></svg>
+            Back to Chat
+          </a>
+
+          <div className="my-2 border-t border-zinc-800/40" />
+
           <nav className="space-y-[calc(0.75rem+3px)]">
-            <a href="/" className="flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20 transition-colors">
-              <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeWidth={1.5} d="M8.69 8.05C8.32 7.68 8.05 7.68 7.68 8.05L4.5 11.23C2.66 13.07 2.66 15.93 4.5 17.77L7.68 20.95C8.05 21.32 8.32 21.32 8.69 20.95C9.06 20.58 9.06 20.31 8.69 19.94L5.51 16.76C5.14 16.39 5.14 16.12 5.51 15.75C5.88 15.38 6.15 15.38 6.52 15.75L9.69 18.93C10.06 19.3 10.33 19.3 10.7 18.93C11.07 18.56 11.07 18.29 10.7 17.92L7.52 14.74C7.15 14.37 7.15 14.1 7.52 13.73L10.69 10.55C11.06 10.18 11.06 9.91 10.69 9.54L7.52 6.36C7.15 5.99 7.15 5.72 7.52 5.35C7.89 4.98 8.16 4.98 8.53 5.35L11.7 8.53C12.07 8.9 12.07 9.17 11.7 9.54L8.53 12.72C8.16 13.09 8.16 13.36 8.53 13.73L11.7 16.91C12.07 17.28 12.07 17.55 11.7 17.92L8.53 21.1C8.16 21.47 7.89 21.47 7.52 21.1C7.15 20.73 7.15 20.46 7.52 20.09L10.69 16.91C11.06 16.54 11.06 16.27 10.69 15.9L7.52 12.72L4.35 9.54C3.98 9.17 3.98 8.9 4.35 8.53L7.52 5.35C7.89 4.98 8.16 4.98 8.53 5.35L11.7 8.53" />
-              </svg>
-              Settings
-            </a>
-
-            <a href="/" className="flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20 transition-colors">
-              <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeWidth={1.5} d="M12 6.253v13m0-13C10.896 4.547 9.504 4.547 8.25 3.25S3.25 4.547 3.25 5.75v13c0 1.196.553 1.749 1.749 1.749H18a2 2 0 002-2V5.75C20 4.547 19.447 4 18.25 3.25A2.002 2.002 0 0016.25 2H9M12 6.253v13m0-13C13.104 4.547 14.496 4.547 15.75 3.25S20.75 4.547 20.75 5.75v13c0 1.196-.553 1.749-1.749 1.749H8a2 2 0 00-2 2V5.75C6 4.547 6.553 4 7.75 3.25A2.002 2.002 0 009.75 2H15" />
-              </svg>
-              Library
-            </a>
-
-            <a href="/" className="flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20 transition-colors">
-              <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeWidth={1.5} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Account
-            </a>
+            {tabs.map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors ${
+                  activeTab === tab.id ? 'bg-indigo-600/15 text-white' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20'
+                }`}
+              >
+                <svg className="w-[1.2rem] h-[1.2rem] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeWidth={1.5} d={tab.icon} />
+                </svg>
+                {tab.label}
+              </button>
+            ))}
           </nav>
         </div>
 
-        {/* User info at bottom */}
+        {/* User info */}
         <div className="p-4 border-t border-zinc-800/40">
-          <div className="flex items-center gap-3 px-2 py-2 rounded-lg bg-zinc-800/50">
-            <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-medium">
-              U
+          {!user ? (
+            <a
+              href="/"
+              className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-500 transition-colors flex items-center justify-center"
+            >
+              Sign In
+            </a>
+          ) : (
+            <div className="relative">
+              <button
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                className="w-full flex items-center gap-3 px-2 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-700/50 transition-colors"
+              >
+                <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-medium">
+                  {user?.email?.[0]?.toUpperCase() || '?'}
+                </div>
+                <div className="flex-1 min-w-0 text-left">
+                  <p className="text-sm font-medium truncate">{user?.email || 'Guest'}</p>
+                  <p className="text-xs text-zinc-500">Free Plan</p>
+                </div>
+                <svg className={`w-4 h-4 text-zinc-500 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+              </button>
+
+              {/* Drop-up Menu */}
+              {userMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setUserMenuOpen(false)} />
+                  <div className="absolute bottom-full left-0 right-0 mb-1 bg-zinc-850 border border-zinc-700/50 rounded-xl shadow-2xl z-20 py-1.5 overflow-hidden">
+                    <a href="/" className="flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors" onClick={() => setUserMenuOpen(false)}>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
+                      Chat
+                    </a>
+                    <a href="/docs" className="flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors" onClick={() => setUserMenuOpen(false)}>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
+                      Documentation
+                    </a>
+                    <div className="border-t border-zinc-700/30 my-1.5" />
+                    <button onClick={handleSignOut} className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-red-400 hover:bg-red-950/20 hover:text-red-300 transition-colors">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+                      Sign Out
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">User</p>
-              <p className="text-xs text-zinc-500">Free Plan</p>
-            </div>
-          </div>
+          )}
         </div>
       </aside>
 
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col min-w-0 bg-zinc-950">
         <div className="flex-1 overflow-auto p-6 pt-[50px]">
-          <h1 className="text-2xl font-semibold text-white mb-6">Settings</h1>
-
-          {/* Provider Tabs */}
+          {/* Tab Bar */}
           <div className="border-b border-zinc-800/40 mb-6">
-            <nav className="flex gap-2">
-              <button
-                onClick={() => setActiveTab('providers')}
-                className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === 'providers'
-                    ? 'border-indigo-600 text-white bg-zinc-800/50'
-                    : 'border-transparent text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                Provider Settings
-              </button>
+            <nav className="flex gap-1">
+              {tabs.map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+                    activeTab === tab.id
+                      ? 'border-indigo-600 text-white'
+                      : 'border-transparent text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
             </nav>
           </div>
 
-          {/* Provider Cards */}
-          <div className="space-y-6">
-            {/* OpenAI Provider Card */}
-            <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-lg bg-indigo-600/20 flex items-center justify-center">
-                  <span className="text-indigo-600 font-bold text-xs">OA</span>
-                </div>
-                <div>
-                  <h3 className="text-base font-medium text-white">OpenAI</h3>
-                  <p className="text-sm text-zinc-500">Primary provider for chat completions</p>
-                </div>
-              </div>
-
-              <div className="space-y-4 ml-13">
-                <div className="space-y-2">
-                  <label className="block text-sm text-zinc-400">API Key</label>
-                  <div className="flex gap-3">
-                    <input
-                      type="password"
-                      value={settings.openai}
-                      onChange={(e) => setSettings({ ...settings, openai: e.target.value })}
-                      placeholder="sk-"
-                      className="flex-1 bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50"
-                    />
-                    <button
-                      onClick={() => setShowApiKey(prev => ({ ...prev, openai: !prev.openai }))}
-                      className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-400 hover:bg-zinc-700 transition-colors"
-                    >
-                      {showApiKey.openai ? 'Hide' : 'Show'}
-                    </button>
+          {/* ===== PROVIDERS TAB ===== */}
+          {activeTab === 'providers' && (
+            <div className="space-y-5 max-w-2xl">
+              {/* OpenAI */}
+              <ProviderCard
+                color="indigo" initials="OA" title="OpenAI" subtitle="Primary provider for chat completions"
+                actionLabel="Dashboard" actionUrl="https://platform.openai.com/api-keys"
+              >
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1.5">API Key</label>
+                    <div className="flex gap-2">
+                      <input type={showApiKey.openai ? 'text' : 'password'} value={settings.openai}
+                        onChange={(e) => setSettings({ ...settings, openai: e.target.value })}
+                        placeholder="sk-" className="flex-1 bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50" />
+                      <button onClick={() => setShowApiKey(prev => ({ ...prev, openai: !prev.openai }))}
+                        className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-400 hover:bg-zinc-700 transition-colors">
+                        {showApiKey.openai ? 'Hide' : 'Show'}
+                      </button>
+                    </div>
                   </div>
                 </div>
+              </ProviderCard>
 
-                <div className="space-y-2">
-                  <label className="block text-sm text-zinc-400">Default Model</label>
-                  <select
-                    value={settings.defaultProvider === 'openai' ? 'gpt-3.5-turbo' : settings.defaultProvider === 'openai' ? 'gpt-4' : 'gpt-4o'}
-                    onChange={(e) => {}}
-                    className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none"
-                  >
-                    <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-                    <option value="gpt-4">GPT-4</option>
-                    <option value="gpt-4o">GPT-4o</option>
-                  </select>
+              {/* Anthropic */}
+              <ProviderCard
+                color="purple" initials="An" title="Anthropic" subtitle="Claude 3 model family"
+                actionLabel="Console" actionUrl="https://console.anthropic.com/"
+              >
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1.5">API Key</label>
+                    <div className="flex gap-2">
+                      <input type={showApiKey.anthropic ? 'text' : 'password'} value={settings.anthropic}
+                        onChange={(e) => setSettings({ ...settings, anthropic: e.target.value })}
+                        placeholder="sk-ant-" className="flex-1 bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50" />
+                      <button onClick={() => setShowApiKey(prev => ({ ...prev, anthropic: !prev.anthropic }))}
+                        className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-400 hover:bg-zinc-700 transition-colors">
+                        {showApiKey.anthropic ? 'Hide' : 'Show'}
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-xs text-zinc-500">Models: Claude 3 Opus, Sonnet, Haiku</p>
                 </div>
+              </ProviderCard>
 
-                <p className="text-xs text-zinc-600">
-                  Visit{' '}
-                  <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:text-indigo-400">
-                    OpenAI Dashboard
-                  </a>{' '}
-                  to generate API keys.
-                </p>
-              </div>
-            </div>
-
-            {/* Anthropic Provider Card */}
-            <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-lg bg-purple-600/20 flex items-center justify-center">
-                  <span className="text-purple-600 font-bold text-xs">An</span>
+              {/* Ollama */}
+              <ProviderCard
+                color="green" initials="Ol" title="Ollama" subtitle="Local LLM models — no API key required"
+              >
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1.5">Base URL</label>
+                    <input type="text" value={settings.ollamaBase}
+                      onChange={(e) => setSettings({ ...settings, ollamaBase: e.target.value })}
+                      placeholder="http://localhost:11434" className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50" />
+                  </div>
+                  <p className="text-xs text-zinc-500">
+                    Run with: <code className="bg-zinc-800 px-1.5 py-0.5 rounded text-xs text-zinc-300">ollama pull llama3</code>
+                  </p>
                 </div>
-                <div>
-                  <h3 className="text-base font-medium text-white">Anthropic</h3>
-                  <p className="text-sm text-zinc-500">Claude 3 model family</p>
-                </div>
-              </div>
+              </ProviderCard>
 
-              <div className="space-y-4 ml-13">
-                <div className="space-y-2">
-                  <label className="block text-sm text-zinc-400">API Key</label>
-                  <div className="flex gap-3">
-                    <input
-                      type="password"
-                      value={settings.anthropic}
-                      onChange={(e) => setSettings({ ...settings, anthropic: e.target.value })}
-                      placeholder="sk-"
-                      className="flex-1 bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50"
-                    />
-                    <button
-                      onClick={() => setShowApiKey(prev => ({ ...prev, anthropic: !prev.anthropic }))}
-                      className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-400 hover:bg-zinc-700 transition-colors"
-                    >
-                      {showApiKey.anthropic ? 'Hide' : 'Show'}
-                    </button>
+              {/* LM Studio */}
+              <ProviderCard
+                color="orange" initials="LS" title="LM Studio" subtitle="Local LLM server with GUI"
+                actionLabel="Download" actionUrl="https://lmstudio.ai"
+              >
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1.5">Host</label>
+                    <input type="text" value={settings.lmStudioHost}
+                      onChange={(e) => setSettings({ ...settings, lmStudioHost: e.target.value })}
+                      placeholder="localhost" className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1.5">Port</label>
+                    <input type="text" value={settings.lmStudioPort}
+                      onChange={(e) => setSettings({ ...settings, lmStudioPort: e.target.value })}
+                      placeholder="1234" className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50" />
                   </div>
                 </div>
+              </ProviderCard>
 
-                <div className="space-y-2">
-                  <label className="block text-sm text-zinc-400">Base URL (optional)</label>
-                  <input
-                    type="text"
-                    value={process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1'}
-                    readOnly
-                    className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500"
-                  />
+              {/* Default Provider */}
+              <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
+                <h3 className="text-base font-medium text-white mb-3">Default Provider</h3>
+                <div>
+                  <label className="block text-xs text-zinc-400 mb-1.5">Default provider for new chats:</label>
+                  <select value={settings.defaultProvider}
+                    onChange={(e) => setSettings({ ...settings, defaultProvider: e.target.value })}
+                    className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none">
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="lmstudio">LM Studio</option>
+                  </select>
                 </div>
+              </div>
 
-                <p className="text-xs text-zinc-600">
-                  Supported models: Claude 3 Opus, Claude 3 Sonnet, Claude 3 Haiku
-                </p>
+              {/* Save */}
+              <button onClick={handleSaveSettings} disabled={isLoading}
+                className={`w-full rounded-lg px-4 py-3 text-sm font-medium transition-all flex items-center justify-center gap-2 ${
+                  saved ? 'bg-green-600 text-white' : 'bg-indigo-600 text-white hover:bg-indigo-500'
+                } disabled:opacity-50 disabled:cursor-not-allowed`}>
+                {isLoading ? (
+                  <><svg className="animate-spin h-4 w-4 border-2 border-white/30 border-t-white rounded-full" /> Saving...</>
+                ) : saved ? (
+                  <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg> Saved!</>
+                ) : (
+                  'Save Provider Settings'
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* ===== ACCOUNT TAB ===== */}
+          {activeTab === 'account' && (
+            <div className="max-w-2xl space-y-5">
+              <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
+                <h3 className="text-base font-medium text-white mb-4">Account Details</h3>
+                {user ? (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs text-zinc-400 mb-1">Email</label>
+                      <p className="text-sm text-white bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5">{user.email}</p>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-zinc-400 mb-1">User ID</label>
+                      <p className="text-sm text-zinc-500 font-mono bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5">{user.id}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <p className="text-zinc-500 text-sm mb-3">Sign in to view account details</p>
+                    <a href="/" className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-500 transition-colors">
+                      Sign In
+                    </a>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
+                <h3 className="text-base font-medium text-white mb-2">Session</h3>
+                <p className="text-sm text-zinc-500 mb-4">Manage your active session.</p>
+                <button onClick={handleSignOut}
+                  className="px-4 py-2 bg-red-600/20 border border-red-700/30 text-red-400 rounded-lg text-sm hover:bg-red-600/30 transition-colors">
+                  Sign Out
+                </button>
               </div>
             </div>
+          )}
 
-            {/* Ollama Provider Card */}
-            <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-lg bg-green-600/20 flex items-center justify-center">
-                  <span className="text-green-600 font-bold text-xs">Ol</span>
+          {/* ===== ABOUT TAB ===== */}
+          {activeTab === 'about' && (
+            <div className="max-w-2xl space-y-5">
+              <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
+                <div className="flex items-center gap-4 mb-4">
+                  <div className="w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center">
+                    <span className="text-white font-bold text-xl">A</span>
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-white">Aurora Gateway</h3>
+                    <p className="text-sm text-zinc-500">Multi-model LLM API Gateway</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-base font-medium text-white">Ollama</h3>
-                  <p className="text-sm text-zinc-500">Local LLM models (no API key required)</p>
-                </div>
-              </div>
-
-              <div className="space-y-4 ml-13">
-                <div className="space-y-2">
-                  <label className="block text-sm text-zinc-400">Base URL</label>
-                  <input
-                    type="text"
-                    value={settings.ollamaBase}
-                    onChange={(e) => setSettings({ ...settings, ollamaBase: e.target.value })}
-                    placeholder="http://localhost:11434"
-                    className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="block text-sm text-zinc-400">Available Models</label>
-                  <select
-                    disabled={isFetching || models.length === 0}
-                    value=""
-                    className={`w-full rounded-lg px-3 py-2.5 text-sm border focus:outline-none transition-colors ${
-                      isFetching 
-                        ? 'bg-zinc-800/60 border-zinc-700/40 text-zinc-400' 
-                        : models.length === 0
-                          ? 'bg-zinc-800/60 border-zinc-700/40 text-zinc-500'
-                          : 'bg-green-900/20 border-green-700/40 text-green-200'
-                    }`}
-                  >
-                    {isFetching ? (
-                      <option value="">Loading...</option>
-                    ) : models.length === 0 ? (
-                      <option value="">No Ollama configured</option>
-                    ) : (
-                      models.map(m => (
-                        <option key={m.id} value={m.id}>
-                          {m.name || m.id}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                  <p className="text-xs text-zinc-600">
-                    Run Ollama with: <code className="bg-zinc-800 px-1 rounded">ollama pull llama3</code>
+                <div className="space-y-2 text-sm text-zinc-400">
+                  <p className="flex justify-between py-2 border-b border-zinc-800/30">
+                    <span className="text-zinc-500">Version</span>
+                    <span className="text-zinc-300 font-mono">1.0.0</span>
+                  </p>
+                  <p className="flex justify-between py-2 border-b border-zinc-800/30">
+                    <span className="text-zinc-500">Framework</span>
+                    <span className="text-zinc-300">Next.js 15</span>
+                  </p>
+                  <p className="flex justify-between py-2 border-b border-zinc-800/30">
+                    <span className="text-zinc-500">Architecture</span>
+                    <span className="text-zinc-300">Turborepo Monorepo</span>
+                  </p>
+                  <p className="flex justify-between py-2">
+                    <span className="text-zinc-500">Providers</span>
+                    <span className="text-zinc-300">OpenAI, Anthropic, Ollama, LM Studio</span>
                   </p>
                 </div>
               </div>
-            </div>
 
-            {/* LM Studio Provider Card */}
-            <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-lg bg-orange-600/20 flex items-center justify-center">
-                  <span className="text-orange-600 font-bold text-xs">LS</span>
-                </div>
-                <div>
-                  <h3 className="text-base font-medium text-white">LM Studio</h3>
-                  <p className="text-sm text-zinc-500">Local LLM server with GUI</p>
-                </div>
-              </div>
-
-              <div className="space-y-4 ml-13">
-                <div className="space-y-2">
-                  <label className="block text-sm text-zinc-400">Host</label>
-                  <input
-                    type="text"
-                    value={settings.lmStudioHost}
-                    onChange={(e) => setSettings({ ...settings, lmStudioHost: e.target.value })}
-                    placeholder="localhost"
-                    className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="block text-sm text-zinc-400">Port</label>
-                  <input
-                    type="text"
-                    value={settings.lmStudioPort}
-                    onChange={(e) => setSettings({ ...settings, lmStudioPort: e.target.value })}
-                    placeholder="1234"
-                    className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50"
-                  />
-                </div>
-
-                <p className="text-xs text-zinc-600">
-                  Download LM Studio from{' '}
-                  <a href="https://lmstudio.ai" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:text-indigo-400">
-                    lmstudio.ai
-                  </a>
+              <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
+                <h3 className="text-base font-medium text-white mb-2">OpenAI-Compatible API</h3>
+                <p className="text-sm text-zinc-500 mb-3">
+                  Aurora exposes <code className="bg-zinc-800 px-1.5 py-0.5 rounded text-xs text-zinc-300">/api/v1/chat/completions</code> — a drop-in replacement for any OpenAI client.
                 </p>
+                <pre className="bg-zinc-800 border border-zinc-700/40 rounded-lg p-4 text-xs text-zinc-300 overflow-x-auto">
+{`curl http://localhost:3000/api/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}'`}
+                </pre>
               </div>
             </div>
-
-            {/* Default Provider */}
-            <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
-              <h3 className="text-base font-medium text-white mb-4">Default Provider</h3>
-              <div className="space-y-2 ml-4">
-                <label className="block text-sm text-zinc-400">Select default provider for new chats:</label>
-                <select
-                  value={settings.defaultProvider}
-                  onChange={(e) => setSettings({ ...settings, defaultProvider: e.target.value })}
-                  className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none"
-                >
-                  <option value="openai">OpenAI</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="ollama">Ollama</option>
-                  <option value="lmstudio">LM Studio</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Save Button */}
-            <button
-              onClick={handleSaveSettings}
-              disabled={isLoading}
-              className="w-full bg-indigo-600 text-white rounded-lg px-4 py-3 text-sm font-medium hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {isLoading ? (
-                <>
-                  <svg className="animate-spin h-4 w-4 border-2 border-white/30 border-t-white rounded-full"></svg>
-                  Saving...
-                </>
-              ) : (
-                'Save Provider Settings'
-              )}
-            </button>
-          </div>
+          )}
         </div>
       </main>
+    </div>
+  );
+}
+
+// Reusable provider card component
+function ProviderCard({ color, initials, title, subtitle, actionLabel, actionUrl, children }) {
+  const colorMap = {
+    indigo: { bg: 'bg-indigo-600/20', text: 'text-indigo-400' },
+    purple: { bg: 'bg-purple-600/20', text: 'text-purple-400' },
+    green: { bg: 'bg-green-600/20', text: 'text-green-400' },
+    orange: { bg: 'bg-orange-600/20', text: 'text-orange-400' }
+  };
+  const c = colorMap[color] || colorMap.indigo;
+
+  return (
+    <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
+      <div className="flex items-center gap-3 mb-4">
+        <div className={`w-10 h-10 rounded-lg ${c.bg} flex items-center justify-center`}>
+          <span className={`${c.text} font-bold text-xs`}>{initials}</span>
+        </div>
+        <div>
+          <h3 className="text-base font-medium text-white">{title}</h3>
+          <p className="text-sm text-zinc-500">{subtitle}</p>
+        </div>
+      </div>
+      <div className="ml-[52px]">
+        {children}
+        {actionLabel && actionUrl && (
+          <p className="text-xs text-zinc-600 mt-3">
+            <a href={actionUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 transition-colors">
+              {actionLabel} &rarr;
+            </a>
+          </p>
+        )}
+      </div>
     </div>
   );
 }

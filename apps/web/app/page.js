@@ -2,6 +2,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import Image from 'next/image';
 
 export default function Home() {
   const [inputValue, setInputValue] = useState('');
@@ -98,7 +99,15 @@ export default function Home() {
     if (!token) {
       setUser(null);
     } else {
-      setUser({ id: 'demo-user-id', email: 'demo@example.com' });
+      // Decode JWT to extract user info from the token payload
+      try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        setUser({ id: payload.userId, email: payload.email, name: payload.sub });
+      } catch {
+        // Invalid token format — clear it
+        localStorage.removeItem('auth_token');
+        setUser(null);
+      }
     }
 
     try {
@@ -166,30 +175,14 @@ export default function Home() {
     }
   };
 
-  const handleLogin = async () => {
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'demo@example.com', password: 'password' })
-      });
-      
-      const data = await res.json();
-      
-      if (data.token) {
-        setUser({ id: 'demo-user-id', email: 'demo@example.com' });
-        localStorage.setItem('auth_token', data.token);
-        
-        await getModelsFromStorage();
-      }
-    } catch (loginError) {
-      console.debug('Login error:', loginError.message);
-    }
-  };
-
   const sendMessage = async (e) => {
     e?.preventDefault();
     if (!inputValue.trim() || isLoading) return;
+
+    if (!user) {
+      setAuthModalOpen(true);
+      return;
+    }
 
     const userMessage = {
       id: Date.now().toString(),
@@ -327,7 +320,71 @@ export default function Home() {
     }
   };
 
+  const fileInputRef = useRef(null);
   const [files, setFiles] = useState([]);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState('signin');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authConfirmPassword, setAuthConfirmPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+
+  const handleSignOut = () => {
+    localStorage.removeItem('auth_token');
+    setUser(null);
+    setMessages([]);
+    setCurrentChatId(null);
+    setChatList([]);
+    setUserMenuOpen(false);
+  };
+
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+
+    if (!authEmail.trim() || !authPassword) {
+      setAuthError('Email and password are required.');
+      return;
+    }
+    if (authMode === 'register' && authPassword !== authConfirmPassword) {
+      setAuthError('Passwords do not match.');
+      return;
+    }
+    if (authMode === 'register' && authPassword.length < 8) {
+      setAuthError('Password must be at least 8 characters.');
+      return;
+    }
+
+    setAuthSubmitting(true);
+    try {
+      const endpoint = authMode === 'signin' ? '/api/auth/login' : '/api/auth/register';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: authEmail.trim(), password: authPassword })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error?.message || 'Authentication failed.');
+
+      if (data.token) {
+        localStorage.setItem('auth_token', data.token);
+        const payload = JSON.parse(atob(data.token.split('.')[1]));
+        setUser({ id: payload.userId, email: payload.email, name: payload.sub });
+        setAuthModalOpen(false);
+        setAuthEmail('');
+        setAuthPassword('');
+        setAuthConfirmPassword('');
+        await getModelsFromStorage();
+        loadChats();
+      }
+    } catch (err) {
+      setAuthError(err.message);
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
 
   const handleFileSelect = (e) => {
     const selectedFiles = Array.from(e.target.files);
@@ -337,7 +394,34 @@ export default function Home() {
   return (
     <div className="flex h-screen bg-zinc-950 text-white overflow-hidden">
       {/* LEFT SIDEBAR */}
-      <aside className={`w-[260px] flex-shrink-0 flex flex-col border-r border-zinc-800/40 bg-zinc-900 hidden md:flex`}>
+      <aside className={`w-[260px] flex-shrink-0 flex flex-col border-r border-zinc-800/40 bg-zinc-900 hidden md:flex`}>        {/* Aurora Logo — static brand */}
+        <div className="px-3 pt-3 pb-2 border-b border-zinc-800/40">
+          <div className="w-full flex items-center gap-3 px-3 py-2.5">
+            <svg className="w-10 h-10 flex-shrink-0" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+              <defs>
+                <linearGradient id="aurora-stroke" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#818cf8" />
+                  <stop offset="100%" stopColor="#c084fc" />
+                </linearGradient>
+                <linearGradient id="aurora-stroke-2" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#a78bfa" />
+                  <stop offset="100%" stopColor="#e879f9" />
+                </linearGradient>
+                <linearGradient id="aurora-stroke-3" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#c4b5fd" />
+                  <stop offset="100%" stopColor="#f0abfc" />
+                </linearGradient>
+              </defs>
+              <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-stroke)" strokeWidth="1.5" opacity="0.9" />
+              <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-stroke-2)" strokeWidth="1.5" opacity="0.7" />
+              <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-stroke-3)" strokeWidth="1.5" opacity="0.5" />
+            </svg>
+            <div className="flex-1 text-left min-w-0">
+              <p className="text-sm font-semibold text-white tracking-tight">Aurora</p>
+              <p className="text-[10px] text-zinc-500 truncate">Multi-model Gateway</p>
+            </div>
+          </div>
+        </div>
         <div className="flex-1 overflow-y-auto py-3">
           <button 
             onClick={newChat} 
@@ -369,36 +453,53 @@ export default function Home() {
               ))
             )}
           </nav>
-
-          <div className="my-2 border-t border-zinc-800/40"></div>
-
-          <div className="space-y-[calc(0.75rem+3px)]">
-            <a href="/settings" className="flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20 transition-colors">
-              Settings
-            </a>
-            <a href="/library" className="flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20 transition-colors">
-              Library
-            </a>
-          </div>
         </div>
 
         <div className="p-4 border-t border-zinc-800/40">
           {!user ? (
-            <button 
-              onClick={handleLogin}
-              className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-500 transition-colors"
+            <button
+              onClick={() => setAuthModalOpen(true)}
+              className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-500 transition-colors flex items-center justify-center"
             >
-              Sign in with demo credentials
+              Sign In
             </button>
           ) : (
-            <div className="flex items-center gap-3 px-2 py-2 rounded-lg bg-zinc-800/50">
-              <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-medium">
-                {user.name?.[0] || user.email[0].toUpperCase()}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{user.name || user.email}</p>
-                <p className="text-xs text-zinc-500">Free Plan</p>
-              </div>
+            <div className="relative">
+              <button
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                className="w-full flex items-center gap-3 px-2 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-700/50 transition-colors"
+              >
+                <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-medium">
+                  {user.name?.[0] || user.email[0].toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0 text-left">
+                  <p className="text-sm font-medium truncate">{user.name || user.email}</p>
+                  <p className="text-xs text-zinc-500">Free Plan</p>
+                </div>
+                <svg className={`w-4 h-4 text-zinc-500 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+              </button>
+
+              {/* Drop-up Menu */}
+              {userMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setUserMenuOpen(false)} />
+                  <div className="absolute bottom-full left-0 right-0 mb-1 bg-zinc-850 border border-zinc-700/50 rounded-xl shadow-2xl z-20 py-1.5 overflow-hidden">
+                    <a href="/settings" className="flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors" onClick={() => setUserMenuOpen(false)}>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                      Settings
+                    </a>
+                    <a href="/docs" className="flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors" onClick={() => setUserMenuOpen(false)}>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
+                      Documentation
+                    </a>
+                    <div className="border-t border-zinc-700/30 my-1.5" />
+                    <button onClick={handleSignOut} className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-red-400 hover:bg-red-950/20 hover:text-red-300 transition-colors">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+                      Sign Out
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -418,48 +519,83 @@ export default function Home() {
         {/* Header with model selector */}
         <header className="fixed top-0 left-26 right-0 h-[50px] bg-zinc-950/80 backdrop-blur-md border-b border-zinc-800/40 flex items-center justify-between px-3 z-40">
           <div className="flex items-center gap-2 md:hidden">
-            <div className="w-7 h-7 rounded bg-indigo-600 flex items-center justify-center">
-              <span className="text-white font-bold text-xs">A</span>
-            </div>
+            <svg className="w-6 h-6 flex-shrink-0" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+              <defs>
+                <linearGradient id="aurora-stroke-mobile" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#818cf8" />
+                  <stop offset="100%" stopColor="#c084fc" />
+                </linearGradient>
+                <linearGradient id="aurora-stroke-2-mobile" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#a78bfa" />
+                  <stop offset="100%" stopColor="#e879f9" />
+                </linearGradient>
+                <linearGradient id="aurora-stroke-3-mobile" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#c4b5fd" />
+                  <stop offset="100%" stopColor="#f0abfc" />
+                </linearGradient>
+              </defs>
+              <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-stroke-mobile)" strokeWidth="1.5" opacity="0.9" />
+              <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-stroke-2-mobile)" strokeWidth="1.5" opacity="0.7" />
+              <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-stroke-3-mobile)" strokeWidth="1.5" opacity="0.5" />
+            </svg>
             <span className="font-semibold text-zinc-100">Aurora</span>
           </div>
 
-          <div className="flex items-center gap-2 flex-1 md:flex-[2]">
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={isLoading}
-              className={`flex-1 px-3 py-1.5 rounded text-xs border transition-colors cursor-pointer max-w-full disabled:cursor-not-allowed disabled:opacity-50 ${
-                availableModels.find(m => m.id === model)?.source === 'OpenAI' 
-                  ? 'bg-green-900/20 border-green-700/40 text-green-200' 
-                  : availableModels.find(m => m.id === model)?.source === 'Anthropic'
-                    ? 'bg-purple-900/20 border-purple-700/40 text-purple-200'
-                    : availableModels.find(m => m.id === model)?.source === 'Ollama'
-                      ? 'bg-green-800/40 border-green-600/40 text-green-200'
-                      : 'bg-orange-900/20 border-orange-700/40 text-orange-200'
-              }`}>
-              {modelsLoading ? (
-                <option value="">Loading models...</option>
-              ) : availableModels.length === 0 ? (
-                <option value="">No models — check Settings</option>
-              ) : (
-                availableModels.map(m => (
-                  <option key={m.id} value={m.id}>{m.name || m.id}</option>
-                ))
-              )}
-            </select>
-          </div>
+          {user && (
+            <div className="flex items-center gap-2 flex-1 md:flex-[2]">
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                disabled={isLoading}
+                className={`flex-1 px-3 py-1.5 rounded text-xs border transition-colors cursor-pointer max-w-full disabled:cursor-not-allowed disabled:opacity-50 ${
+                  availableModels.find(m => m.id === model)?.source === 'OpenAI' 
+                    ? 'bg-green-900/20 border-green-700/40 text-green-200' 
+                    : availableModels.find(m => m.id === model)?.source === 'Anthropic'
+                      ? 'bg-purple-900/20 border-purple-700/40 text-purple-200'
+                      : availableModels.find(m => m.id === model)?.source === 'Ollama'
+                        ? 'bg-green-800/40 border-green-600/40 text-green-200'
+                        : 'bg-orange-900/20 border-orange-700/40 text-orange-200'
+                }`}>
+                {modelsLoading ? (
+                  <option value="">Loading models...</option>
+                ) : availableModels.length === 0 ? (
+                  <option value="">No models — check Settings</option>
+                ) : (
+                  availableModels.map(m => (
+                    <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                  ))
+                )}
+              </select>
+            </div>
+          )}
 
           <div className="hidden md:flex items-center gap-2 flex-shrink-0">
-            <select
-              value={providerId}
-              onChange={(e) => setProviderId(e.target.value)}
-              className="px-3 py-1.5 bg-zinc-800/60 border border-zinc-700 rounded text-xs text-zinc-300 hover:bg-zinc-700 transition-colors cursor-pointer"
-            >
-              <option value="openai">OpenAI</option>
-              <option value="ollama">Ollama</option>
-              <option value="lmstudio">LM Studio</option>
-            </select>
+            {user ? (
+              <select
+                value={providerId}
+                onChange={(e) => setProviderId(e.target.value)}
+                className="px-3 py-1.5 bg-zinc-800/60 border border-zinc-700 rounded text-xs text-zinc-300 hover:bg-zinc-700 transition-colors cursor-pointer"
+              >
+                <option value="openai">OpenAI</option>
+                <option value="ollama">Ollama</option>
+                <option value="lmstudio">LM Studio</option>
+              </select>
+            ) : (
+              <>
+                <button
+                  onClick={() => setAuthModalOpen(true)}
+                  className="px-4 py-1.5 text-xs font-medium text-zinc-300 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors"
+                >
+                  Log in
+                </button>
+                <button
+                  onClick={() => { setAuthMode('register'); setAuthModalOpen(true); }}
+                  className="px-4 py-1.5 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-500 transition-colors"
+                >
+                  Sign up
+                </button>
+              </>
+            )}
           </div>
         </header>
 
@@ -558,15 +694,17 @@ export default function Home() {
 
             <div className="relative bg-zinc-800/60 border border-zinc-700/40 rounded-2xl shadow-lg overflow-hidden focus-within:ring-2 focus-within:ring-indigo-600/30 transition-all flex flex-col">
               <input
+                ref={fileInputRef}
                 type="file"
                 multiple
                 onChange={handleFileSelect}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                title="Upload files (vision support coming soon)"
+                className="hidden"
+                title="Upload files"
               />
               
               <button 
-                type="button" 
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
                 className="absolute left-3 top-1/2 -translate-y-1/2 p-1.5 text-zinc-400 hover:text-zinc-200 rounded-lg hover:bg-zinc-700/50 transition-colors"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -580,10 +718,10 @@ export default function Home() {
                 onKeyPress={handleKeyPress}
                 placeholder="Type your message..."
                 className={`w-full min-h-[48px] max-h-[180px] pl-14 pr-40 py-3 bg-transparent text-zinc-100 placeholder:text-zinc-500 resize-none focus:outline-none text-base leading-relaxed scrollbar-thin scrollbar-thumb-zinc-600 scrollbar-track-transparent transition-opacity ${
-                  !user || isLoading ? 'opacity-50 cursor-not-allowed' : ''
+                  isLoading ? 'opacity-50 cursor-not-allowed' : ''
                 }`}
                 rows={1}
-                disabled={!user || isLoading}
+                disabled={isLoading}
               />
 
               {inputValue && (
@@ -600,8 +738,8 @@ export default function Home() {
 
               <button 
                 type="submit" 
-                disabled={!inputValue.trim() || isLoading || !user}
-                className={`absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-xl transition-all flex items-center justify-center ${!inputValue.trim() || isLoading || !user ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-500'}`}
+                disabled={!inputValue.trim() || isLoading}
+                className={`absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-xl transition-all flex items-center justify-center ${!inputValue.trim() || isLoading ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-500'}`}
               >
                 {isLoading || isThinking ? (
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
@@ -665,6 +803,147 @@ export default function Home() {
           <span className="text-[10px]">Library</span>
         </button>
       </nav>
+
+      {/* Auth Modal Overlay */}
+      {authModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => { setAuthModalOpen(false); setAuthError(''); }}
+          />
+
+          <div className="relative bg-zinc-900 border border-zinc-700/50 rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+            <div className="flex border-b border-zinc-800/40">
+              <button
+                onClick={() => { setAuthMode('signin'); setAuthError(''); }}
+                className={`flex-1 py-3.5 text-sm font-medium transition-colors relative ${
+                  authMode === 'signin' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Sign In
+                {authMode === 'signin' && (
+                  <span className="absolute bottom-0 left-1/4 right-1/4 h-0.5 bg-indigo-500 rounded-full" />
+                )}
+              </button>
+              <button
+                onClick={() => { setAuthMode('register'); setAuthError(''); }}
+                className={`flex-1 py-3.5 text-sm font-medium transition-colors relative ${
+                  authMode === 'register' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Create Account
+                {authMode === 'register' && (
+                  <span className="absolute bottom-0 left-1/4 right-1/4 h-0.5 bg-indigo-500 rounded-full" />
+                )}
+              </button>
+              <button
+                onClick={() => { setAuthModalOpen(false); setAuthError(''); }}
+                className="px-4 py-3.5 text-zinc-500 hover:text-zinc-300 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+
+            <form onSubmit={handleAuthSubmit} className="p-6 space-y-4">
+              <div>
+                <label htmlFor="auth-email" className="block text-xs font-medium text-zinc-400 mb-1.5">
+                  Email address
+                </label>
+                <input
+                  id="auth-email"
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                  className="w-full bg-zinc-800 border border-zinc-700/50 rounded-xl px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-600/30 focus:border-indigo-500 transition-all"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="auth-password" className="block text-xs font-medium text-zinc-400 mb-1.5">
+                  Password
+                </label>
+                <input
+                  id="auth-password"
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder={authMode === 'register' ? 'At least 8 characters' : 'Enter your password'}
+                  autoComplete={authMode === 'signin' ? 'current-password' : 'new-password'}
+                  className="w-full bg-zinc-800 border border-zinc-700/50 rounded-xl px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-600/30 focus:border-indigo-500 transition-all"
+                />
+              </div>
+
+              {authMode === 'register' && (
+                <div>
+                  <label htmlFor="auth-confirm" className="block text-xs font-medium text-zinc-400 mb-1.5">
+                    Confirm password
+                  </label>
+                  <input
+                    id="auth-confirm"
+                    type="password"
+                    value={authConfirmPassword}
+                    onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                    placeholder="Re-enter your password"
+                    autoComplete="new-password"
+                    className="w-full bg-zinc-800 border border-zinc-700/50 rounded-xl px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-600/30 focus:border-indigo-500 transition-all"
+                  />
+                </div>
+              )}
+
+              {authError && (
+                <div className="bg-red-950/30 border border-red-900/30 rounded-lg p-3 flex items-start gap-2">
+                  <svg className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <p className="text-sm text-red-400">{authError}</p>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authSubmitting}
+                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl py-3 text-sm font-medium transition-colors flex items-center justify-center gap-2"
+              >
+                {authSubmitting ? (
+                  <>
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Processing...
+                  </>
+                ) : authMode === 'signin' ? (
+                  'Sign In'
+                ) : (
+                  'Create Account'
+                )}
+              </button>
+            </form>
+
+            <div className="px-6 pb-5 text-center">
+              <p className="text-xs text-zinc-600">
+                {authMode === 'signin' ? (
+                  <>
+                    Don&apos;t have an account?{' '}
+                    <button onClick={() => { setAuthMode('register'); setAuthError(''); }} className="text-indigo-400 hover:text-indigo-300 transition-colors">
+                      Create one
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    Already have an account?{' '}
+                    <button onClick={() => { setAuthMode('signin'); setAuthError(''); }} className="text-indigo-400 hover:text-indigo-300 transition-colors">
+                      Sign in
+                    </button>
+                  </>
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
