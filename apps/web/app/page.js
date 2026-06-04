@@ -541,44 +541,23 @@ export default function Home() {
             <span className="font-semibold text-zinc-100">Aurora</span>
           </div>
 
-          {user && (
-            <div className="flex items-center gap-2 flex-1 md:flex-[2]">
+          <div className="hidden md:flex items-center gap-2 flex-shrink-0">
+            {user ? (
               <select
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 disabled={isLoading}
-                className={`flex-1 px-3 py-1.5 rounded text-xs border transition-colors cursor-pointer max-w-full disabled:cursor-not-allowed disabled:opacity-50 ${
-                  availableModels.find(m => m.id === model)?.source === 'OpenAI' 
-                    ? 'bg-green-900/20 border-green-700/40 text-green-200' 
-                    : availableModels.find(m => m.id === model)?.source === 'Anthropic'
-                      ? 'bg-purple-900/20 border-purple-700/40 text-purple-200'
-                      : availableModels.find(m => m.id === model)?.source === 'Ollama'
-                        ? 'bg-green-800/40 border-green-600/40 text-green-200'
-                        : 'bg-orange-900/20 border-orange-700/40 text-orange-200'
-                }`}>
+                className="px-3 py-1.5 bg-zinc-800/50 border border-zinc-700/40 rounded-lg text-xs text-zinc-200 hover:bg-zinc-700/50 transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 appearance-none pr-7 bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23a1a1aa%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_8px_center]"
+              >
                 {modelsLoading ? (
-                  <option value="">Loading models...</option>
+                  <option value="">Loading...</option>
                 ) : availableModels.length === 0 ? (
-                  <option value="">No models — check Settings</option>
+                  <option value="">No models</option>
                 ) : (
                   availableModels.map(m => (
                     <option key={m.id} value={m.id}>{m.name || m.id}</option>
                   ))
                 )}
-              </select>
-            </div>
-          )}
-
-          <div className="hidden md:flex items-center gap-2 flex-shrink-0">
-            {user ? (
-              <select
-                value={providerId}
-                onChange={(e) => setProviderId(e.target.value)}
-                className="px-3 py-1.5 bg-zinc-800/60 border border-zinc-700 rounded text-xs text-zinc-300 hover:bg-zinc-700 transition-colors cursor-pointer"
-              >
-                <option value="openai">OpenAI</option>
-                <option value="ollama">Ollama</option>
-                <option value="lmstudio">LM Studio</option>
               </select>
             ) : (
               <>

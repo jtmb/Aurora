@@ -16,8 +16,10 @@ export class AuthHandler {
     // Token lifetime: 24 hours (can be configured)
     this.tokenLifetimeMinutes = options.tokenLifetimeMinutes ?? 1440;
     
+    // Fallback for development — always set JWT_SECRET in production
     if (!this.jwtSecret) {
-      throw new Error('JWT_SECRET environment variable must be set');
+      console.warn('JWT_SECRET not set — using insecure fallback for development only');
+      this.jwtSecret = 'aurora-dev-secret-change-in-production-minimum-32-chars';
     }
   }
 
