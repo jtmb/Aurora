@@ -1,138 +1,106 @@
-// @aurora/auth-service - Session Manager
-// Manages user sessions, token refresh, and concurrent request limiting
+// @aurora/auth-service - Session Manager (Redis-backed)
+// Manages user sessions with Redis persistence and native TTL.
+// Falls back to in-memory Map if Redis is unavailable.
 
-/**
- * SessionManager
- * Handles session lifecycle for authenticated users
- */
+import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
+import { KEYS, TTL } from '@aurora/shared/redis-keys';
+
 export class SessionManager {
   constructor(options = {}) {
     this.maxConcurrentSessions = options.maxConcurrentSessions ?? 10;
-    this.sessionTtlMinutes = options.sessionTtlMinutes ?? 2880; // 30 days default
-    
-    // In production: Use Redis or database for session storage
-    // For now: Use in-memory store (clear on restart)
+    this.sessionTtlMinutes = options.sessionTtlMinutes ?? 2880;
+    this.sessionTtlSeconds = this.sessionTtlMinutes * 60;
     this.sessions = new Map();
-    
-    // Track concurrent requests per session
-    this.requestCounters = new Map();
   }
 
-  /**
-   * Create a new session for authenticated user
-   */
-  async createSession(token) {
-    const sessionKey = `session:${token}`;
-    
-    if (this.sessions.has(sessionKey)) {
-      // Session already exists - rotate tokens
-      return this.rotateToken(sessionKey);
-    }
+  _getStorage() {
+    return isRedisAvailable() ? 'redis' : 'memory';
+  }
 
-    // Create new session record
-    const sessionId = crypto.randomUUID();
-    this.sessions.set(sessionKey, {
-      id: sessionId,
+  async createSession(token, userId) {
+    const sessionKey = KEYS.SESSION(token);
+    const sessionData = {
+      id: crypto.randomUUID(),
+      userId: userId || 'unknown',
       token,
-      createdAt: Date.now(),
-      lastAccessed: Date.now(),
+      createdAt: Date.now().toString(),
+      lastAccessed: Date.now().toString(),
       status: 'active'
-    });
+    };
 
-    return { sessionId };
+    if (this._getStorage() === 'redis') {
+      const redis = getRedis();
+      await redis.hset(sessionKey, sessionData);
+      await redis.expire(sessionKey, TTL.SESSION);
+    } else {
+      const mapKey = `session:${token}`;
+      if (this.sessions.has(mapKey)) return this.rotateToken(mapKey);
+      this.sessions.set(mapKey, sessionData);
+    }
+    return { sessionId: sessionData.id };
   }
 
-  /**
-   * Access session (update last accessed time)
-   */
   async accessSession(token) {
-    const key = `session:${token}`;
-    
-    const session = this.sessions.get(key);
-    if (!session) {
-      throw new Error('Session not found');
+    const sessionKey = KEYS.SESSION(token);
+    if (this._getStorage() === 'redis') {
+      const redis = getRedis();
+      const exists = await redis.exists(sessionKey);
+      if (!exists) throw new Error('Session not found');
+      await redis.hset(sessionKey, 'lastAccessed', Date.now().toString());
+      return true;
     }
-
+    const session = this.sessions.get(`session:${token}`);
+    if (!session) throw new Error('Session not found');
     session.lastAccessed = Date.now();
-    session.requestCounters.set(session.id, (session.requestCounters.get(session.id) || 0) + 1);
-
     return true;
   }
 
-  /**
-   * Delete expired sessions (called periodically in production)
-   */
   deleteExpiredSessions() {
+    if (this._getStorage() === 'redis') return 0;
     const now = Date.now();
     const ttlMs = this.sessionTtlMinutes * 60 * 1000;
-
     for (const [key, session] of this.sessions.entries()) {
-      if (now - session.createdAt > ttlMs || 
-          (session.status === 'expired')) {
+      if (now - parseInt(session.createdAt) > ttlMs || session.status === 'expired') {
         this.sessions.delete(key);
       }
     }
-
     return this.sessions.size;
   }
 
-  /**
-   * Rotate token (invalidate old, create new)
-   */
-  async rotateToken(sessionKey) {
-    // Get original session
-    const original = this.sessions.get(sessionKey);
-    if (!original) return null;
-
-    // Create new session with same ID for continuity
-    const newSession = { ...original };
-    newSession.token = crypto.randomUUID();
-    newSession.createdAt = Date.now();
-    newSession.lastAccessed = Date.now();
+  async rotateToken(oldToken) {
+    const oldKey = KEYS.SESSION(oldToken);
+    let sessionData;
+    if (this._getStorage() === 'redis') {
+      const redis = getRedis();
+      sessionData = await redis.hgetall(oldKey);
+      if (!sessionData || Object.keys(sessionData).length === 0) return null;
+    } else {
+      sessionData = this.sessions.get(`session:${oldToken}`);
+      if (!sessionData) return null;
+    }
     
-    this.sessions.set(sessionKey, newSession);
-
-    // In production: Store old token in Redis with TTL for graceful rotation
-    return {
-      sessionId: newSession.id,
-      newToken: newSession.token
-    };
+    const newToken = crypto.randomUUID();
+    const newSession = { ...sessionData, token: newToken, createdAt: Date.now().toString(), lastAccessed: Date.now().toString() };
+    
+    if (this._getStorage() === 'redis') {
+      const redis = getRedis();
+      const newKey = KEYS.SESSION(newToken);
+      await redis.hset(newKey, newSession);
+      await redis.expire(newKey, TTL.SESSION);
+      await redis.expire(oldKey, TTL.TOKEN_GRACE);
+    } else {
+      this.sessions.set(`session:${newToken}`, newSession);
+    }
+    return { sessionId: newSession.id, newToken };
   }
 
-  /**
-   * Check if session has exceeded concurrent request limit
-   */
-  async checkConcurrentLimit(sessionId) {
-    const key = `session:${sessionId}`;
-    const sessionsEntry = this.sessions.get(key);
-
-    if (!sessionsEntry || !this.requestCounters.has(sessionsEntry.id)) {
-      return false; // No concurrent limit for first request
+  async invalidateSession(token) {
+    const sessionKey = KEYS.SESSION(token);
+    if (this._getStorage() === 'redis') {
+      await getRedis().del(sessionKey);
+    } else {
+      this.sessions.delete(`session:${token}`);
     }
-
-    const currentCount = this.requestCounters.get(sessionsEntry.id);
-    
-    // Allow burst of 2 requests within TTL window, then enforce limit
-    if (currentCount > 1 && currentCount >= this.maxConcurrentSessions) {
-      return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * Cleanup session counters periodically
-   */
-  cleanupOldRequests() {
-    const now = Date.now();
-    const windowMs = 30 * 60 * 1000; // Keep for 30 mins
-
-    for (const [sessionId, count] of this.requestCounters.entries()) {
-      if (now - sessionId.timestamp > windowMs) {
-        this.requestCounters.delete(sessionId);
-      }
-    }
+    return true;
   }
 }
-
-export default SessionManager;

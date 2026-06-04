@@ -5,10 +5,17 @@
   "exports": {
     ".": "./src/index.js",
     "./handlers": "./src/handlers/index.js",
-    "./routes": "./src/routes/index.js"
+    "./routes": "./src/routes/index.js",
+    "./handlers/auth-handler": "./src/handlers/auth-handler.js",
+    "./handlers/session-manager": "./src/handlers/session-manager.js",
+    "./handlers/api-key-manager": "./src/handlers/api-key-manager.js"
   },
   "files": [
     "src/**/*.js"
   ],
-  "dependencies": {}
+  "dependencies": {
+    "@aurora/shared": "*",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^3.0.3"
+  }
 }

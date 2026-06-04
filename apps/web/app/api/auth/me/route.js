@@ -1,11 +1,12 @@
-// @aurora/api/auth/me - Get current user info endpoint
+// @aurora/api/auth/me - Get current user (real JWT verify, Redis-backed)
 
 import { NextResponse } from 'next/server';
+import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
+import { KEYS } from '@aurora/shared/redis-keys';
+import { AuthHandler } from '@aurora/auth-service/handlers';
 
-/**
- * Get current authenticated user
- * Extracts userId from Authorization header token
- */
+const authHandler = new AuthHandler();
+
 export async function GET(request) {
   try {
     const authHeader = request.headers.get('Authorization') || '';
@@ -18,20 +19,31 @@ export async function GET(request) {
     }
 
     const token = authHeader.substring(7);
-
-    // Parse user info from token (token is base64 encoded JSON)
-    let userInfo;
+    let decoded;
+    
     try {
-      userInfo = JSON.parse(Buffer.from(token).toString('utf8'));
+      decoded = authHandler.verifyToken(token);
     } catch {
       return NextResponse.json(
-        { error: { message: 'Invalid authentication token' } },
+        { error: { message: 'Invalid or expired token' } },
         { status: 401 }
       );
     }
 
-    // Fetch user details from database
-    const user = await getUserById(userInfo.userId);
+    const userId = decoded.userId;
+    
+    // Try Redis first
+    let user = null;
+    if (isRedisAvailable()) {
+      const redis = getRedis();
+      user = await redis.hgetall(KEYS.USER_BY_ID(userId));
+      if (!user || Object.keys(user).length === 0) user = null;
+    }
+    
+    // Fallback: demo user (works without Redis)
+    if (!user && userId === 'demo-user-id') {
+      user = { id: 'demo-user-id', email: 'demo@example.com', name: 'Demo User', role: 'user' };
+    }
 
     if (!user) {
       return NextResponse.json(
@@ -43,8 +55,8 @@ export async function GET(request) {
     return NextResponse.json({
       id: user.id,
       email: user.email,
-      name: user.name,
-      role: user.role
+      name: user.name || null,
+      role: user.role || 'user'
     });
 
   } catch (error) {
@@ -56,24 +68,6 @@ export async function GET(request) {
   }
 }
 
-/**
- * Get user from database
- */
-async function getUserById(userId) {
-  try {
-    // In production, use: const user = await db.user.findUnique({ where: { id: userId } })
-    return {
-      id: userId,
-      email: '',
-      name: null,
-      role: 'user'
-    };
-  } catch (error) {
-    console.error('User lookup error:', error);
-    return null;
-  }
-}
-
-export async function POST(request) {
+export async function POST() {
   return NextResponse.json({});
 }

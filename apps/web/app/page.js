@@ -1,7 +1,7 @@
 // @aurora/web - Main Chat Page with streaming, thinking process, and vision support
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 export default function Home() {
   const [inputValue, setInputValue] = useState('');
@@ -9,10 +9,14 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [model, setModel] = useState('llama3');
   const [availableModels, setAvailableModels] = useState([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
   const [user, setUser] = useState(null);
   const [providerId, setProviderId] = useState('openai');
   const [thoughtProcess, setThoughtProcess] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [currentChatId, setCurrentChatId] = useState(null);
+  const [chatList, setChatList] = useState([]);
+  const [errorMessage, setErrorMessage] = useState('');
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -23,11 +27,16 @@ export default function Home() {
 
   // Initialize app: check auth and load models on mount
   useEffect(() => {
-    checkAuth();
+    const init = async () => {
+      await checkAuth();
+      setModelsLoading(false);
+    };
+    init();
   }, []);
 
   // Check for API keys in localStorage and fetch models if available
   const getModelsFromStorage = async () => {
+    setModelsLoading(true);
     try {
       // Build headers with any available API keys from localStorage
       const headers = {};
@@ -41,47 +50,45 @@ export default function Home() {
       if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
       if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
 
-      // Try the models API first (works with API keys)
-      const modelsRes = await fetch('/api/providers/models', { headers });
-      
-      if (modelsRes.ok) {
-        const modelsData = await modelsRes.json();
-        if (modelsData.models && modelsData.models.length > 0) {
-          setAvailableModels(modelsData.models);
-          // Set default model from available
-          const defaultModel = modelsData.models[0];
-          setModel(defaultModel.id);
-          setProviderId(defaultModel.source === 'Ollama' ? 'ollama' : defaultModel.source === 'Anthropic' ? 'anthropic' : 'openai');
-          return;
-        }
-      }
+      // Try the models API with a 10-second timeout (prevents hung Ollama from freezing UI)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-      // Fallback: try Ollama directly on localhost
-      const ollamaBaseUrl = ollamaBase || 'http://localhost:11434';
       try {
-        const ollamaRes = await fetch(`${ollamaBaseUrl}/api/tags`);
-        if (ollamaRes.ok) {
-          const data = await ollamaRes.json();
-          const ollamaModels = (data.models || []).map(m => ({
-            id: m.name, name: m.name, owned_by: 'ollama', source: 'Ollama'
-          }));
-          if (ollamaModels.length > 0) {
-            setAvailableModels(ollamaModels);
-            setModel(ollamaModels[0].id);
-            setProviderId('ollama');
+        const modelsRes = await fetch('/api/providers/models', { 
+          headers, 
+          signal: controller.signal 
+        });
+        clearTimeout(timeoutId);
+        
+        if (modelsRes.ok) {
+          const modelsData = await modelsRes.json();
+          if (modelsData.models && modelsData.models.length > 0) {
+            setAvailableModels(modelsData.models);
+            const defaultModel = modelsData.models[0];
+            setModel(defaultModel.id);
+            setProviderId(
+              defaultModel.source === 'Ollama' ? 'ollama' 
+              : defaultModel.source === 'Anthropic' ? 'anthropic' 
+              : defaultModel.source === 'LM Studio' ? 'lmstudio'
+              : 'openai'
+            );
             return;
           }
         }
-      } catch (ollamaErr) {
-        console.debug('Ollama fallback failed:', ollamaErr.message);
+      } catch (fetchErr) {
+        clearTimeout(timeoutId);
+        console.error('Models API fetch failed:', fetchErr.message);
       }
 
-      // No models found anywhere
+      // No models found — API route already tries all providers including Ollama
       setAvailableModels([]);
 
     } catch (error) {
-      console.debug('Fetch models error:', error.message);
+      console.error('Fetch models error:', error.message);
       setAvailableModels([]);
+    } finally {
+      setModelsLoading(false);
     }
   };
 
@@ -98,6 +105,64 @@ export default function Home() {
       await getModelsFromStorage();
     } catch (modelError) {
       console.debug('Failed to fetch models:', modelError.message);
+    }
+
+    // Load existing chats
+    loadChats();
+  };
+
+  const loadChats = async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) return;
+      const res = await fetch('/api/chats', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setChatList(data.chats || []);
+      }
+    } catch (e) {
+      console.debug('Load chats error:', e.message);
+    }
+  };
+
+  const newChat = async () => {
+    setMessages([]);
+    setInputValue('');
+    setCurrentChatId(null);
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) return;
+      const res = await fetch('/api/chats', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'New Chat', model })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCurrentChatId(data.id);
+        loadChats();
+      }
+    } catch (e) {
+      console.debug('New chat error:', e.message);
+    }
+  };
+
+  const openChat = async (chatId) => {
+    setCurrentChatId(chatId);
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) return;
+      const res = await fetch(`/api/chats/${chatId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMessages(data.messages || []);
+      }
+    } catch (e) {
+      console.debug('Open chat error:', e.message);
     }
   };
 
@@ -137,6 +202,41 @@ export default function Home() {
     setInputValue('');
     setIsLoading(true);
     setThoughtProcess([]);
+
+    // Auto-create a chat if none is active
+    let chatId = currentChatId;
+    if (!chatId) {
+      try {
+        const token = localStorage.getItem('auth_token');
+        if (token) {
+          const chatRes = await fetch('/api/chats', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: inputValue.slice(0, 60), model })
+          });
+          if (chatRes.ok) {
+            const chatData = await chatRes.json();
+            chatId = chatData.id;
+            setCurrentChatId(chatId);
+            loadChats();
+          }
+        }
+      } catch {}
+    }
+
+    // Persist user message to chat
+    if (chatId) {
+      try {
+        const token = localStorage.getItem('auth_token');
+        if (token) {
+          await fetch(`/api/chats/${chatId}/messages`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ role: 'user', content: inputValue, model, provider: providerId })
+          });
+        }
+      } catch {}
+    }
 
     try {
       const messagesArray = [{ role: 'user', content: inputValue }];
@@ -197,8 +297,24 @@ export default function Home() {
 
       setMessages(prev => [...prev, assistantMessage]);
 
+      // Persist assistant message to chat
+      if (chatId && content) {
+        try {
+          const token = localStorage.getItem('auth_token');
+          if (token) {
+            await fetch(`/api/chats/${chatId}/messages`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ role: 'assistant', content, model: data.model || model, provider: providerId })
+            });
+          }
+        } catch {}
+      }
+
     } catch (error) {
       console.error('Chat error:', error.message);
+      setErrorMessage(error.message);
+      setTimeout(() => setErrorMessage(''), 5000);
     } finally {
       setIsLoading(false);
     }
@@ -224,8 +340,8 @@ export default function Home() {
       <aside className={`w-[260px] flex-shrink-0 flex flex-col border-r border-zinc-800/40 bg-zinc-900 hidden md:flex`}>
         <div className="flex-1 overflow-y-auto py-3">
           <button 
-            onClick={() => { setMessages([]); setInputValue(''); }} 
-            className={`w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm transition-colors ${!inputValue ? 'bg-indigo-600/10 text-white' : 'text-zinc-500 hover:text-zinc-200'}`}
+            onClick={newChat} 
+            className={`w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm transition-colors bg-indigo-600/10 text-white hover:bg-indigo-600/20`}
           >
             <span className="w-[1.2rem] h-[1.2rem] flex items-center justify-center rounded-full bg-indigo-600/80 shrink-0">+</span>
             New chat
@@ -234,18 +350,24 @@ export default function Home() {
           <div className="my-2 border-t border-zinc-800/40"></div>
 
           <nav className="space-y-[calc(0.75rem+3px)]">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <a 
-                key={i} 
-                href={`/chat/${i + 1}`} 
-                className="flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20 transition-colors"
-              >
-                <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
-                <div className="flex-1 min-w-0">
-                  <p className="truncate text-sm">Project Ideas</p>
-                </div>
-              </a>
-            ))}
+            {chatList.length === 0 ? (
+              <p className="px-4 py-2 text-xs text-zinc-600">No chats yet. Start a conversation!</p>
+            ) : (
+              chatList.map((chat) => (
+                <button
+                  key={chat.id}
+                  onClick={() => openChat(chat.id)}
+                  className={`w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors ${
+                    currentChatId === chat.id ? 'bg-indigo-600/15 text-white' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20'
+                  }`}
+                >
+                  <svg className="w-[1.2rem] h-[1.2rem] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
+                  <div className="flex-1 min-w-0">
+                    <p className="truncate text-sm">{chat.title || 'Chat'}</p>
+                  </div>
+                </button>
+              ))
+            )}
           </nav>
 
           <div className="my-2 border-t border-zinc-800/40"></div>
@@ -282,6 +404,15 @@ export default function Home() {
         </div>
       </aside>
 
+      {/* Error Toast */}
+      {errorMessage && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-red-900/90 border border-red-700/50 text-red-200 px-6 py-3 rounded-xl shadow-2xl text-sm flex items-center gap-2 animate-in slide-in-from-bottom-2">
+          <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          <span>{errorMessage}</span>
+          <button onClick={() => setErrorMessage('')} className="ml-2 hover:text-white flex-shrink-0">&times;</button>
+        </div>
+      )}
+
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Header with model selector */}
@@ -307,10 +438,15 @@ export default function Home() {
                       ? 'bg-green-800/40 border-green-600/40 text-green-200'
                       : 'bg-orange-900/20 border-orange-700/40 text-orange-200'
               }`}>
-              {availableModels.length === 0 && <option value="">Loading models...</option>}
-              {availableModels.map(m => (
-                <option key={m.id} value={m.id}>{m.name || m.id}</option>
-              ))}
+              {modelsLoading ? (
+                <option value="">Loading models...</option>
+              ) : availableModels.length === 0 ? (
+                <option value="">No models — check Settings</option>
+              ) : (
+                availableModels.map(m => (
+                  <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                ))
+              )}
             </select>
           </div>
 

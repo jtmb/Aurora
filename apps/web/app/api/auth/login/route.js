@@ -1,27 +1,15 @@
-// @aurora/api/auth/login - User authentication endpoint
+// @aurora/api/auth/login - User authentication (Redis-backed, real JWT)
 
 import { NextResponse } from 'next/server';
+import bcrypt from 'bcryptjs';
+import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
+import { KEYS } from '@aurora/shared/redis-keys';
+import { AuthHandler } from '@aurora/auth-service/handlers';
+import { SessionManager } from '@aurora/auth-service/handlers';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'default-jwt-secret-change-in-production';
-const JWT_EXPIRY_HOURS = parseInt(process.env.JWT_EXPIRY_HOURS) || 24;
+const authHandler = new AuthHandler();
+const sessionManager = new SessionManager();
 
-/**
- * Generate JWT token for user session
- */
-const generateToken = (email, userId) => {
-  return Buffer.from(JSON.stringify({ email, userId }))
-    .toString('base64')
-    .split('.')
-    .map(part => 
-      Buffer.from(
-        `${part}.${Date.now()}${Math.random().toString(16).slice(2, 8)}`.padEnd(30, '0')
-      ).toString('base64url')
-    ).join('.');
-};
-
-/**
- * Authenticate user and return JWT token
- */
 export async function POST(request) {
   try {
     const body = await request.json();
@@ -33,36 +21,50 @@ export async function POST(request) {
       );
     }
 
-    // In production, verify user exists in database
-    // For now, create or find user by email
-    let user = await findOrCreateUser(body.email);
-
-    // Verify password (in production, hash and compare with bcrypt)
-    const isPasswordValid = body.password === 'password' || validatePasswordHash(user.passwordHash, body.password);
-
-    if (!isPasswordValid) {
+    // Try Redis first, fall back to demo credentials for local dev
+    const redis = getRedis();
+    let user = null;
+    
+    if (isRedisAvailable()) {
+      user = await redis.hgetall(KEYS.USER_BY_EMAIL(body.email));
+      if (!user || Object.keys(user).length === 0) user = null;
+    }
+    
+    if (user) {
+      // Real user — verify password with bcrypt
+      const valid = await bcrypt.compare(body.password, user.hashedPassword);
+      if (!valid) {
+        return NextResponse.json(
+          { error: { message: 'Invalid credentials' } },
+          { status: 401 }
+        );
+      }
+    } else if (body.email === 'demo@example.com' && body.password === 'password') {
+      // Demo fallback — works without Redis
+      user = { id: 'demo-user-id', email: 'demo@example.com', name: 'Demo User', role: 'user' };
+    } else {
       return NextResponse.json(
         { error: { message: 'Invalid credentials' } },
         { status: 401 }
       );
     }
 
-    // Generate token
-    const expiresAt = new Date(Date.now() + JWT_EXPIRY_HOURS * 60 * 60 * 1000);
-    const token = generateToken(user.email, user.id);
+    // Generate real JWT using auth-service
+    const token = authHandler.signToken({
+      sub: user.email,
+      email: user.email,
+      userId: user.id,
+      roles: [user.role || 'user']
+    });
 
-    const response = NextResponse.json(
-      {
-        token,
-        expiresIn: JWT_EXPIRY_HOURS + 'h',
-        refreshToken: generateRefreshToken()
-      }
-    );
+    // Create session (Redis if available, in-memory fallback)
+    await sessionManager.createSession(token, user.id);
 
-    // Set refresh token cookie
-    response.headers.set('Set-Cookie', `refresh_token=${generateRefreshToken()}; Path=/; HttpOnly; Max-Age=${JWT_EXPIRY_HOURS * 60 * 60}`);
-
-    return response;
+    return NextResponse.json({
+      token,
+      expiresIn: '24h',
+      user: { id: user.id, email: user.email, name: user.name || null, role: user.role || 'user' }
+    });
 
   } catch (error) {
     console.error('Login error:', error);
@@ -73,56 +75,6 @@ export async function POST(request) {
   }
 }
 
-/**
- * Find or create user in database
- */
-async function findOrCreateUser(email) {
-  // In production, use Prisma client to query users table
-  // For now, return mock user
-  const existingUsers = [];
-  
-  try {
-    // Check if any user exists with this email
-    for (const user of existingUsers) {
-      if (user.email === email) {
-        return user;
-      }
-    }
-  } catch (error) {
-    console.error('User lookup error:', error);
-  }
-
-  // Create new user
-  const newUser = {
-    id: crypto.randomUUID(),
-    email,
-    passwordHash: 'placeholder',
-    createdAt: new Date()
-  };
-
-  return newUser;
-}
-
-/**
- * Validate password hash (simple implementation)
- */
-function validatePasswordHash(hash, plainPassword) {
-  // In production, use bcrypt.compare()
-  // For demo, check if passwords match or use dummy hashes
-  const validHashes = ['placeholder', '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8'];
-  return validHashes.includes(hash) && plainPassword === 'password';
-}
-
-/**
- * Generate refresh token
- */
-function generateRefreshToken() {
-  return Buffer.from(
-    JSON.stringify({ type: 'refresh', generatedAt: Date.now() })
-  ).toString('base64url');
-}
-
 export async function GET() {
-  // Placeholder for future functionality
-  return NextResponse.json({});
+  return NextResponse.json({ message: 'POST to /api/auth/login with {email, password}' });
 }

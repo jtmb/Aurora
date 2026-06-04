@@ -1,13 +1,1 @@
-{
-  "app": {
-    "[project]/apps/web/app/settings/page": [
-      "static/media/gyByhwUxId8gMEwcGFWNOITd.p.d06edde1.woff2"
-    ],
-    "[project]/apps/web/app/_not-found/page": [
-      "static/media/gyByhwUxId8gMEwcGFWNOITd.p.d06edde1.woff2"
-    ]
-  },
-  "appUsingSizeAdjust": false,
-  "pages": {},
-  "pagesUsingSizeAdjust": false
-}
+{"pages":{},"app":{},"appUsingSizeAdjust":false,"pagesUsingSizeAdjust":false}

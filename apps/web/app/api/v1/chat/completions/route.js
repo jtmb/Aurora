@@ -176,7 +176,10 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens)
       break;
 
     case 'lmstudio':
-      url = `${provider.baseUrl}/chat/completions`;
+      // LM Studio uses OpenAI-compatible /v1/chat/completions endpoint
+      // Ensure /v1 prefix regardless of whether settings already includes it
+      const lmBase = provider.baseUrl.endsWith('/v1') ? provider.baseUrl : `${provider.baseUrl}/v1`;
+      url = `${lmBase}/chat/completions`;
       body = { model, messages, temperature, max_tokens: maxTokens };
       break;
 

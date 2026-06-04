@@ -1,11 +1,14 @@
-// @aurora/api/auth/register - User registration endpoint
+// @aurora/api/auth/register - User registration (Redis-backed, real JWT)
 
 import { NextResponse } from 'next/server';
-import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
+import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
+import { KEYS } from '@aurora/shared/redis-keys';
+import { AuthHandler } from '@aurora/auth-service/handlers';
+import { seedDemoUser } from '@aurora/shared/seed';
 
-/**
- * Register new user
- */
+const authHandler = new AuthHandler();
+
 export async function POST(request) {
   try {
     const body = await request.json();
@@ -17,7 +20,6 @@ export async function POST(request) {
       );
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(body.email)) {
       return NextResponse.json(
@@ -26,7 +28,6 @@ export async function POST(request) {
       );
     }
 
-    // Validate password strength
     if (body.password.length < 8) {
       return NextResponse.json(
         { error: { message: 'Password must be at least 8 characters' } },
@@ -34,42 +35,46 @@ export async function POST(request) {
       );
     }
 
-    // Hash password with bcrypt-like implementation
-    const passwordHash = hashPassword(body.password);
-
-    // Check if user already exists
-    let existingUser = await getUserByEmail(body.email);
+    const redis = getRedis();
     
-    if (existingUser) {
-      return NextResponse.json(
-        { error: { message: 'User with this email already exists' } },
-        { status: 409 }
-      );
+    if (isRedisAvailable()) {
+      const exists = await redis.exists(KEYS.USER_BY_EMAIL(body.email));
+      if (exists) {
+        return NextResponse.json(
+          { error: { message: 'User with this email already exists' } },
+          { status: 409 }
+        );
+      }
     }
 
-    // Create new user
-    const newUser = {
-      id: crypto.randomUUID(),
+    // Create user
+    const userId = crypto.randomUUID();
+    const hashedPassword = await bcrypt.hash(body.password, 10);
+    
+    const userData = {
+      id: userId,
       email: body.email,
-      passwordHash,
-      name: null,
-      profileImage: null,
+      hashedPassword,
+      name: body.name || null,
       role: 'user',
-      createdAt: new Date()
+      createdAt: new Date().toISOString()
     };
 
-    await createUserInDatabase(newUser);
+    if (isRedisAvailable()) {
+      await redis.hset(KEYS.USER_BY_EMAIL(body.email), userData);
+      await redis.hset(KEYS.USER_BY_ID(userId), userData);
+    }
 
-    // Generate token for login
-    const token = Buffer.from(
-      JSON.stringify({ email: body.email, userId: newUser.id })
-    ).toString('base64url');
+    // Generate real JWT
+    const token = authHandler.signToken({
+      sub: body.email,
+      email: body.email,
+      userId,
+      roles: ['user']
+    });
 
     return NextResponse.json(
-      {
-        message: 'Registration successful',
-        token
-      },
+      { message: 'Registration successful', token, user: { id: userId, email: body.email, name: body.name || null } },
       { status: 201 }
     );
 
@@ -79,47 +84,6 @@ export async function POST(request) {
       { error: { message: 'Registration failed' } },
       { status: 500 }
     );
-  }
-}
-
-/**
- * Hash password with bcrypt-like function
- */
-function hashPassword(password) {
-  const buffer = Buffer.from(password);
-  let hash = '';
-  
-  for (let i = 0; i < buffer.length; i++) {
-    hash += buffer[i].toString(16).padStart(2, '0');
-  }
-  
-  // Add some complexity to simulate bcrypt hashing
-  const salt = crypto.randomBytes(8).toString('hex');
-  return `bcrypt$${salt}$${hash}`;
-}
-
-/**
- * Mock user database (use Prisma in production)
- */
-const mockUsers = [];
-
-async function getUserByEmail(email) {
-  try {
-    return mockUsers.find(u => u.email === email);
-  } catch (error) {
-    console.error('User lookup error:', error);
-    return null;
-  }
-}
-
-async function createUserInDatabase(user) {
-  try {
-    // In production, use: await db.user.create({ data: user })
-    mockUsers.push(user);
-    return true;
-  } catch (error) {
-    console.error('User creation error:', error);
-    throw error;
   }
 }
 

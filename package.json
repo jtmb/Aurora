@@ -25,5 +25,9 @@
   "workspaces": [
     "packages/*",
     "apps/*"
-  ]
+  ],
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "ioredis": "^5.11.0"
+  }
 }

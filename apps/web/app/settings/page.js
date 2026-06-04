@@ -101,8 +101,8 @@ export default function SettingsPage() {
       localStorage.setItem('LM_STUDIO_PORT', settings.lmStudioPort || '1234');
       localStorage.setItem('DEFAULT_PROVIDER', settings.defaultProvider);
       
-      // NEW: Save full custom LM Studio URL (e.g., http://192.168.0.13:1234)
-      const lmStudioUrl = `http://${settings.lmStudioHost || 'localhost'}:${settings.lmStudioPort || '1234'}`;
+      // NEW: Save full custom LM Studio URL with /v1 suffix (required for OpenAI-compatible endpoints)
+      const lmStudioUrl = `http://${settings.lmStudioHost || 'localhost'}:${settings.lmStudioPort || '1234'}/v1`;
       localStorage.setItem('LM_STUDIO_URL', lmStudioUrl);
       
       // Save auth token if set (placeholder for now)
