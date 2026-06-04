@@ -1,22 +1,92 @@
 // @aurora/api/chat-completions - OpenAI-compatible chat completions endpoint
 // Supports: OpenAI, Anthropic, Ollama, LM Studio
 // API keys accepted via headers (x-openai-key, x-anthropic-key) or environment variables
+// When a valid JWT is provided, user-scoped keys from Redis take priority over header keys
 
 import { NextResponse } from 'next/server';
+import { AuthHandler } from '@aurora/auth-service/handlers';
+import { ApiKeyManager } from '@aurora/auth-service/handlers';
+
+const authHandler = new AuthHandler();
+const apiKeyManager = new ApiKeyManager();
+
+/**
+ * Extract userId from JWT if present
+ */
+const getUserId = (request) => {
+  const authHeader = request.headers.get('Authorization') || '';
+  if (!authHeader.startsWith('Bearer ')) return null;
+  try {
+    const decoded = authHandler.verifyToken(authHeader.substring(7));
+    return decoded.userId;
+  } catch { return null; }
+};
+
+/**
+ * Load user-scoped API keys from Redis (encrypted storage, per-user)
+ * Returns keys object compatible with extractKeysFromHeaders format.
+ */
+const loadUserKeysFromStorage = async (userId) => {
+  if (!userId) return {};
+  try {
+    const keys = await apiKeyManager.listKeys(userId);
+    const result = {};
+    for (const k of keys) {
+      switch (k.provider?.toLowerCase()) {
+        case 'openai':
+          result.openai = result.openai || k.rawKey;
+          break;
+        case 'anthropic':
+          result.anthropic = result.anthropic || k.rawKey;
+          break;
+        case 'ollama':
+          result.ollamaBase = result.ollamaBase || k.rawKey;
+          break;
+        case 'lmstudio':
+        case 'lm_studio':
+          result.lmStudioUrl = result.lmStudioUrl || k.rawKey;
+          break;
+        case 'deepseek':
+          result.deepseek = result.deepseek || k.rawKey;
+          break;
+      }
+    }
+    return result;
+  } catch (err) {
+    console.error('[Aurora] Failed to load user keys from storage:', err.message);
+    return {};
+  }
+};
 
 /**
  * Extract API keys from request headers (sent by frontend from localStorage)
  * Falls back to environment variables for production deployments.
+ * User-scoped keys from Redis take priority over header/env keys when JWT is present.
  */
-const extractKeysFromHeaders = (request) => {
-  return {
+const extractKeysFromHeaders = async (request) => {
+  const headerKeys = {
     openai: request.headers.get('x-openai-key') || process.env.OPENAI_API_KEY || '',
     anthropic: request.headers.get('x-anthropic-key') || process.env.ANTHROPIC_API_KEY || '',
     ollamaBase: request.headers.get('x-ollama-base') || process.env.OLLAMA_API_BASE || '',
     lmStudioUrl: request.headers.get('x-lmstudio-url') || '',
     lmStudioHost: process.env.LM_STUDIO_HOST || '',
-    lmStudioPort: process.env.LM_STUDIO_PORT || ''
+    lmStudioPort: process.env.LM_STUDIO_PORT || '',
+    deepseek: request.headers.get('x-deepseek-key') || process.env.DEEPSEEK_API_KEY || '',
   };
+
+  // If user is authenticated, merge user-scoped keys (they take priority)
+  const userId = getUserId(request);
+  if (userId) {
+    const userKeys = await loadUserKeysFromStorage(userId);
+    // User-scoped keys override header/env keys when available
+    if (userKeys.openai) headerKeys.openai = userKeys.openai;
+    if (userKeys.anthropic) headerKeys.anthropic = userKeys.anthropic;
+    if (userKeys.ollamaBase) headerKeys.ollamaBase = userKeys.ollamaBase;
+    if (userKeys.lmStudioUrl) headerKeys.lmStudioUrl = userKeys.lmStudioUrl;
+    if (userKeys.deepseek) headerKeys.deepseek = userKeys.deepseek;
+  }
+
+  return headerKeys;
 };
 
 /**
@@ -40,6 +110,16 @@ const getProviders = (keys) => {
       baseUrl: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1',
       apiKey: keys.anthropic,
       name: 'Anthropic'
+    });
+  }
+
+  // DeepSeek — OpenAI-compatible
+  if (keys.deepseek) {
+    providers.push({
+      id: 'deepseek',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: keys.deepseek,
+      name: 'DeepSeek'
     });
   }
 
@@ -183,6 +263,13 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens)
       body = { model, messages, temperature, max_tokens: maxTokens };
       break;
 
+    case 'deepseek':
+      // DeepSeek uses OpenAI-compatible API
+      url = `${provider.baseUrl}/chat/completions`;
+      headers['Authorization'] = `Bearer ${provider.apiKey}`;
+      body = { model, messages, temperature, max_tokens: maxTokens };
+      break;
+
     default:
       throw new Error(`Unsupported provider: ${provider.id}`);
   }
@@ -211,7 +298,7 @@ export async function POST(request) {
     }
 
     // Extract API keys from request headers
-    const keys = extractKeysFromHeaders(request);
+    const keys = await extractKeysFromHeaders(request);
     const providers = getProviders(keys);
 
     // Select provider: requested > openai/anthropic (if keyed) > ollama (fallback)
@@ -227,6 +314,8 @@ export async function POST(request) {
         selectedProvider = providers.find(p => p.id === 'openai');
       } else if (model.startsWith('claude-') && keys.anthropic) {
         selectedProvider = providers.find(p => p.id === 'anthropic');
+      } else if (model.startsWith('deepseek-') && keys.deepseek) {
+        selectedProvider = providers.find(p => p.id === 'deepseek');
       }
     }
 

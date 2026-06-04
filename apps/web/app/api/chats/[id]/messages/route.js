@@ -53,6 +53,7 @@ export async function POST(request, { params }) {
     const body = await request.json();
 
     const message = {
+      id: body.id || `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       role: body.role || 'user',
       content: body.content || '',
       timestamp: body.timestamp || new Date().toISOString(),

@@ -30,7 +30,8 @@ export async function POST(request) {
 
     const result = await apiKeyManager.createApiKey(userId, body.provider, {
       name: body.name || `${body.provider} key`,
-      isPrimary: body.isPrimary ?? true
+      isPrimary: body.isPrimary ?? true,
+      rawKey: body.key || undefined
     });
 
     return NextResponse.json(result, { status: 201 });

@@ -7,7 +7,13 @@ import { KEYS, TTL } from '@aurora/shared/redis-keys';
 
 export class ApiKeyManager {
   constructor(options = {}) {
-    this.encryptionKey = options.encryptionKey || process.env.API_KEY_ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
+    // Derive a stable encryption key from JWT_SECRET so keys survive server restarts.
+    // Falls back to API_KEY_ENCRYPTION_KEY env var, then explicit option, then a
+    // SHA-256 derivation of JWT_SECRET (consistent across restarts).
+    const jwtSecret = process.env.JWT_SECRET || 'aurora-fallback-jwt-secret-min-32-chars';
+    this.encryptionKey = options.encryptionKey
+      || process.env.API_KEY_ENCRYPTION_KEY
+      || crypto.createHash('sha256').update(jwtSecret).digest('hex');
     this.keyPrefix = 'ak_';
     this.keys = new Map();
   }
@@ -15,8 +21,8 @@ export class ApiKeyManager {
   _getStorage() { return isRedisAvailable() ? 'redis' : 'memory'; }
 
   async createApiKey(userId, provider, options = {}) {
-    const bytes = crypto.randomBytes(16);
-    const rawKey = `${this.keyPrefix}${bytes.toString('hex')}`;
+    // Accept user-provided key or auto-generate one
+    const rawKey = options.rawKey || `${this.keyPrefix}${crypto.randomBytes(16).toString('hex')}`;
     const encryptedKey = this._encrypt(rawKey);
     const keyId = `key_${Date.now()}_${Math.random().toString(36).substring(2)}`;
     
@@ -30,6 +36,21 @@ export class ApiKeyManager {
 
     if (this._getStorage() === 'redis') {
       const redis = getRedis();
+      // Check if user already has a key for this provider — if so, update it
+      const existingIds = await redis.smembers(KEYS.USER_API_KEYS(userId));
+      let existingKeyId = null;
+      for (const kid of existingIds) {
+        const existing = await redis.hgetall(KEYS.API_KEY(kid));
+        if (existing && existing.provider === provider) {
+          existingKeyId = kid;
+          break;
+        }
+      }
+      if (existingKeyId) {
+        // Update existing key with new value
+        await redis.hset(KEYS.API_KEY(existingKeyId), { ...keyData, id: existingKeyId });
+        return { id: existingKeyId, rawKey, provider, createdAt: keyData.createdAt, isPrimary: options.isPrimary ?? false, name: keyData.name };
+      }
       await redis.hset(KEYS.API_KEY(keyId), keyData);
       await redis.expire(KEYS.API_KEY(keyId), TTL.API_KEY);
       await redis.sadd(KEYS.USER_API_KEYS(userId), keyId);
@@ -63,12 +84,25 @@ export class ApiKeyManager {
       for (const keyId of keyIds) {
         const data = await redis.hgetall(KEYS.API_KEY(keyId));
         if (data && Object.keys(data).length > 0) {
-          keys.push({ id: data.id, provider: data.provider, name: data.name, createdAt: data.createdAt, isPrimary: data.isPrimary === '1' });
+          try {
+            const rawKey = this._decrypt(data.encryptedKey);
+            keys.push({
+              id: data.id, provider: data.provider, name: data.name,
+              createdAt: data.createdAt, isPrimary: data.isPrimary === '1',
+              rawKey
+            });
+          } catch {
+            // Stale/corrupt encrypted key (e.g. encryption key changed) — skip it
+            // Remove the bad entry so it doesn't keep failing
+            await redis.del(KEYS.API_KEY(keyId));
+            await redis.srem(KEYS.USER_API_KEYS(userId), keyId);
+          }
         }
       }
       return keys;
     }
-    return Array.from(this.keys.values()).filter(k => k.userId === userId).map(k => ({ id: k.id, provider: k.provider, name: k.name, createdAt: k.createdAt, isPrimary: k.isPrimary === '1' }));
+    return Array.from(this.keys.values()).filter(k => k.userId === userId)
+      .map(k => ({ id: k.id, provider: k.provider, name: k.name, createdAt: k.createdAt, isPrimary: k.isPrimary === '1', rawKey: k.rawKey }));
   }
 
   async rotateKey(keyId, userId) {

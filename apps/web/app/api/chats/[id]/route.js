@@ -47,6 +47,35 @@ export async function GET(request, { params }) {
   }
 }
 
+// PATCH /api/chats/[id] — rename or update chat
+export async function PATCH(request, { params }) {
+  try {
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+
+    const { id } = await params;
+    const body = await request.json();
+
+    if (isRedisAvailable()) {
+      const redis = getRedis();
+      const chat = await redis.hgetall(KEYS.CHAT(id));
+      if (!chat || Object.keys(chat).length === 0) {
+        return NextResponse.json({ error: { message: 'Chat not found' } }, { status: 404 });
+      }
+      if (body.title !== undefined) await redis.hset(KEYS.CHAT(id), 'title', body.title);
+      if (body.modelId !== undefined) await redis.hset(KEYS.CHAT(id), 'modelId', body.modelId);
+      return NextResponse.json({ id, ...chat, ...body });
+    }
+
+    return NextResponse.json({ id });
+  } catch (error) {
+    console.error('Patch chat error:', error);
+    return NextResponse.json({ error: { message: 'Failed to update chat' } }, { status: 500 });
+  }
+}
+
 // DELETE /api/chats/[id] — delete chat
 export async function DELETE(request, { params }) {
   try {

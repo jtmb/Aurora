@@ -36,14 +36,20 @@ export async function POST(request) {
 
     const redis = getRedis();
     
-    if (isRedisAvailable()) {
-      const exists = await redis.exists(KEYS.USER_BY_EMAIL(body.email));
-      if (exists) {
-        return NextResponse.json(
-          { error: { message: 'User with this email already exists' } },
-          { status: 409 }
-        );
-      }
+    // Require Redis — no fallback
+    if (!isRedisAvailable()) {
+      return NextResponse.json(
+        { error: { message: 'Backend database is currently unavailable. Please try again later.' } },
+        { status: 503 }
+      );
+    }
+    
+    const exists = await redis.exists(KEYS.USER_BY_EMAIL(body.email));
+    if (exists) {
+      return NextResponse.json(
+        { error: { message: 'User with this email already exists' } },
+        { status: 409 }
+      );
     }
 
     // Create user
@@ -59,10 +65,8 @@ export async function POST(request) {
       createdAt: new Date().toISOString()
     };
 
-    if (isRedisAvailable()) {
-      await redis.hset(KEYS.USER_BY_EMAIL(body.email), userData);
-      await redis.hset(KEYS.USER_BY_ID(userId), userData);
-    }
+    await redis.hset(KEYS.USER_BY_EMAIL(body.email), userData);
+    await redis.hset(KEYS.USER_BY_ID(userId), userData);
 
     // Generate real JWT
     const token = authHandler.signToken({
@@ -80,8 +84,8 @@ export async function POST(request) {
   } catch (error) {
     console.error('Registration error:', error);
     return NextResponse.json(
-      { error: { message: 'Registration failed' } },
-      { status: 500 }
+      { error: { message: 'Registration failed. Backend database may be unavailable.' } },
+      { status: 503 }
     );
   }
 }

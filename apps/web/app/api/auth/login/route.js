@@ -21,25 +21,29 @@ export async function POST(request) {
       );
     }
 
-    // Look up user via Redis
-    let user = null;
     const redis = getRedis();
-    
-    if (isRedisAvailable()) {
-      user = await redis.hgetall(KEYS.USER_BY_EMAIL(body.email));
-      if (!user || Object.keys(user).length === 0) user = null;
+
+    // Require Redis — no fallback
+    if (!isRedisAvailable()) {
+      return NextResponse.json(
+        { error: { message: 'Backend database is currently unavailable. Please try again later.' } },
+        { status: 503 }
+      );
     }
+
+    let user = await redis.hgetall(KEYS.USER_BY_EMAIL(body.email));
+    if (!user || Object.keys(user).length === 0) user = null;
     
-    if (user) {
-      // Verify password with bcrypt
-      const valid = await bcrypt.compare(body.password, user.hashedPassword);
-      if (!valid) {
-        return NextResponse.json(
-          { error: { message: 'Invalid credentials' } },
-          { status: 401 }
-        );
-      }
-    } else {
+    if (!user) {
+      return NextResponse.json(
+        { error: { message: 'Invalid credentials' } },
+        { status: 401 }
+      );
+    }
+
+    // Verify password with bcrypt
+    const valid = await bcrypt.compare(body.password, user.hashedPassword);
+    if (!valid) {
       return NextResponse.json(
         { error: { message: 'Invalid credentials' } },
         { status: 401 }
@@ -54,7 +58,7 @@ export async function POST(request) {
       roles: [user.role || 'user']
     });
 
-    // Create session (Redis if available, in-memory fallback)
+    // Create session
     await sessionManager.createSession(token, user.id);
 
     return NextResponse.json({
@@ -66,8 +70,8 @@ export async function POST(request) {
   } catch (error) {
     console.error('Login error:', error);
     return NextResponse.json(
-      { error: { message: 'Authentication failed' } },
-      { status: 500 }
+      { error: { message: 'Authentication failed. Backend database may be unavailable.' } },
+      { status: 503 }
     );
   }
 }

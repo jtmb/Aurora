@@ -16,22 +16,23 @@ export default function SettingsPage() {
       return {
         openai: localStorage.getItem('OPENAI_API_KEY') || '',
         anthropic: localStorage.getItem('ANTHROPIC_API_KEY') || '',
+        deepseek: localStorage.getItem('DEEPSEEK_API_KEY') || '',
         ollamaBase: localStorage.getItem('OLLAMA_API_BASE') || 'http://localhost:11434',
         lmStudioHost: localStorage.getItem('LM_STUDIO_HOST') || 'localhost',
         lmStudioPort: localStorage.getItem('LM_STUDIO_PORT') || '1234',
         lmStudioUrl: localStorage.getItem('LM_STUDIO_URL') || '',
-        defaultProvider: localStorage.getItem('DEFAULT_PROVIDER') || 'openai'
+        lmStudioMaxModels: localStorage.getItem('LM_STUDIO_MAX_MODELS') || '3',
       };
     } catch {
       return {
-        openai: '', anthropic: '', ollamaBase: 'http://localhost:11434',
-        lmStudioHost: 'localhost', lmStudioPort: '1234', lmStudioUrl: '', defaultProvider: 'openai'
+        openai: '', anthropic: '', deepseek: '', ollamaBase: 'http://localhost:11434',
+        lmStudioHost: 'localhost', lmStudioPort: '1234', lmStudioUrl: '', lmStudioMaxModels: '3',
       };
     }
   };
 
   const [settings, setSettings] = useState(loadSettings);
-  const [showApiKey, setShowApiKey] = useState({ openai: false, anthropic: false });
+  const [showApiKey, setShowApiKey] = useState({ openai: false, anthropic: false, deepseek: false });
   const [isLoading, setIsLoading] = useState(false);
   const [saved, setSaved] = useState(false);
   const [user, setUser] = useState(null);
@@ -43,6 +44,10 @@ export default function SettingsPage() {
       try {
         const payload = JSON.parse(atob(token.split('.')[1]));
         setUser({ id: payload.userId, email: payload.email });
+        // Only restore from Redis if localStorage is empty (first visit)
+        if (!localStorage.getItem('LM_STUDIO_URL') && !localStorage.getItem('OPENAI_API_KEY') && !localStorage.getItem('ANTHROPIC_API_KEY') && !localStorage.getItem('DEEPSEEK_API_KEY') && !localStorage.getItem('OLLAMA_API_BASE')) {
+          loadKeysFromServer();
+        }
       } catch {}
     }
   }, []);
@@ -54,17 +59,69 @@ export default function SettingsPage() {
     router.push('/');
   };
 
+  // Save provider keys to Redis via /api/auth/keys (persists across cache clears)
+  const syncKeysToServer = async () => {
+    const token = localStorage.getItem('auth_token');
+    if (!token) return;
+    const providers = [
+      { id: 'OPENAI', key: settings.openai, name: 'OpenAI API Key' },
+      { id: 'ANTHROPIC', key: settings.anthropic, name: 'Anthropic API Key' },
+      { id: 'DEEPSEEK', key: settings.deepseek, name: 'DeepSeek API Key' },
+      { id: 'OLLAMA', key: settings.ollamaBase, name: 'Ollama Base URL' },
+      { id: 'LM_STUDIO', key: `http://${settings.lmStudioHost || 'localhost'}:${settings.lmStudioPort || '1234'}/v1`, name: 'LM Studio URL' },
+    ];
+    for (const p of providers) {
+      if (!p.key) continue;
+      try {
+        await fetch('/api/auth/keys', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: p.id, name: p.name, key: p.key })
+        });
+      } catch { /* Server sync is best-effort; localStorage is canonical */ }
+    }
+  };
+
+  // Load provider keys from Redis and hydrate localStorage
+  const loadKeysFromServer = async () => {
+    const token = localStorage.getItem('auth_token');
+    if (!token) return;
+    try {
+      const res = await fetch('/api/auth/keys', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const keys = data.keys || [];
+      for (const k of keys) {
+        if (k.rawKey) {
+          const storageKey = k.provider === 'OLLAMA' ? 'OLLAMA_API_BASE'
+            : k.provider === 'LM_STUDIO' ? 'LM_STUDIO_URL'
+            : k.provider === 'DEEPSEEK' ? 'DEEPSEEK_API_KEY'
+            : `${k.provider.toUpperCase()}_API_KEY`;
+          // Only fill missing keys — localStorage is the source of truth
+          if (!localStorage.getItem(storageKey)) {
+            localStorage.setItem(storageKey, k.rawKey);
+          }
+        }
+      }
+    } catch { /* Server unavailable — rely on localStorage */ }
+  };
+
   const handleSaveSettings = async (e) => {
     e?.preventDefault();
     setIsLoading(true);
     try {
       if (settings.openai) localStorage.setItem('OPENAI_API_KEY', settings.openai);
       if (settings.anthropic) localStorage.setItem('ANTHROPIC_API_KEY', settings.anthropic);
+      if (settings.deepseek) localStorage.setItem('DEEPSEEK_API_KEY', settings.deepseek);
       localStorage.setItem('OLLAMA_API_BASE', settings.ollamaBase);
       localStorage.setItem('LM_STUDIO_HOST', settings.lmStudioHost || 'localhost');
       localStorage.setItem('LM_STUDIO_PORT', settings.lmStudioPort || '1234');
-      localStorage.setItem('DEFAULT_PROVIDER', settings.defaultProvider);
       localStorage.setItem('LM_STUDIO_URL', `http://${settings.lmStudioHost || 'localhost'}:${settings.lmStudioPort || '1234'}/v1`);
+      localStorage.setItem('LM_STUDIO_MAX_MODELS', settings.lmStudioMaxModels || '3');
+      // Sync to server so keys survive cache clears
+      await syncKeysToServer();
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (error) {
@@ -259,6 +316,28 @@ export default function SettingsPage() {
                 </div>
               </ProviderCard>
 
+              {/* DeepSeek */}
+              <ProviderCard
+                color="teal" initials="DS" title="DeepSeek" subtitle="OpenAI-compatible — deepseek-chat, deepseek-reasoner"
+                actionLabel="Dashboard" actionUrl="https://platform.deepseek.com/api_keys"
+              >
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1.5">API Key</label>
+                    <div className="flex gap-2">
+                      <input type={showApiKey.deepseek ? 'text' : 'password'} value={settings.deepseek}
+                        onChange={(e) => setSettings({ ...settings, deepseek: e.target.value })}
+                        placeholder="sk-" className="flex-1 bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-teal-600/50" />
+                      <button onClick={() => setShowApiKey(prev => ({ ...prev, deepseek: !prev.deepseek }))}
+                        className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-400 hover:bg-zinc-700 transition-colors">
+                        {showApiKey.deepseek ? 'Hide' : 'Show'}
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-xs text-zinc-500">Models: deepseek-chat, deepseek-reasoner</p>
+                </div>
+              </ProviderCard>
+
               {/* Ollama */}
               <ProviderCard
                 color="green" initials="Ol" title="Ollama" subtitle="Local LLM models — no API key required"
@@ -295,23 +374,14 @@ export default function SettingsPage() {
                       placeholder="1234" className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50" />
                   </div>
                 </div>
-              </ProviderCard>
-
-              {/* Default Provider */}
-              <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
-                <h3 className="text-base font-medium text-white mb-3">Default Provider</h3>
-                <div>
-                  <label className="block text-xs text-zinc-400 mb-1.5">Default provider for new chats:</label>
-                  <select value={settings.defaultProvider}
-                    onChange={(e) => setSettings({ ...settings, defaultProvider: e.target.value })}
-                    className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none">
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="ollama">Ollama</option>
-                    <option value="lmstudio">LM Studio</option>
-                  </select>
+                <div className="mt-3">
+                  <label className="block text-xs text-zinc-400 mb-1.5">Max Active Models</label>
+                  <input type="number" min="1" max="20" value={settings.lmStudioMaxModels}
+                    onChange={(e) => setSettings({ ...settings, lmStudioMaxModels: e.target.value })}
+                    placeholder="3" className="w-24 bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-600/50" />
+                  <p className="text-[11px] text-zinc-500 mt-1">Limits how many models LM Studio can have active at once</p>
                 </div>
-              </div>
+              </ProviderCard>
 
               {/* Save */}
               <button onClick={handleSaveSettings} disabled={isLoading}

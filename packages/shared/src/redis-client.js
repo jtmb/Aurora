@@ -52,10 +52,16 @@ export function getRedis() {
 }
 
 /**
- * Check if Redis is currently connected and available
+ * Check if Redis is currently connected and available.
+ * Auto-initializes the client if not yet created (lazy init).
+ * ioredis queues commands during connection and replays them — so if the client
+ * exists and isn't in a terminal state, it's safe to use.
  */
 export function isRedisAvailable() {
-  return redisAvailable && redis !== null && redis.status === 'ready';
+  if (!redis) getRedis();
+  if (!redis) return false;
+  const terminal = ['end', 'close'];
+  return !terminal.includes(redis.status);
 }
 
 /**
