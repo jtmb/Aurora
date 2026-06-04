@@ -2,5 +2,6 @@
   "/settings/page": "app/settings/page.js",
   "/page": "app/page.js",
   "/_not-found/page": "app/_not-found/page.js",
-  "/api/auth/login/route": "app/api/auth/login/route.js"
+  "/api/auth/login/route": "app/api/auth/login/route.js",
+  "/api/providers/models/route": "app/api/providers/models/route.js"
 }

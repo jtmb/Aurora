@@ -41,9 +41,23 @@ User Request → Auth Check → Model Router → Provider Adapter → LLM Respon
                             User Data Layer (PostgreSQL)
 ```
 
+**API Key Flow (Updated Architecture):**
+Since this is a Next.js App Router application, API routes run server-side and cannot access browser `localStorage`. Instead:
+
+1. **Frontend** stores API keys in browser `localStorage` (set via Settings page or env vars)
+2. **Frontend** sends API keys as custom HTTP headers (`x-openai-key`, `x-anthropic-key`, `x-ollama-base`, `x-lmstudio-url`) with each `/api/v1/chat/completions` and `/api/providers/models` request
+3. **Server API routes** extract keys from request headers FIRST, then fall back to environment variables (for production deployments)
+4. **Ollama** is always attempted as a fallback provider (no API key needed for localhost)
+
+```
+Browser localStorage  ──→  Custom Headers (x-openai-key, etc.)  ──→  Server API Route
+                                                                         │
+Environment Variables (.env) ────────────────────────────────────────────┘
+```
+
 1. **Auth Service**: Validates JWT tokens, manages sessions, handles API key creation/cycling
-2. **API Gateway**: Routes requests to appropriate provider, normalizes responses
-3. **User Data**: Stores chats, usage metrics, prompt templates
+2. **API Gateway**: Routes requests to appropriate provider based on model name and available keys, normalizes responses to OpenAI v1 format
+3. **User Data**: Stores chats, usage metrics, prompt templates (Prisma + PostgreSQL)
 4. **Shared**: Type definitions for OpenAI-compatible responses
 
 ---
@@ -198,7 +212,17 @@ All backend routes use Next.js App Router with Route Handlers. Each route export
 #### POST `/api/v1/chat/completions` - Chat Completion
 
 **Headers:**
-- `Authorization: Bearer <token>` - Use token from auth
+- `Content-Type: application/json` (required)
+- `x-openai-key: sk-...` (optional — OpenAI API key from localStorage)
+- `x-anthropic-key: sk-ant-...` (optional — Anthropic API key from localStorage)
+- `x-ollama-base: http://localhost:11434` (optional — Ollama base URL)
+- `x-lmstudio-url: http://192.168.0.13:1234/v1` (optional — LM Studio URL)
+
+**Provider Selection Priority:**
+1. Request `provider` field (if specified in JSON body)
+2. Model name matching (`gpt-*` → OpenAI, `claude-*` → Anthropic)
+3. First provider with a valid API key
+4. Ollama (always tried as fallback — no auth required for localhost)
 
 **Request:**
 ```json

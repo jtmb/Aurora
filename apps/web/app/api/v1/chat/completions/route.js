@@ -1,104 +1,65 @@
 // @aurora/api/chat-completions - OpenAI-compatible chat completions endpoint
-// Supports: OpenAI, Anthropic, Ollama, LM Studio with localStorage fallback
+// Supports: OpenAI, Anthropic, Ollama, LM Studio
+// API keys accepted via headers (x-openai-key, x-anthropic-key) or environment variables
 
 import { NextResponse } from 'next/server';
 
 /**
- * Get API key with environment variable fallback to localStorage
+ * Extract API keys from request headers (sent by frontend from localStorage)
+ * Falls back to environment variables for production deployments.
  */
-const getApiKey = (envKey, localStorageKey) => {
-  if (process.env[envKey]) {
-    return process.env[envKey];
-  }
-  try {
-    const value = localStorage.getItem(localStorageKey);
-    if (value && value.length > 10) {
-      return value;
-    }
-  } catch (e) {
-    // localStorage not available
-  }
-  return '';
-};
-
-/**
- * Check and update localStorage keys for runtime use
- */
-const checkLocalStorageKeys = () => {
-  const keys = {
-    openai: localStorage.getItem('OPENAI_API_KEY'),
-    anthropic: localStorage.getItem('ANTHROPIC_API_KEY')
+const extractKeysFromHeaders = (request) => {
+  return {
+    openai: request.headers.get('x-openai-key') || process.env.OPENAI_API_KEY || '',
+    anthropic: request.headers.get('x-anthropic-key') || process.env.ANTHROPIC_API_KEY || '',
+    ollamaBase: request.headers.get('x-ollama-base') || process.env.OLLAMA_API_BASE || '',
+    lmStudioUrl: request.headers.get('x-lmstudio-url') || '',
+    lmStudioHost: process.env.LM_STUDIO_HOST || '',
+    lmStudioPort: process.env.LM_STUDIO_PORT || ''
   };
-  
-  for (const [key, value] of Object.entries(keys)) {
-    if (value && !process.env[key.toUpperCase().replace('API_', '')]) {
-      console.log(`Setting ${key} from localStorage`);
-      process.env[`${key.toUpperCase().replace('_', '')}_API_KEY`] = value;
-    }
-  }
 };
 
-// Check on startup
-checkLocalStorageKeys();
-
 /**
- * Get all configured providers - checks environment variables first, falls back to localStorage
+ * Build provider list from available keys/configuration
  */
-const getProviders = () => {
+const getProviders = (keys) => {
   const providers = [];
   
-  // OpenAI provider
-  const openaiApiKey = getApiKey('OPENAI_API_KEY', 'OPENAI_API_KEY');
-  if (openaiApiKey) {
+  if (keys.openai) {
     providers.push({
       id: 'openai',
       baseUrl: 'https://api.openai.com/v1',
-      apiKey: openaiApiKey,
-      name: 'OpenAI',
-      models: [] // Will be fetched dynamically
+      apiKey: keys.openai,
+      name: 'OpenAI'
     });
   }
 
-  // Anthropic provider
-  const anthropicApiKey = getApiKey('ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY');
-  if (anthropicApiKey) {
+  if (keys.anthropic) {
     providers.push({
       id: 'anthropic',
       baseUrl: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1',
-      apiKey: anthropicApiKey,
-      name: 'Anthropic',
-      models: ['claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307']
+      apiKey: keys.anthropic,
+      name: 'Anthropic'
     });
   }
 
-  // Ollama provider (no API key needed for localhost)
-  const ollamaBase = process.env.OLLAMA_API_BASE || 'http://localhost:11434';
-  if (ollamaBase && ollamaBase !== 'http://localhost:11434' || 
-      localStorage.getItem('OLLAMA_API_BASE') === ollamaBase) {
-    providers.push({
-      id: 'ollama',
-      baseUrl: ollamaBase,
-      apiKey: '',
-      name: 'Ollama',
-      models: [] // Will be fetched dynamically
-    });
-  }
+  // Ollama - try the configured base URL or default localhost
+  const ollamaBase = keys.ollamaBase || 'http://localhost:11434';
+  providers.push({
+    id: 'ollama',
+    baseUrl: ollamaBase,
+    apiKey: '',
+    name: 'Ollama'
+  });
 
-  // LM Studio provider
-  const lmStudioHost = process.env.LM_STUDIO_HOST || localStorage.getItem('LM_STUDIO_HOST') || 'localhost';
-  const lmStudioPort = process.env.LM_STUDIO_PORT || localStorage.getItem('LM_STUDIO_PORT') || '1234';
-  
-  // Only add LM Studio if it's not the default localhost:1234 (skip for backward compatibility)
-  // Check if custom LM Studio URL is configured in localStorage (e.g., http://192.168.0.13:1234)
-  const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
-  if ((lmStudioHost !== 'localhost' && lmStudioPort !== '1234') || 
-      process.env.LM_STUDIO_HOST || lmStudioUrl) {
+  // LM Studio - only if custom URL configured
+  if (keys.lmStudioUrl || (keys.lmStudioHost && keys.lmStudioPort)) {
+    const lmUrl = keys.lmStudioUrl || `http://${keys.lmStudioHost}:${keys.lmStudioPort}/v1`;
     providers.push({
       id: 'lmstudio',
-      baseUrl: lmStudioUrl || `http://${lmStudioHost}:${lmStudioPort}/v1`,
-      apiKey: '', // LM Studio doesn't require API key for localhost
-      name: 'LM Studio',
-      models: [] // Will be fetched dynamically
+      baseUrl: lmUrl,
+      apiKey: '',
+      name: 'LM Studio'
     });
   }
 
@@ -106,321 +67,237 @@ const getProviders = () => {
 };
 
 /**
- * Fetch available models from provider - supports custom LM Studio URL (e.g., http://192.168.0.13:1234)
- */
-const fetchModelsFromProvider = async (provider) => {
-  try {
-    const token = provider.apiKey ? `Bearer ${provider.apiKey}` : '';
-    const headers = token ? { 'Authorization': token } : {};
-    
-    // Ollama and LM Studio use different endpoints for models
-    if (provider.id === 'ollama' || provider.id === 'lmstudio') {
-      const url = `${provider.baseUrl}/tags` + 
-        (provider.apiKey ? `?apiKey=${provider.apiKey}` : '');
-      
-      const response = await fetch(url, { headers });
-      if (response.ok) {
-        const data = await response.json();
-        // Ollama returns models in different format
-        const models = Array.isArray(data.models) ? data.models : 
-                        (Array.isArray(data.default_models) ? data.default_models : []);
-        return models.map(m => ({
-          id: m.name,
-          name: m.name,
-          owned_by: 'ollama'
-        }));
-      }
-    } else {
-      // OpenAI and Anthropic use /models endpoint
-      const url = `${provider.baseUrl}/models`;
-      const response = await fetch(url, { headers });
-      if (response.ok) {
-        const data = await response.json();
-        return data.data?.map(m => ({
-          id: m.id,
-          name: m.id.replace('model:', ''),
-          owned_by: provider.name
-        }));
-      }
-    }
-  } catch (error) {
-    console.warn(`Failed to fetch models from ${provider.name}:`, error.message);
-  }
-  
-  return [];
-};
-
-/**
  * Normalize response to OpenAI v1 format regardless of provider
  */
-const normalizeToOpenAIFormat = (response, providerId) => {
-  let normalized;
-  
+const normalizeToOpenAIFormat = (data, providerId, modelName) => {
   if (providerId === 'anthropic') {
-    normalized = {
-      id: `msg_${Date.now()}`,
+    return {
+      id: `chatcmpl-${Date.now()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
-      model: response.model || 'claude-3-sonnet-20240229',
+      model: modelName,
       choices: [{
         index: 0,
         message: {
           role: 'assistant',
-          content: response.content?.[0]?.text || response.content || ''
+          content: data.content?.[0]?.text || data.content || ''
         },
-        finish_reason: response.stop_reason || 'stop'
+        finish_reason: data.stop_reason || 'stop'
       }],
       usage: {
-        prompt_tokens: response.usage?.input_tokens || 0,
-        completion_tokens: response.usage?.output_tokens || 0,
-        total_tokens: (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0)
+        prompt_tokens: data.usage?.input_tokens || 0,
+        completion_tokens: data.usage?.output_tokens || 0,
+        total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
       },
-      system_fingerprint: 'fp_default'
+      system_fingerprint: 'fp_aurora_anthropic'
     };
-  } else if (providerId === 'lmstudio') {
-    // LM Studio responses are mostly already compatible
-    normalized = {
-      ...response,
-      object: 'chat.completion',
-      system_fingerprint: response.system_fingerprint || 'fp_lms_' + Date.now()
-    };
-  } else if (providerId === 'ollama') {
-    // Ollama responses are compatible but we need to normalize usage
-    normalized = {
-      ...response,
-      object: 'chat.completion',
-      system_fingerprint: response.system_fingerprint || 'fp_ollama_' + Date.now()
-    };
-    
-    // Ensure we have a proper message format
-    if (!normalized.choices || !normalized.choices[0].message) {
-      normalized.message = response.message;
-    }
-  } else {
-    // OpenAI - mostly already compatible
-    normalized = response;
   }
-  
-  return normalized;
+
+  // Ollama typically returns OpenAI-compatible format
+  if (providerId === 'ollama') {
+    return {
+      id: data.id || `chatcmpl-${Date.now()}`,
+      object: 'chat.completion',
+      created: data.created || Math.floor(Date.now() / 1000),
+      model: data.model || modelName,
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: data.message?.content || data.choices?.[0]?.message?.content || ''
+        },
+        finish_reason: data.done_reason || data.choices?.[0]?.finish_reason || 'stop'
+      }],
+      usage: {
+        prompt_tokens: data.prompt_eval_count || data.usage?.prompt_tokens || 0,
+        completion_tokens: data.eval_count || data.usage?.completion_tokens || 0,
+        total_tokens: (data.prompt_eval_count || 0) + (data.eval_count || 0) || data.usage?.total_tokens || 0
+      },
+      system_fingerprint: 'fp_aurora_ollama'
+    };
+  }
+
+  // OpenAI / LM Studio - already compatible
+  return {
+    id: data.id || `chatcmpl-${Date.now()}`,
+    object: 'chat.completion',
+    created: data.created || Math.floor(Date.now() / 1000),
+    model: data.model || modelName,
+    choices: data.choices || [{
+      index: 0,
+      message: { role: 'assistant', content: data.message?.content || '' },
+      finish_reason: 'stop'
+    }],
+    usage: data.usage || {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0
+    },
+    system_fingerprint: 'fp_aurora'
+  };
 };
 
 /**
- * Handle streaming response
+ * Build the provider-specific request URL and body
  */
-const streamResponse = async (messages, model, provider) => {
-  const token = provider.apiKey ? `Bearer ${provider.apiKey}` : '';
-  let headers = { 'Content-Type': 'application/json' };
-  
-  if (token && provider.id === 'openai') {
-    headers['Authorization'] = token;
-  } else if (!token && [ 'ollama', 'lmstudio' ].includes(provider.id)) {
-    // Ollama/LM Studio don't need auth header
-    const url = `${provider.baseUrl}/chat`;
-    
-    const body = JSON.stringify({
-      model,
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
-      temperature: 0.7,
-      stream: true
-    });
+const buildProviderRequest = (provider, model, messages, temperature, maxTokens) => {
+  let url, body, headers = { 'Content-Type': 'application/json' };
 
-    const response = await fetch(url, { method: 'POST', headers, body });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to stream from ${provider.name}: ${response.status}`);
-    }
+  switch (provider.id) {
+    case 'openai':
+      url = `${provider.baseUrl}/chat/completions`;
+      headers['Authorization'] = `Bearer ${provider.apiKey}`;
+      body = { model, messages, temperature, max_tokens: maxTokens };
+      break;
 
-    return response.body;
-  } else if (provider.id === 'anthropic') {
-    // Anthropic uses different streaming endpoint
-    const url = `${provider.baseUrl}/v1/messages`;
-    const anthropicHeaders = { ...headers, 'anthropic-version': '2023-06-01' };
-    
-    const body = JSON.stringify({
-      model,
-      max_tokens: 1000,
-      messages: [{ role: 'user', content: messages[0].content }]
-    });
+    case 'anthropic':
+      url = `${provider.baseUrl}/messages`;
+      headers['x-api-key'] = provider.apiKey;
+      headers['anthropic-version'] = '2023-06-01';
+      // Anthropic requires system prompt as top-level, not in messages
+      const systemMsg = messages.find(m => m.role === 'system');
+      const chatMessages = messages.filter(m => m.role !== 'system');
+      body = {
+        model,
+        max_tokens: maxTokens || 4096,
+        system: systemMsg?.content || 'You are a helpful assistant.',
+        messages: chatMessages.map(m => ({ role: m.role, content: m.content }))
+      };
+      break;
 
-    const response = await fetch(url, { method: 'POST', headers: anthropicHeaders, body });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to stream from ${provider.name}: ${response.status}`);
-    }
+    case 'ollama':
+      url = `${provider.baseUrl}/api/chat`;
+      body = {
+        model,
+        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        stream: false,
+        options: { temperature }
+      };
+      break;
 
-    return response.body;
-  } else {
-    // OpenAI streaming
-    const url = `${provider.baseUrl}/chat/completions`;
-    const body = JSON.stringify({
-      model,
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
-      temperature: 0.7,
-      stream: true
-    });
+    case 'lmstudio':
+      url = `${provider.baseUrl}/chat/completions`;
+      body = { model, messages, temperature, max_tokens: maxTokens };
+      break;
 
-    const response = await fetch(url, { method: 'POST', headers, body });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to stream from ${provider.name}: ${response.status}`);
-    }
-
-    return response.body;
+    default:
+      throw new Error(`Unsupported provider: ${provider.id}`);
   }
+
+  return { url, body, headers };
 };
 
 export async function POST(request) {
   try {
     const body = await request.json();
-    const model = body.model || process.env.DEFAULT_MODEL || 'llama3';
+    const model = body.model || 'llama3';
     const messages = body.messages || [];
     const temperature = body.temperature ?? 0.7;
-    const stream = request.headers.get('accept')?.includes('text/event-stream');
-    
+    const requestedProvider = body.provider || '';
+
     if (messages.length === 0) {
-      return NextResponse.json({ error: 'Messages array is required' }, { status: 400 });
+      return NextResponse.json(
+        { error: { message: 'Messages array is required', type: 'invalid_request_error' } },
+        { status: 400 }
+      );
     }
 
     // Add system message if not provided
-    const hasSystem = messages.some(m => m.role === 'system');
-    if (!hasSystem) {
+    if (!messages.some(m => m.role === 'system')) {
       messages.unshift({ role: 'system', content: 'You are a helpful assistant.' });
     }
 
-    // Get providers
-    const providers = getProviders();
+    // Extract API keys from request headers
+    const keys = extractKeysFromHeaders(request);
+    const providers = getProviders(keys);
+
+    // Select provider: requested > openai/anthropic (if keyed) > ollama (fallback)
+    let selectedProvider = null;
+
+    if (requestedProvider) {
+      selectedProvider = providers.find(p => p.id === requestedProvider);
+    }
     
-    // If no providers configured and model matches a default, try without API key (Ollama/LM Studio style)
-    let selectedProvider;
-    if (providers.length > 0) {
-      // Select provider based on request or default
-      selectedProvider = providers.find(p => p.id === body.providerId || false) || providers[0];
-    } else {
-      // Check if we can use Ollama/LM Studio directly without configured keys
-      const ollamaBase = process.env.OLLAMA_API_BASE || 'http://localhost:11434';
-      const lmStudioHost = process.env.LM_STUDIO_HOST || 'localhost';
-      const lmStudioPort = process.env.LM_STUDIO_PORT || '1234';
-      
-      if (model === model.toLowerCase().includes('llama') || 
-          model.toLowerCase().includes('mistral')) {
-        selectedProvider = { id: 'ollama', baseUrl: ollamaBase, apiKey: '', name: 'Ollama' };
-      } else if (lmStudioHost !== 'localhost' || lmStudioPort !== '1234') {
-        selectedProvider = { id: 'lmstudio', baseUrl: `http://${lmStudioHost}:${lmStudioPort}/v1`, apiKey: '', name: 'LM Studio' };
-      } else {
-        return NextResponse.json({ error: 'No LLM provider configured. Please set environment variables or configure via Settings.' }, { status: 400 });
+    if (!selectedProvider) {
+      // Prefer provider that matches the model name
+      if (model.startsWith('gpt-') && keys.openai) {
+        selectedProvider = providers.find(p => p.id === 'openai');
+      } else if (model.startsWith('claude-') && keys.anthropic) {
+        selectedProvider = providers.find(p => p.id === 'anthropic');
       }
     }
 
-    // Fetch models for the first time if empty and using Ollama/LM Studio
-    if (model === '' && ['ollama', 'lmstudio'].includes(selectedProvider.id)) {
-      try {
-        const url = `${selectedProvider.baseUrl}/tags`;
-        const response = await fetch(url);
-        if (response.ok) {
-          const data = await response.json();
-          // Ollama returns models in different format
-          const availableModels = Array.isArray(data.models) ? data.models : [];
-          
-          // Set default model to first available one
-          if (availableModels.length > 0 && model === 'model' || !model.includes('/')) {
-            selectedProvider.models = availableModels;
-            model = availableModels[0]?.name || model;
-          }
-        }
-      } catch (e) {
-        console.warn('Failed to fetch Ollama/LM Studio models:', e.message);
-      }
+    if (!selectedProvider) {
+      // Pick first provider with an API key, otherwise fall back to Ollama
+      selectedProvider = providers.find(p => p.apiKey) || providers.find(p => p.id === 'ollama');
     }
 
-    // Build headers
-    const headers = { 'Content-Type': 'application/json' };
-    if (selectedProvider.apiKey && selectedProvider.id === 'openai') {
-      headers['Authorization'] = `Bearer ${selectedProvider.apiKey}`;
+    if (!selectedProvider) {
+      return NextResponse.json(
+        { error: { message: 'No LLM provider configured. Set API keys in Settings or configure environment variables.', type: 'configuration_error' } },
+        { status: 400 }
+      );
     }
 
-    // Handle streaming
-    if (stream) {
-      return NextResponse.stream(streamResponse(messages, model, selectedProvider), {
-        headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive'
-        }
-      });
-    }
-
-    // Handle non-streaming
-    const response = await fetch(
-      `${selectedProvider.baseUrl}/${selectedProvider.id === 'anthropic' ? 'messages' : selectedProvider.id === 'ollama' || selectedProvider.id === 'lmstudio' ? 'chat' : 'chat/completions'}`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model,
-          messages: messages.map(m => ({ role: m.role, content: m.content })),
-          temperature,
-          top_p: 1,
-          max_tokens: body.max_tokens
-        })
-      }
+    // Build and send the provider request
+    const { url, body: providerBody, headers } = buildProviderRequest(
+      selectedProvider, model, messages, temperature, body.max_tokens
     );
 
+    console.log(`[Aurora] Routing to ${selectedProvider.name} (${selectedProvider.id}) -> ${url}`);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(providerBody),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error?.message || `Request to ${selectedProvider.name} failed: ${response.status}`);
+      const errorText = await response.text().catch(() => '');
+      let errorMessage = `${selectedProvider.name} returned ${response.status}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
+      } catch {}
+      throw new Error(errorMessage);
     }
 
     const data = await response.json();
-    
-    // Normalize to OpenAI format
-    const normalized = normalizeToOpenAIFormat(data, selectedProvider.id);
-    
+    const normalized = normalizeToOpenAIFormat(data, selectedProvider.id, model);
+    normalized.provider = selectedProvider.id;
+
     return NextResponse.json(normalized);
 
   } catch (error) {
-    console.error('Chat completion error:', error.message);
+    console.error('[Aurora] Chat completion error:', error.message);
     
-    return NextResponse.json({ 
-      error: 'An error occurred while processing your request',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: {
+          message: error.message || 'An error occurred while processing your request',
+          type: 'api_error'
+        }
+      },
+      { status: error.message?.includes('timed out') ? 504 : 502 }
+    );
   }
 }
 
 export async function GET() {
-  try {
-    const providers = getProviders();
-    
-    // Fetch models from each configured provider
-    for (const provider of providers) {
-      if (provider.id === 'openai') {
-        // Skip OpenAI model fetch in GET (too slow for discovery)
-        continue;
-      }
-      
-      const models = await fetchModelsFromProvider(provider);
-      
-      return NextResponse.json({
-        providerId: provider.id,
-        name: provider.name,
-        baseUrl: provider.baseUrl,
-        models: models || [],
-        hasApiKey: !!provider.apiKey
-      });
-    }
-    
-    return NextResponse.json({ 
-      error: 'No providers configured',
-      message: 'Please configure API keys in Settings or set environment variables'
-    }, { status: 404 });
-
-  } catch (error) {
-    console.error('Models discovery error:', error.message);
-    
-    // Return empty models if any provider can't be reached
-    return NextResponse.json({ 
-      providerId: 'openai',
-      models: []
-    }, { status: 200 });
-  }
+  return NextResponse.json({
+    message: 'Aurora Chat Completions API',
+    version: '1.0.0',
+    endpoint: '/api/v1/chat/completions',
+    format: 'OpenAI v1 compatible',
+    supportedProviders: ['openai', 'anthropic', 'ollama', 'lmstudio']
+  });
 }

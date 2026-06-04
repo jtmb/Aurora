@@ -15,7 +15,8 @@ export default function SettingsPage() {
         openai: localStorage.getItem('OPENAI_API_KEY') || '',
         anthropic: localStorage.getItem('ANTHROPIC_API_KEY') || '',
         ollamaBase: localStorage.getItem('OLLAMA_API_BASE') || 'http://localhost:11434',
-        // Custom LM Studio endpoint URL (allows 192.168.0.13 or other custom hosts)
+        lmStudioHost: localStorage.getItem('LM_STUDIO_HOST') || 'localhost',
+        lmStudioPort: localStorage.getItem('LM_STUDIO_PORT') || '1234',
         lmStudioUrl: localStorage.getItem('LM_STUDIO_URL') || '',
         defaultProvider: localStorage.getItem('DEFAULT_PROVIDER') || 'openai'
       };
@@ -24,7 +25,9 @@ export default function SettingsPage() {
         openai: '',
         anthropic: '',
         ollamaBase: 'http://localhost:11434',
-        lmStudioUrl: '', // Default to automatic discovery without custom URL
+        lmStudioHost: 'localhost',
+        lmStudioPort: '1234',
+        lmStudioUrl: '',
         defaultProvider: 'openai'
       };
     }

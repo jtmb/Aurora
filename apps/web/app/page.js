@@ -21,69 +21,67 @@ export default function Home() {
     }
   }, [messages, isLoading, isThinking]);
 
+  // Initialize app: check auth and load models on mount
+  useEffect(() => {
+    checkAuth();
+  }, []);
+
   // Check for API keys in localStorage and fetch models if available
   const getModelsFromStorage = async () => {
     try {
+      // Build headers with any available API keys from localStorage
+      const headers = {};
       const openaiKey = localStorage.getItem('OPENAI_API_KEY');
       const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
+      const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
+      const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
       
-      // Only fetch models if at least one API key is configured
-      if (openaiKey || anthropicKey) {
-        const modelsRes = await fetch('/api/providers/models', {
-          headers: {} // Models endpoint doesn't need auth for discovery
-        });
-        
-        if (modelsRes.ok) {
-          const modelsData = await modelsRes.json();
-          setAvailableModels(modelsData.models || []);
-          
-          // Set default model from available models
-          if (modelsData.models.length > 0 && !model.includes('/')) {
-            for (const source of ['OpenAI', 'Ollama', 'Anthropic']) {
-              const openaiModel = modelsData.models.find(m => m.source === source);
-              if (openaiModel) {
-                setModel(openaiModel.id);
-                break;
-              }
-            }
-          }
-        }
-      } else {
-        // No API keys - fetch Ollama/LM Studio default models based on configuration
-        try {
-          // Get LM Studio URL from localStorage (e.g., http://192.168.0.13:1234)
-          const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
-          
-          if (lmStudioUrl) {
-            // Try custom LM Studio URL first
-            const modelsRes = await fetch(`${lmStudioUrl}/v1/tags`);
-            if (modelsRes.ok) {
-              const data = await modelsRes.json();
-              const availableModelsArr = Array.isArray(data.models) ? data.models : [];
-              setAvailableModels(availableModelsArr);
-              if (availableModelsArr.length > 0 && !model.includes('/')) {
-                setModel(availableModelsArr[0]?.name || 'llama3');
-              }
-            }
-          } else {
-            // Fallback to localhost Ollama
-            const ollamaBase = localStorage.getItem('OLLAMA_API_BASE') || 'http://localhost:11434';
-            const modelsRes = await fetch(`${ollamaBase}/tags`);
-            if (modelsRes.ok) {
-              const data = await modelsRes.json();
-              const availableModelsArr = Array.isArray(data.models) ? data.models : [];
-              setAvailableModels(availableModelsArr);
-              if (availableModelsArr.length > 0 && !model.includes('/')) {
-                setModel(availableModelsArr[0]?.name || 'llama3');
-              }
-            }
-          }
-        } catch (e) {
-          console.debug('Failed to fetch default models:', e.message);
+      if (openaiKey) headers['x-openai-key'] = openaiKey;
+      if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
+      if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
+      if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+
+      // Try the models API first (works with API keys)
+      const modelsRes = await fetch('/api/providers/models', { headers });
+      
+      if (modelsRes.ok) {
+        const modelsData = await modelsRes.json();
+        if (modelsData.models && modelsData.models.length > 0) {
+          setAvailableModels(modelsData.models);
+          // Set default model from available
+          const defaultModel = modelsData.models[0];
+          setModel(defaultModel.id);
+          setProviderId(defaultModel.source === 'Ollama' ? 'ollama' : defaultModel.source === 'Anthropic' ? 'anthropic' : 'openai');
+          return;
         }
       }
+
+      // Fallback: try Ollama directly on localhost
+      const ollamaBaseUrl = ollamaBase || 'http://localhost:11434';
+      try {
+        const ollamaRes = await fetch(`${ollamaBaseUrl}/api/tags`);
+        if (ollamaRes.ok) {
+          const data = await ollamaRes.json();
+          const ollamaModels = (data.models || []).map(m => ({
+            id: m.name, name: m.name, owned_by: 'ollama', source: 'Ollama'
+          }));
+          if (ollamaModels.length > 0) {
+            setAvailableModels(ollamaModels);
+            setModel(ollamaModels[0].id);
+            setProviderId('ollama');
+            return;
+          }
+        }
+      } catch (ollamaErr) {
+        console.debug('Ollama fallback failed:', ollamaErr.message);
+      }
+
+      // No models found anywhere
+      setAvailableModels([]);
+
     } catch (error) {
       console.debug('Fetch models error:', error.message);
+      setAvailableModels([]);
     }
   };
 
@@ -126,7 +124,7 @@ export default function Home() {
 
   const sendMessage = async (e) => {
     e?.preventDefault();
-    if (!inputValue.trim() || isLoading || !availableModels.length) return;
+    if (!inputValue.trim() || isLoading) return;
 
     const userMessage = {
       id: Date.now().toString(),
@@ -143,15 +141,28 @@ export default function Home() {
     try {
       const messagesArray = [{ role: 'user', content: inputValue }];
       
+      // Build headers with API keys from localStorage
+      const headers = { 'Content-Type': 'application/json' };
+      const openaiKey = localStorage.getItem('OPENAI_API_KEY');
+      const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
+      const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
+      const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      
+      if (openaiKey) headers['x-openai-key'] = openaiKey;
+      if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
+      if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
+      if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+      
       const res = await fetch('/api/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           model,
           messages: messagesArray,
           temperature: 0.7,
           top_p: 1,
-          max_tokens: null
+          max_tokens: null,
+          provider: providerId
         })
       });
 
@@ -252,7 +263,7 @@ export default function Home() {
         <div className="p-4 border-t border-zinc-800/40">
           {!user ? (
             <button 
-              onClick={() => window.location.href = '/api/auth/login'} 
+              onClick={handleLogin}
               className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-500 transition-colors"
             >
               Sign in with demo credentials
@@ -286,7 +297,7 @@ export default function Home() {
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              disabled={!availableModels.length}
+              disabled={isLoading}
               className={`flex-1 px-3 py-1.5 rounded text-xs border transition-colors cursor-pointer max-w-full disabled:cursor-not-allowed disabled:opacity-50 ${
                 availableModels.find(m => m.id === model)?.source === 'OpenAI' 
                   ? 'bg-green-900/20 border-green-700/40 text-green-200' 
@@ -307,8 +318,7 @@ export default function Home() {
             <select
               value={providerId}
               onChange={(e) => setProviderId(e.target.value)}
-              disabled={!availableModels.length}
-              className="px-3 py-1.5 bg-zinc-800/60 border border-zinc-700 rounded text-xs text-zinc-300 hover:bg-zinc-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 bg-zinc-800/60 border border-zinc-700 rounded text-xs text-zinc-300 hover:bg-zinc-700 transition-colors cursor-pointer"
             >
               <option value="openai">OpenAI</option>
               <option value="ollama">Ollama</option>
@@ -434,10 +444,10 @@ export default function Home() {
                 onKeyPress={handleKeyPress}
                 placeholder="Type your message..."
                 className={`w-full min-h-[48px] max-h-[180px] pl-14 pr-40 py-3 bg-transparent text-zinc-100 placeholder:text-zinc-500 resize-none focus:outline-none text-base leading-relaxed scrollbar-thin scrollbar-thumb-zinc-600 scrollbar-track-transparent transition-opacity ${
-                  !user || !availableModels.length ? 'opacity-50 cursor-not-allowed' : ''
+                  !user || isLoading ? 'opacity-50 cursor-not-allowed' : ''
                 }`}
                 rows={1}
-                disabled={!user || !availableModels.length}
+                disabled={!user || isLoading}
               />
 
               {inputValue && (
@@ -454,8 +464,8 @@ export default function Home() {
 
               <button 
                 type="submit" 
-                disabled={!inputValue.trim() || isLoading || !user || !availableModels.length}
-                className={`absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-xl transition-all flex items-center justify-center ${!inputValue.trim() || isLoading || !user || !availableModels.length ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-500'}`}
+                disabled={!inputValue.trim() || isLoading || !user}
+                className={`absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-xl transition-all flex items-center justify-center ${!inputValue.trim() || isLoading || !user ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-500'}`}
               >
                 {isLoading || isThinking ? (
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>

@@ -27,24 +27,8 @@
   --border-hover: rgba(63, 63, 70, 0.4);    /* zinc-700/40 */
 }
 
-/* Font families */
-@font-face {
-  font-family: 'Geist Sans';
-  src: url('https://cdn.jsdelivr.net/npm/@geist-ui/geist-sans/dist/web/Geist-Sans-Regular.woff2') format('woff2');
-  font-weight: 400;
-}
-
-@font-face {
-  font-family: 'Geist Sans';
-  src: url('https://cdn.jsdelivr.net/npm/@geist-ui/geist-sans/dist/web/Geist-Sans-Medium.woff2') format('woff2');
-  font-weight: 500;
-}
-
-@font-face {
-  font-family: 'JetBrains Mono';
-  src: url('https://cdn.jsdelivr.net/npm/jetbrains-mono@latest/dist/JetBrainsMono-Regular.woff2') format('woff2');
-  font-weight: 400;
-}
+/* Font families - using system fonts as primary, with web font fallback */
+/* Geist Sans and JetBrains Mono are loaded from node_modules or CDN */
 
 /* Base styles */
 html {
@@ -97,6 +81,20 @@ code {
 ::selection {
   background-color: var(--accent);
   color: white;
+}
+
+/* Typing indicator bounce animation */
+@keyframes bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-8px);
+  }
+}
+
+.animate-bounce {
+  animation: bounce 1.4s ease-in-out infinite;
 }
 
 /* Message bubble styles */

@@ -308,40 +308,6 @@ img, video {
   display: none;
 }
 
-.container {
-  width: 100%;
-}
-
-@media (width >= 640px) {
-  .container {
-    max-width: 640px;
-  }
-}
-
-@media (width >= 768px) {
-  .container {
-    max-width: 768px;
-  }
-}
-
-@media (width >= 1024px) {
-  .container {
-    max-width: 1024px;
-  }
-}
-
-@media (width >= 1280px) {
-  .container {
-    max-width: 1280px;
-  }
-}
-
-@media (width >= 1536px) {
-  .container {
-    max-width: 1536px;
-  }
-}
-
 .fixed {
   position: fixed;
 }
@@ -370,6 +336,10 @@ img, video {
   left: .75rem;
 }
 
+.left-\[260px\] {
+  left: 260px;
+}
+
 .right-0 {
   right: 0;
 }
@@ -390,10 +360,6 @@ img, video {
   top: 50px;
 }
 
-.left-\[260px\] {
-  left: 260px;
-}
-
 .z-40 {
   z-index: 40;
 }
@@ -409,10 +375,6 @@ img, video {
 
 .my-2 {
   margin-top: .5rem;
-  margin-bottom: .5rem;
-}
-
-.mb-2 {
   margin-bottom: .5rem;
 }
 
@@ -510,10 +472,6 @@ img, video {
 
 .h-screen {
   height: 100vh;
-}
-
-.max-h-\[100px\] {
-  max-height: 100px;
 }
 
 .max-h-\[180px\] {
@@ -629,16 +587,6 @@ img, video {
 
 .animate-bounce {
   animation: 1s infinite bounce;
-}
-
-@keyframes pulse {
-  50% {
-    opacity: .5;
-  }
-}
-
-.animate-pulse {
-  animation: 2s cubic-bezier(.4, 0, .6, 1) infinite pulse;
 }
 
 @keyframes spin {
@@ -876,11 +824,6 @@ img, video {
 
 .bg-green-900\/20 {
   background-color: #14532d33;
-}
-
-.bg-indigo-500 {
-  --tw-bg-opacity: 1;
-  background-color: rgb(99 102 241 / var(--tw-bg-opacity, 1));
 }
 
 .bg-indigo-600 {
@@ -1240,14 +1183,14 @@ img, video {
   transition-duration: .15s;
 }
 
-.transition-transform {
-  transition-property: transform;
+.transition-opacity {
+  transition-property: opacity;
   transition-timing-function: cubic-bezier(.4, 0, .2, 1);
   transition-duration: .15s;
 }
 
-.transition-opacity {
-  transition-property: opacity;
+.transition-transform {
+  transition-property: transform;
   transition-timing-function: cubic-bezier(.4, 0, .2, 1);
   transition-duration: .15s;
 }
@@ -1515,10 +1458,6 @@ code {
 .placeholder\:text-zinc-500::placeholder {
   --tw-text-opacity: 1;
   color: rgb(113 113 122 / var(--tw-text-opacity, 1));
-}
-
-.last\:mb-0:last-child {
-  margin-bottom: 0;
 }
 
 .focus-within\:ring-2:focus-within {

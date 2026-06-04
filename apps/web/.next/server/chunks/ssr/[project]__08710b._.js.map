@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 7, "column": 0}, "map": {"version":3,"sources":["file:///home/brajam/repos/local_ai_test/apps/web/apps/web/app/layout.js"],"sourcesContent":["// @aurora/web - Root Layout\n// Minimal shell: provides HTML structure with dark mode theme\n\nimport './globals.css';\n\nexport const metadata = {\n  title: 'Aurora - AI Gateway',\n  description: 'Multi-model LLM API Gateway with OpenAI-compatible endpoints'\n};\n\nexport default function RootLayout({ children }) {\n  return (\n    <html lang=\"en\" className=\"dark\">\n      <body className=\"bg-zinc-950 text-zinc-100 antialiased\">\n        {children}\n      </body>\n    </html>\n  );\n}"],"names":[],"mappings":"AAAA,4BAA4B;AAC5B,8DAA8D;;;;;;;;AAIvD,MAAM,WAAW;IACtB,OAAO;IACP,aAAa;AACf;AAEe,SAAS,WAAW,EAAE,QAAQ,EAAE;IAC7C,qBACE,8OAAC;QAAK,MAAK;QAAK,WAAU;kBACxB,cAAA,8OAAC;YAAK,WAAU;sBACb;;;;;;;;;;;AAIT"}},
+    {"offset": {"line": 38, "column": 0}, "map": {"version":3,"sources":[],"names":[],"mappings":"A"}},
+    {"offset": {"line": 49, "column": 0}, "map": {"version":3,"sources":["file:///home/brajam/repos/local_ai_test/apps/web/node_modules/next/src/server/route-modules/app-page/vendored/rsc/react-jsx-dev-runtime.ts"],"sourcesContent":["module.exports = require('../../module.compiled').vendored[\n  'react-rsc'\n].ReactJsxDevRuntime\n"],"names":["module","exports","require","vendored","ReactJsxDevRuntime"],"mappings":";AAAAA,OAAOC,OAAO,GAAGC,QAAQ,0HAAyBC,QAAQ,CACxD,YACD,CAACC,kBAAkB","ignoreList":[0]}},
+    {"offset": {"line": 51, "column": 0}, "map": {"version":3,"sources":[],"names":[],"mappings":"A"}}]
+}
