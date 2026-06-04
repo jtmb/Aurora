@@ -1,5 +1,8 @@
 {
   "app": {
+    "[project]/apps/web/app/settings/page": [
+      "static/media/gyByhwUxId8gMEwcGFWNOITd.p.d06edde1.woff2"
+    ],
     "[project]/apps/web/app/page": [
       "static/media/gyByhwUxId8gMEwcGFWNOITd.p.d06edde1.woff2"
     ],

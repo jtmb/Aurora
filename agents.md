@@ -1,6 +1,4 @@
-# Aurora AI Gateway - Technical Architecture & API Documentation
-
-## Overview
+# Aurora Gateway - Technical Architecture & API Documentation
 
 **Aurora** is a scalable multi-model LLM API gateway built with Next.js 15, designed to provide OpenAI-compatible `/v1/chat/completions` endpoints while supporting multiple underlying model providers (OpenAI, Anthropic, Ollama, LM Studio). The application features a beautiful dark-mode-first UI following minimalist design principles.
 
@@ -20,24 +18,25 @@
 
 ## Architecture Overview
 
-### Microservices Pattern (Turborepo Monorepo)
+### Turborepo Monorepo Structure
 
 ```
 root/
+├── apps/
+│   └── web/              # Next.js frontend application
 ├── packages/
 │   ├── api-gateway/      # LLM routing & response standardization
 │   ├── auth-service/     # Authentication, sessions, API key management
-│   ├── user-data/        # Database access layer (Prisma)
+│   ├── user-data/        # Database access layer (PostgreSQL)
 │   └── shared/           # Common types, utilities, configs
-└── apps/
-    └── web/              # Next.js frontend application
-
+├── agents.md             # This documentation file
+└── package.json          # Root workspace config
 ```
 
 ### Data Flow
 
 ```
-User Request → Auth Gateway → Model Router → Provider Adapter → LLM Response
+User Request → Auth Check → Model Router → Provider Adapter → LLM Response
                                       ↓
                             User Data Layer (PostgreSQL)
 ```
@@ -51,96 +50,59 @@ User Request → Auth Gateway → Model Router → Provider Adapter → LLM Resp
 
 ## Project Structure
 
-### Root (`packages/` & `apps/`)
-
-#### API Gateway Package (`packages/api-gateway/`)
+### Frontend (`apps/web/`)
 
 ```
-packages/api-gateway/
-├── package.json
-└── src/
-    ├── index.js                    # Main entry point, Express setup
-    ├── routers/
-    │   └── chat-completions.js     # /v1/chat/completions handler
-    ├── middleware/
-    │   └── model-router.js         # Routes to appropriate provider
-    └── adapters/
-        ├── token-normalizer.js     # Normalizes token usage across providers
-        ├── system-prompt-injector.js
-        ├── providers.js            # Provider connection configs
-        └── index.js
+apps/web/
+├── app/
+│   ├── api/
+│   │   ├── auth/
+│   │   │   ├── login/route.js       # User authentication
+│   │   │   ├── register/route.js    # New user registration
+│   │   │   ├── me/route.js          # Get current user
+│   │   │   └── keys/route.js        # API key management
+│   │   ├── v1/
+│   │   │   └── chat/completions/route.js    # Main chat proxy endpoint
+│   │   └── providers/
+│   │       └── models/route.js      # Fetch available models from all providers
+│   ├── settings/page.js             # Settings with API key config
+│   ├── page.js                      # Main chat interface
+│   └── layout.js                    # App layout
+├── globals.css
+├── tailwind.config.js
+└── package.json
 ```
 
-**Responsibility**: Proxies LLM requests, handles streaming responses, normalizes output to OpenAI format.
+### Backend Routes (in `apps/web/app/api/`)
 
-#### Auth Service Package (`packages/auth-service/`)
+All backend routes use Next.js App Router with Route Handlers. Each route exports functions in OpenAI's API handler style:
 
-```
-packages/auth-service/
-├── package.json
-└── src/
-    ├── index.js                    # Service initialization
-    ├── handlers/
-    │   ├── auth-handler.js         # JWT token operations
-    │   ├── session-manager.js      # Session persistence
-    │   └── api-key-manager.js      # Encrypted API key management
-    └── routes/
-        └── auth-routes.js          # /api/auth/** endpoints
-```
-
-**Responsibility**: Authentication, session management, secure API key handling with encryption.
-
-#### User Data Package (`packages/user-data/`)
-
-```
-packages/user-data/
-├── package.json
-├── prisma/
-│   └── schema.prisma               # Database schema definition
-└── src/
-    ├── index.js                    # Client initialization
-    ├── schema/                     # Schema utilities
-    │   └── index.js
-    └── prisma/
-        └── client.js               # Prisma client singleton
-```
-
-**Responsibility**: CRUD operations for users, chats, usage analytics via PostgreSQL.
-
-#### Shared Package (`packages/shared/`)
-
-```
-packages/shared/
-├── package.json
-└── src/
-    ├── index.js                    # Main exports
-    ├── types/
-    │   └── index.js                # OpenAI-compatible type shapes
-    └── utils/
-        └── index.js                # Utility functions (dates, formatting)
-```
-
-**Responsibility**: Shared type definitions and utility functions across all services.
+- `GET` /api/auth/login - User login
+- `POST` /api/auth/register - Register new user  
+- `POST` /api/auth/me - Get current user
+- `GET` /api/auth/keys - List API keys
+- `PUT` /api/auth/keys - Rotate API key
+- `POST` /api/v1/chat/completions - Chat completion (OpenAI-compatible)
+- `GET` /api/providers/models - Get available models from all providers
 
 ---
 
 ## API Documentation
 
 ### Base URL
-
-`http://localhost:3000/api` (adjust port based on deployment)
+`http://localhost:3000/api` for auth endpoints, `/v1` for chat completions.
 
 ---
 
 ### Authentication Endpoints
 
-#### POST `/auth/login` - User Login
+#### POST `/api/auth/login` - User Login
 
 **Request:**
 ```json
 {
   "email": "user@example.com",
-  "password": "securepassword"
+  "password": "your-password"
 }
 ```
 
@@ -148,11 +110,12 @@ packages/shared/
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiIs...",
-  "expiresIn": "24h"
+  "expiresIn": "24h",
+  "refreshToken": "eyJhbGciOiJIUzI1NiIs..."
 }
 ```
 
-#### POST `/auth/register` - Register New User
+#### POST `/api/auth/register` - Register New User
 
 **Request:**
 ```json
@@ -170,10 +133,9 @@ packages/shared/
 }
 ```
 
-#### GET `/auth/me` - Get Current User
+#### GET `/api/auth/me` - Get Current User
 
-**Headers:**
-- `Authorization: Bearer <token>`
+**Headers:** No auth required (public endpoint for demo)
 
 **Response:** `200 OK`
 ```json
@@ -189,60 +151,7 @@ packages/shared/
 
 ### API Key Management Endpoints
 
-#### POST `/auth/keys/create` - Create API Key
-
-**Headers:**
-- `Authorization: Bearer <token>`
-
-**Request:**
-```json
-{
-  "provider": "openai",
-  "name": "My OpenAI Key",
-  "fromModel": null
-}
-```
-
-**Response:** `201 Created`
-```json
-{
-  "id": "key_xxx_yyy",
-  "rawKey": "sk_live_abc123...",
-  "provider": "OPENAI",
-  "createdAt": "2024-01-01T00:00:00Z",
-  "isPrimary": true,
-  "name": "My OpenAI Key"
-}
-```
-
-#### POST `/auth/keys/cycle` - Rotate API Key
-
-**Headers:**
-- `Authorization: Bearer <token>`
-
-**Request:**
-```json
-{
-  "provider": "openai",
-  "force": false
-}
-```
-
-**Response:** `200 OK`
-```json
-{
-  "id": "key_xxx_yyy",
-  "rawKey": "sk_live_new_key...",
-  "provider": "OPENAI",
-  "lastRotated": "2024-01-01T00:00:00Z",
-  "isPrimary": true
-}
-```
-
-#### GET `/auth/keys` - List API Keys
-
-**Headers:**
-- `Authorization: Bearer <token>`
+#### GET `/api/auth/keys` - List API Keys
 
 **Response:** `200 OK`
 ```json
@@ -260,14 +169,36 @@ packages/shared/
 }
 ```
 
+#### POST `/api/auth/keys` - Create API Key
+
+**Request:**
+```json
+{
+  "provider": "openai",
+  "name": "My OpenAI Key"
+}
+```
+
+**Response:** `201 Created`
+```json
+{
+  "id": "key_xxx_yyy",
+  "rawKey": "sk_live_abc123...",
+  "provider": "OPENAI",
+  "createdAt": "2024-01-01T00:00:00Z",
+  "isPrimary": true,
+  "name": "My OpenAI Key"
+}
+```
+
 ---
 
 ### Chat Completions Endpoint (OpenAI Compatible)
 
-#### POST `/v1/chat/completions` - Chat Completion
+#### POST `/api/v1/chat/completions` - Chat Completion
 
 **Headers:**
-- `Authorization: Bearer <api_key>` - Use stored API key from auth service
+- `Authorization: Bearer <token>` - Use token from auth
 
 **Request:**
 ```json
@@ -311,79 +242,98 @@ packages/shared/
     "prompt_tokens": 12,
     "completion_tokens": 9,
     "total_tokens": 21
-  }
+  },
+  "system_fingerprint": "fp_default"
 }
 ```
 
-**Streaming Response:** Set `"stream": true` for SSE format:
-
-```
-data: {"id":"chat-xxx","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"I'm"},"finish_reason":null}]}
-
-data: {"choices":[{"delta":{"content":" doing"},"finish_reason":null}]}
-
-data: {"choices":[{"delta":{"content":" well,"},"finish_reason":null}]}
-
-data: {"choices":[{"delta":{"content":" thank you"},"finish_reason":null}]}
-
-data: {"id":"chat-xxx","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
-
-data: [DONE]
-```
+**Streaming Response:** Set `"stream": true` for SSE format.
 
 ---
 
-## Database Schema
+### Models Endpoint
 
-### Tables
+#### GET `/api/providers/models` - Get Available Models from Configured Providers
 
-#### `users`
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID (PK) | Unique user identifier |
-| email | VARCHAR(255) | User email (unique) |
-| name | VARCHAR(255) | Optional display name |
-| profileImage | VARCHAR(255) | Profile image URL |
-| createdAt | TIMESTAMP | Account creation time |
-| updatedAt | TIMESTAMP | Last update time |
+**Response:** `200 OK` (returns models ONLY from providers with configured API keys)
 
-#### `api_keys`
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID (PK) | Unique key identifier |
-| userId | VARCHAR(255) | FK to users.id |
-| provider | ENUM | OPENAI|ANTHROPIC|OLLAMA|LM_STUDIO |
-| keyHash | VARCHAR(256) | Encrypted API key |
-| isPrimary | BOOLEAN | Whether this is primary key |
-| name | VARCHAR(255) | Optional display name |
-| lastRotated | TIMESTAMP | Last rotation time |
-| rotationCount | INT | Number of rotations |
-| revokedAt | TIMESTAMP | Revocation time (nullable) |
-| createdAt | TIMESTAMP | Creation time |
+```json
+{
+  "providerId": "openai",
+  "models": [
+    {
+      "id": "gpt-3.5-turbo",
+      "name": "GPT-3.5 Turbo",
+      "owned_by": "openai",
+      "source": "OpenAI"
+    },
+    {
+      "id": "llama3",
+      "name": "Llama 3", 
+      "owned_by": "ollama",
+      "source": "Ollama"
+    }
+  ]
+}
+```
 
-#### `chats`
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID (PK) | Unique chat identifier |
-| userId | VARCHAR(255) | FK to users.id |
-| title | VARCHAR(255) | Generated or user-set title |
-| modelId | VARCHAR(255) | Model used for this chat |
-| provider | VARCHAR(100) | Provider of the response |
-| isArchived | BOOLEAN | Archive flag |
-| createdAt | TIMESTAMP | Chat creation time |
+**Note:** Only models from providers with configured API keys will be returned. If no API keys are configured, an empty array `[]` is returned.
 
-#### `messages`
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID (PK) | Unique message identifier |
-| chatId | UUID | FK to chats.id |
-| role | ENUM | USER|ASSISTANT|SYSTEM|FUNCTION |
-| content | TEXT | Message text content |
-| model | VARCHAR(255) | Model that generated response |
-| finishReason | ENUM | STOP|LENGTH|FUNCTION_CALL|null |
-| provider | VARCHAR(100) | Provider of response |
-| tokensUsed | INT | Token count |
-| createdAt | TIMESTAMP | Message creation time |
+---
+
+## Supported Providers
+
+| Provider | Endpoint Format | System Prompt | Token Usage Format |
+|----------|-----------------|---------------|-------------------|
+| OpenAI | `/chat/completions` | `You are a helpful assistant.` | Standard (`prompt_tokens`, `completion_tokens`) |
+| Anthropic | `/messages` | `You are a helpful assistant.` | Converted to standard format |
+| Ollama | `/chat` or `/v1/chat` | Model-specific | Estimate prompt tokens from total |
+| LM Studio | `/v1/chat/completions` | Model-specific | Standard (if supported) |
+
+---
+
+## Configuration Guide
+
+### Starting the Application (First Time)
+
+1. **Install Dependencies:**
+```bash
+npm install
+cd apps/web && npm run dev
+```
+
+2. **Access Settings to Configure API Keys:**
+   - Visit `http://localhost:3000/settings`
+   - Enter your API keys for each provider (OpenAI, Anthropic, Ollama)
+   - Click "Save Provider Settings"
+   
+3. **Start Chatting:**
+   - Go back to the main page (`http://localhost:3000`)
+   - Models will automatically load from your configured APIs
+   - Start chatting with your preferred models
+
+### Environment Variables (Alternative Configuration)
+
+For production deployments, use environment variables instead of localStorage:
+
+```bash
+# Create .env file in project root
+OPENAI_API_KEY="sk-your-openai-api-key"
+ANTHROPIC_API_KEY="your-anthropic-api-key"
+OLLAMA_API_BASE="http://localhost:11434"
+LM_STUDIO_HOST="localhost"
+LM_STUDIO_PORT="1234"
+DEFAULT_PROVIDER="openai"
+JWT_SECRET="your-jwt-secret-key-here-minimum-32-chars"
+```
+
+Or use environment variable names with "api_" prefix for immediate usage:
+```bash
+api_openai_key="sk-your-openai-api-key"
+api_anthropic_key="your-anthropic-api-key"
+```
+
+**Note:** The application automatically fetches models from your configured providers and only displays models that are available through those APIs.
 
 ---
 
@@ -397,8 +347,39 @@ data: [DONE]
 | Background Secondary | `#18181b` (zinc-900) | Cards, sidebars, inputs |
 | Text Primary | `#fafafa` (zinc-100) | Primary text content |
 | Text Secondary | `#a1a1aa` (zinc-500) | Meta info, timestamps |
-| Accent | `#6366f1` (indigo-500) | Primary actions, links |
-| Code Block BG | `#242427` | Syntax highlighting container |
+| Accent | `#6366f1` (indigo-600) | Primary actions, links |
+
+### Component Specifications
+
+#### Message Bubbles
+
+**User Message:**
+```css
+className="bg-zinc-100 text-zinc-900 rounded-2xl rounded-tr-sm max-w-[85%] px-4 py-3"
+```
+
+**Assistant Message:**
+```css
+className="bg-zinc-800/60 text-zinc-100 rounded-2xl rounded-tl-sm border border-zinc-700/40 max-w-[85%] px-4 py-3"
+```
+
+#### Input Area
+
+```css
+className="relative bg-zinc-800/60 border border-zinc-700/40 rounded-2xl shadow-lg overflow-hidden focus-within:ring-2 focus-within:ring-indigo-600/30 transition-all flex flex-col"
+```
+
+### Layout Architecture
+
+**Desktop View:**
+- Split pane with fixed sidebar (`width-[260px]`) on the left
+- Main chat area takes remaining width
+- Fixed header at top with model selector
+
+**Mobile View:**
+- Collapsible hamburger menu for history/settings
+- Single-column layout
+- Bottom-fixed input area
 
 ### Typography
 
@@ -406,38 +387,6 @@ data: [DONE]
 |---------|-------------|------|-------------|
 | Sans text | Geist Sans / Inter / SF | 16px-18px | 1.75 |
 | Code/Mono | JetBrains Mono / Fira Code | 14px-16px | 1.6 |
-| Headings | Geist Sans Bold | 20px+ | 1.3 |
-
-### Component Specifications
-
-#### Message Bubbles
-
-**User Message:**
-```
-className="bg-zinc-100 text-zinc-900 rounded-2xl rounded-tr-sm max-w-[85%] px-4 py-3"
-```
-
-**Assistant Message:**
-```
-className="bg-zinc-900/50 text-zinc-100 rounded-2xl rounded-tl-sm border border-zinc-800/40 max-w-[85%] px-4 py-3"
-```
-
-#### Input Area
-
-```
-className="relative bg-zinc-900/80 backdrop-blur-xl border border-zinc-800/40 rounded-2xl shadow-lg overflow-hidden focus-within:ring-2 focus-within:ring-indigo-600/50 transition-all"
-```
-
-#### Code Blocks
-
-```
-className="bg-[#242427] text-zinc-100 p-3 rounded-lg overflow-x-auto text-sm font-mono border border-zinc-800/40"
-```
-
-**Copy Button (hidden by default, appears on hover):**
-```
-className="absolute top-2 right-2 p-1.5 rounded-md bg-zinc-800/80 opacity-0 group-hover:opacity-100 transition-opacity"
-```
 
 ---
 
@@ -458,16 +407,11 @@ className="absolute top-2 right-2 p-1.5 rounded-md bg-zinc-800/80 opacity-0 grou
 
 ### API Key Storage
 
-- All API keys are encrypted using AES-256-CBC before database storage
-- Encrypted key format: `<32-char IV>:<encrypted data>`
-- Encryption key generated at service startup (store securely in env)
+API keys are stored in `localStorage` for immediate use, with optional database persistence:
 
-### RBAC Permissions
-
-| Role | Permissions |
-|------|-------------|
-| user | Read chats, send messages, view usage analytics |
-| admin | All user permissions + manage users, configure providers |
+- Client-side storage: Encrypted localStorage (key derivation)
+- Server-side: PostgreSQL table with bcrypt hashing
+- Rotation: Support for automatic key rotation via `/api/auth/keys` endpoint
 
 ---
 
@@ -478,7 +422,7 @@ className="absolute top-2 right-2 p-1.5 rounded-md bg-zinc-800/80 opacity-0 grou
 Create `.env` file in project root:
 
 ```bash
-# Database
+# Database (PostgreSQL)
 DATABASE_URL="postgresql://postgres:postgres@localhost:5432/aurora_gateway"
 DATABASE_HOST="localhost"
 DATABASE_PORT="5432"
@@ -488,7 +432,6 @@ DATABASE_PASSWORD="postgres"
 
 # Authentication
 JWT_SECRET="your-jwt-secret-key-here-minimum-32-chars"
-API_KEY_ENCRYPTION_KEY="encryption-key-minimum-32-chars"
 
 # API Gateway - Provider configs (use env vars to set actual keys)
 OPENAI_API_KEY="sk-your-openai-api-key"
@@ -500,108 +443,115 @@ OLLAMA_API_KEY=""  # Ollama doesn't require API key for local models
 PORT="3000"
 NODE_ENV="development"
 
-# Backup (optional S3-compatible storage)
-BACKUP_BUCKET_NAME="aurora-backups"
-BACKUP_AWS_REGION="us-east-1"
-BACKUP_ACCESS_KEY_ID=""  # Leave empty for local backups
-BACKUP_SECRET_ACCESS_KEY=""  # Leave empty for local backups
+# Optional fallback provider (if primary fails)
+DEFAULT_PROVIDER="openai"
 ```
 
-### Database Setup
+### Alternative: Use localStorage (No Environment Variables)
 
-1. Start PostgreSQL (with Docker):
-   ```bash
-   docker run -d \
-     -e POSTGRES_DB=aurora_gateway \
-     -e POSTGRES_USER=postgres \
-     -e POSTGRES_PASSWORD=postgres \
-     -p 5432:5432 \
-     postgres
-   ```
+You can store API keys in the browser's localStorage:
 
-2. Run migrations:
-   ```bash
-   npx prisma migrate dev --name init
-   ```
+1. Go to Settings page
+2. Enter API keys for each provider
+3. Click "Save Provider Settings"
 
-3. Generate Prisma Client:
-   ```bash
-   npx prisma generate
-   ```
-
-### Backup Configuration
-
-For automated backups using pg_dump:
-
-```bash
-# Add to package.json scripts:
-"scripts": {
-  "backup-local": "./node_modules/.bin/pg_dump -h localhost -U postgres aurora_gateway > /backups/aurora_$(date +%Y%m%d).sql",
-  "backup-upload": "aws s3 cp backup.sql s3://$BACKUP_BUCKET_NAME/ --region $BACKUP_AWS_REGION"
-}
-```
+The application will automatically use these keys from localStorage when making requests.
 
 ---
 
-## Running the Application
-
-### Development
+### Starting the Application
 
 ```bash
 # From project root:
-cd packages/api-gateway && npm install
-cd ../../apps/web && npm install
+npm install
 
-# Start all services:
+# Start development server (all apps):
 cd packages/api-gateway && npm run dev
 cd apps/web && npm run dev
-```
 
-### Production Build
-
-```bash
-# Build all packages:
-turbo run build
-
-# Start production server:
-npm run start
+# Or use Turborepo for parallel builds:
+npx turbo run dev --no-cache
 ```
 
 ---
 
-## Extending the Gateway
+## Error Handling & Fallback Strategy
 
-### Adding a New Model Provider
+The gateway implements graceful fallback:
 
-1. **Create provider adapter:**
-   ```javascript
-   // packages/api-gateway/src/adapters/middleware-models.js
-   export class MiddlewareModelProviders {
-     static PROVIDER_ID = 'ollama-middleware-model' as const;
-     
-     async connect() {
-       return { baseUrl: process.env.OLLAMA_API_BASE };
-     }
-     
-     async chatCompletion(messages) {
-       // Implement proxy logic
-     }
-   }
-   ```
+1. Primary provider fails → retry with exponential backoff
+2. If primary is down → try secondary configured provider  
+3. Log all errors for debugging
+4. Return standard OpenAI error format on failure
 
-2. **Register in model router:**
-   ```javascript
-   // Register in model-router.js with priority config
-   ```
-
-3. **Add type definitions to shared/types/index.js**
+Common retryable errors:
+- `timeout` - Request timed out
+- `rate_limit` / `429` - Rate limit exceeded
+- `service_unavailable` / `503` - Service temporarily unavailable
+- `unavailable` - Provider service down
 
 ---
 
-## Support & Contributing
+## Usage Analytics
 
-For issues, questions, or contributions, please open a GitHub issue.
+Token usage is tracked and exposed via:
+
+```json
+{
+  "usage": {
+    "prompt_tokens": 128,
+    "completion_tokens": 64,
+    "total_tokens": 192
+  }
+}
+```
+
+This data is stored per chat in the database for analytics.
 
 ---
 
-*Last updated: June 2024*
+## API Provider Support
+
+### OpenAI Format Compatibility
+
+All responses are normalized to OpenAI's v1 format:
+
+- Same response structure
+- Standardized `usage` object
+- Consistent error handling
+- Streaming support via SSE
+
+### Streaming Responses
+
+To stream chat completions, set `"stream": true` in the request. The response will be Server-Sent Events (SSE) format:
+
+```json
+data: {"id":"chat-123","choices":[{"delta":{"content":"Hello"},"index":0}]}
+```
+
+---
+
+## File Upload & Vision Support (Coming Soon)
+
+The input area supports file uploads via a hidden file input triggered by an attachment button. This enables:
+
+- Image analysis with vision models
+- Document processing
+- Code snippet uploads
+- Context-aware responses
+
+File types supported: `.png`, `.jpg`, `.jpeg`, `.pdf`, `.txt`, `.md`
+
+---
+
+## Known Limitations
+
+1. **Code Syntax Highlighting**: Currently using `whitespace-pre-wrap` rendering; production should integrate `react-syntax-highlighter` or similar.
+
+2. **Markdown Rendering**: Basic markdown is supported; for rich formatting, consider integrating `react-markdown` with remark plugins.
+
+3. **Thinking Process**: Currently simulated for demo purposes; integration with model-specific thinking endpoints (e.g., Ollama's `thinking` field) will require provider-specific adapters.
+
+---
+
+*Last updated: 2024*
