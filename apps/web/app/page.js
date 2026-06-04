@@ -1337,9 +1337,6 @@ export default function Home() {
                             <p className="text-[11px] text-zinc-500 truncate">{m.id}</p>
                           </div>
                           <span className="text-[10px] text-zinc-600 flex-shrink-0 px-2 py-0.5 rounded-full bg-zinc-800/60">{m.source}</span>
-                          {isSelected && (
-                            <svg className="w-4 h-4 text-indigo-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                          )}
                         </button>
                       );
                     })}
