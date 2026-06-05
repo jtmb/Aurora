@@ -1,7 +1,4 @@
 {
-  "/api/auth/keys/route": "app/api/auth/keys/route.js",
-  "/api/providers/models/route": "app/api/providers/models/route.js",
-  "/api/chats/route": "app/api/chats/route.js",
   "/page": "app/page.js",
   "/settings/page": "app/settings/page.js"
 }
