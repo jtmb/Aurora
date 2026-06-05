@@ -180,13 +180,31 @@ export default function AgentPanel({
   // Load persisted messages when workspace chat changes
   useEffect(() => {
     if (initialMessages && initialMessages.length > 0) {
-      setMessages(initialMessages.map(m => ({
-        ...m,
-        id: m.id || `restored_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        content: m.content || ''
-      })));
+      const restored = initialMessages.map(m => {
+        const msg = {
+          ...m,
+          id: m.id || `restored_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          content: m.content || ''
+        };
+        // Detect plan messages: non-error assistant messages with ### Summary header
+        if (!msg.isError && m.role === 'assistant' && m.content && /\n###\s*Summary\s*\n/.test(m.content)) {
+          const { todos, summary } = parsePlanTodos(m.content);
+          if (todos.length > 0) {
+            msg.isPlanResult = true;
+            // Set plan state from the last plan message found
+            setPlanMessageId(msg.id);
+            setPlanTodos(todos);
+            setPlanSummary(summary);
+          }
+        }
+        return msg;
+      });
+      setMessages(restored);
     } else if (initialMessages && initialMessages.length === 0) {
       setMessages([]);
+      setPlanTodos([]);
+      setPlanSummary('');
+      setPlanMessageId(null);
     }
   }, [workspaceChatId, initialMessages]);
 
@@ -1461,6 +1479,17 @@ TESTING WORKFLOW — After creating/modifying project files:
                   });
                 })()}
 
+                {/* Plan stats summary — VS Code-style "finished with ..." */}
+                <div className="mt-2 pt-2 border-t border-zinc-800/20 text-[10px] text-zinc-500 flex items-center gap-2">
+                  <span className="text-emerald-400">✓</span>
+                  <span>
+                    Finished — {(() => {
+                      const phases = new Set(planTodos.map(t => t.phase));
+                      return `${phases.size} phase${phases.size !== 1 ? 's' : ''}, ${planTodos.length} task${planTodos.length !== 1 ? 's' : ''}`;
+                    })()}
+                  </span>
+                </div>
+
                 {/* Execute plan button */}
                 <div className="mt-3 pt-2 border-t border-zinc-800/30 flex items-center gap-2">
                   <button
@@ -1572,7 +1601,19 @@ TESTING WORKFLOW — After creating/modifying project files:
 
               {/* Message body */}
               <div className={isUser ? 'text-zinc-200' : 'text-zinc-300'}>
-                {renderMessageContent(msg)}
+                {/* Plan mode streaming: show progress instead of raw markdown */}
+                {(agentMode === 'plan' && isStreamingThis) ? (
+                  <div className="flex items-center gap-2 text-xs text-indigo-300/80">
+                    <span className="inline-flex gap-0.5">
+                      <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                      <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                      <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                    </span>
+                    Generating plan...
+                  </div>
+                ) : (
+                  renderMessageContent(msg)
+                )}
               </div>
 
               {/* Tool call cards */}
