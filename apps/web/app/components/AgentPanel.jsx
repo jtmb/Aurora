@@ -19,6 +19,8 @@ export default function AgentPanel({
   const [isThinking, setIsThinking] = useState(false);
   const scrollRef = useRef(null);
   const abortRef = useRef(null);
+  const thinkingContainerRef = useRef(null);
+  const turnCounterRef = useRef(0);
 
   // --- Copilot-style agent controls ---
   const [agentMode, setAgentMode] = useState('chat');       // 'chat' | 'plan' | 'agent'
@@ -27,7 +29,58 @@ export default function AgentPanel({
   const [thinkingEffort, setThinkingEffort] = useState('medium'); // 'low' | 'medium' | 'high'
   const [availableModels, setAvailableModels] = useState([]);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [expandedThinkingIds, setExpandedThinkingIds] = useState(new Set());
+  const [expandedToolIds, setExpandedToolIds] = useState(new Set());
+  const [planTodos, setPlanTodos] = useState([]); // [{ id, text, done, dependsOn }]
   const modelDropdownRef = useRef(null);
+
+  // Dynamic thinking label based on content (mirrors page.js pattern)
+  const getThinkingLabel = (thinking, streaming) => {
+    if (!streaming) return 'Done';
+    const t = (thinking || '').toLowerCase();
+    if (/\b(?:analyz|break\s*down|examin|inspect|dissect|scrutiniz)\b/i.test(t)) return 'Analyzing';
+    if (/\b(?:reason|think|logic|deduc|infer|conclude|ponder)\b/i.test(t)) return 'Reasoning';
+    if (/\b(?:evaluat|assess|weigh|judge|compar|decide)\b/i.test(t)) return 'Evaluating';
+    if (/\b(?:plan|outline|step|approach|strateg|organiz)\b/i.test(t)) return 'Planning';
+    if (/\b(?:calculat|comput|math|equation|formula|arithmetic)\b/i.test(t)) return 'Calculating';
+    if (/\b(?:process|working|generating|producing|crafting|building)\b/i.test(t)) return 'Processing';
+    if (/\b(?:verif|check|confirm|validat|test|ensur)\b/i.test(t)) return 'Verifying';
+    if (/\b(?:summariz|recap|sum\s*up|overview|condens)\b/i.test(t)) return 'Summarizing';
+    if (/\b(?:refin|improv|polish|enhance|tweak|adjust)\b/i.test(t)) return 'Refining';
+    return 'Thinking';
+  };
+
+  // Parse plan mode response into structured todo items
+  const parsePlanTodos = (content) => {
+    const todos = [];
+    const regex = /^\s*(?:\d+\.|[-*])\s*\[([ xX])\]\s+(.+)$/gm;
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+      const text = match[2].trim();
+      const dependsMatch = text.match(/\*depends on\s+(.+?)\*$/i);
+      todos.push({
+        id: `plan_${todos.length}`,
+        text: dependsMatch ? text.replace(dependsMatch[0], '').trim() : text,
+        done: match[1].toLowerCase() === 'x',
+        dependsOn: dependsMatch ? dependsMatch[1].trim() : null
+      });
+    }
+    return todos;
+  };
+
+  // Auto-scroll thinking container during streaming
+  useEffect(() => {
+    if (isStreaming && thinkingContainerRef.current) {
+      thinkingContainerRef.current.scrollTop = thinkingContainerRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  // Auto-collapse thinking when streaming finishes
+  useEffect(() => {
+    if (!isStreaming) {
+      setExpandedThinkingIds(new Set());
+    }
+  }, [isStreaming]);
 
   // Provider color dots
   const sourceColorMap = {
@@ -156,8 +209,8 @@ export default function AgentPanel({
     return headers;
   };
 
-  // Stream one LLM call and return the full response content
-  const streamLLMCall = async (conversation, label) => {
+  // Stream one LLM call and return the full response content + thinking
+  const streamLLMCall = async (conversation, label, turnId) => {
     const headers = buildHeaders();
     const model = selectedModel || localStorage.getItem('aurora_last_model') || 'gpt-4o';
     const provider = selectedProvider || localStorage.getItem('aurora_last_provider') || 'openai';
@@ -183,11 +236,14 @@ export default function AgentPanel({
 
     const assistantId = `agent_${Date.now()}`;
     setIsThinking(false);
-    setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '', timestamp: new Date().toISOString(), iterationLabel: label }]);
+    setMessages(prev => [...prev, {
+      id: assistantId, role: 'assistant', content: '', thinking: '',
+      timestamp: new Date().toISOString(), iterationLabel: label, turnId, model, provider
+    }]);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '', content = '';
+    let buffer = '', content = '', thinking = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -200,15 +256,75 @@ export default function AgentPanel({
         const json = line.slice(6).trim();
         if (json === '[DONE]') continue;
         try {
-          const chunk = JSON.parse(json).choices?.[0]?.delta?.content || '';
-          if (chunk) {
-            content += chunk;
+          const parsed = JSON.parse(json);
+          const delta = parsed.choices?.[0]?.delta || {};
+          const chunkContent = delta.content || '';
+          // Capture thinking/reasoning from multiple possible field names
+          const chunkThinking = delta.thinking || delta.reasoning_content || delta.reasoning ||
+            parsed.thinking || parsed.reasoning_content || parsed.reasoning || '';
+          if (chunkContent) {
+            content += chunkContent;
             setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content } : m));
+          }
+          if (chunkThinking) {
+            thinking += chunkThinking;
+            setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, thinking } : m));
           }
         } catch {}
       }
     }
-    return { content, assistantId };
+    return { content, thinking, assistantId };
+  };
+
+  // Take a git checkpoint before writing files (if workspace is a git repo)
+  const takeCheckpoint = async (label) => {
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/git/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: `checkpoint: ${label}` })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return { hash: data.commit?.hash, success: true };
+      }
+    } catch {}
+    return null;
+  };
+
+  // Retry: remove last assistant turn and re-submit the user message
+  const handleRetry = (msgId) => {
+    if (isStreaming) return;
+    setMessages(prev => {
+      const idx = prev.findIndex(m => m.id === msgId);
+      if (idx < 0) return prev;
+      // Find the user message that preceded this assistant message
+      let userMsg = null;
+      for (let i = idx - 1; i >= 0; i--) {
+        if (prev[i].role === 'user' && !prev[i].isToolResult) { userMsg = prev[i]; break; }
+      }
+      if (!userMsg) return prev;
+      // Remove from the user message onward
+      const trimmed = prev.slice(0, prev.indexOf(userMsg));
+      // Re-trigger with the same user content
+      setTimeout(() => {
+        setInput(userMsg.content);
+        // Submit after state settles
+        setTimeout(() => {
+          const form = document.querySelector('#agent-input-form');
+          if (form) form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+        }, 50);
+      }, 50);
+      return trimmed;
+    });
+  };
+
+  // Stop generation
+  const handleStop = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
   };
 
   // AGENTIC LOOP: send message, parse tools, execute, feed results back to LLM, repeat
@@ -220,35 +336,115 @@ export default function AgentPanel({
     setInput('');
     setIsStreaming(true);
     setIsThinking(true);
+    setPlanTodos([]);
 
-    const userMsg = { id: `agent_user_${Date.now()}`, role: 'user', content: userContent, timestamp: new Date().toISOString() };
+    const turnId = `turn_${++turnCounterRef.current}`;
+    const userMsg = {
+      id: `agent_user_${Date.now()}`, role: 'user', content: userContent,
+      timestamp: new Date().toISOString(), turnId
+    };
     setMessages(prev => [...prev, userMsg]);
 
     const systemPrompt = buildSystemPrompt(workspaceId, activeFilePath, currentFileContent, agentMode);
+
+    // In agent mode, wrap the user message with FORCEFUL instructions
+    let effectiveUserContent = userContent;
+    let prefillMessages = [];
+    if (agentMode === 'agent') {
+      effectiveUserContent = `USER REQUEST: ${userContent}
+
+IMPORTANT: You are in AGENT MODE. DO NOT describe what you'll do.
+DO NOT ask questions. DO NOT explain your plan. ACT NOW.
+Use a TOOL CALL immediately. The workspace may be empty — create ALL needed files yourself.
+If you need to see what exists, use list_dir first.`;
+
+// On first turn in agent mode, add extra format guidance to the user message
+      if (messages.length === 0) {
+        effectiveUserContent = `USER REQUEST: ${userContent}
+
+IMPORTANT: You are in AGENT MODE. DO NOT describe what you'll do.
+DO NOT ask questions. DO NOT explain your plan. ACT NOW.
+Use a TOOL CALL immediately. The workspace may be empty — create ALL needed files yourself.
+If you need to see what exists, use list_dir first.
+
+EXAMPLE: The correct format for creating a file is:
+\`\`\`create_file filePath="src/index.html"
+<!DOCTYPE html><html>...</html>
+\`\`\`
+Content goes INSIDE the block body, NOT as a content="..." attribute.`;
+      }
+    }
+
     const conversation = [
       { role: 'system', content: systemPrompt },
       ...messages.map(m => ({ role: m.role, content: m.content })),
-      { role: 'user', content: userContent }
+      ...prefillMessages,
+      { role: 'user', content: effectiveUserContent }
     ];
 
     const MAX_ITERATIONS = 12;
+    let checkpointTaken = false;
 
     try {
       for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
         const label = iter > 0 ? `Step ${iter + 1}` : null;
-        const { content: rawContent, assistantId } = await streamLLMCall(conversation, label);
+        const { content: rawContent, thinking, assistantId } = await streamLLMCall(conversation, label, turnId);
         conversation.push({ role: 'assistant', content: rawContent });
+
+        // Parse plan todos in plan mode
+        if (agentMode === 'plan' && iter === 0) {
+          const todos = parsePlanTodos(rawContent);
+          if (todos.length > 0) setPlanTodos(todos);
+        }
 
         // Parse tool calls from the response
         const toolCalls = parseToolCalls(rawContent);
         if (toolCalls.length === 0) break; // Agent is done — no more tools
 
+        // Take checkpoint before first write in agent mode
+        if (agentMode === 'agent' && !checkpointTaken &&
+            toolCalls.some(tc => tc.name === 'create_file' || tc.name === 'replace_string_in_file')) {
+          const cp = await takeCheckpoint(`agent turn ${turnCounterRef.current} step ${iter}`);
+          if (cp) {
+            checkpointTaken = true;
+            setMessages(prev => prev.map(m =>
+              m.id === assistantId ? { ...m, checkpointHash: cp.hash } : m
+            ));
+          }
+        }
+
         // Execute all tools
         const toolResults = [];
         setIsThinking(true);
         for (const tc of toolCalls) {
+          const toolId = `${assistantId}_tool_${toolResults.length}`;
+          // Add executing tool to message immediately
+          setMessages(prev => {
+            const idx = prev.findIndex(m => m.id === assistantId);
+            if (idx < 0) return prev;
+            const updated = [...prev];
+            const existingTools = updated[idx].toolCalls || [];
+            updated[idx] = {
+              ...updated[idx],
+              toolCalls: [...existingTools, { id: toolId, name: tc.name, args: tc.args, status: 'executing', result: null }]
+            };
+            return updated;
+          });
           const result = await executeToolCall(tc, workspaceId);
-          toolResults.push({ ...tc, result });
+          toolResults.push({ ...tc, result, toolId });
+          // Update tool status to done/error
+          setMessages(prev => {
+            const idx = prev.findIndex(m => m.id === assistantId);
+            if (idx < 0) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              toolCalls: (updated[idx].toolCalls || []).map(t =>
+                t.id === toolId ? { ...t, status: result.error ? 'error' : 'done', result } : t
+              )
+            };
+            return updated;
+          });
           // If create_file/replace succeeded, notify parent
           if ((tc.name === 'create_file' || tc.name === 'replace_string_in_file') && result.success && onFileEdit) {
             const fp = tc.args.filePath || tc.args.path;
@@ -256,19 +452,6 @@ export default function AgentPanel({
           }
         }
         setIsThinking(false);
-
-        // Update last assistant bubble with tool call indicators
-        setMessages(prev => {
-          const idx = prev.findIndex(m => m.id === assistantId);
-          if (idx < 0) return prev;
-          const updated = [...prev];
-          updated[idx] = { ...updated[idx], toolCalls: toolResults.map(tr => ({
-            name: tr.name, args: tr.args,
-            status: tr.result.error ? 'error' : 'done',
-            result: tr.result
-          }))};
-          return updated;
-        });
 
         // Build tool result feedback for the LLM
         const resultSummary = toolResults.map(tr => {
@@ -289,7 +472,8 @@ export default function AgentPanel({
           role: 'assistant',
           content: `Error: ${err.message}`,
           isError: true,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          turnId
         }]);
       }
     } finally {
@@ -330,6 +514,18 @@ export default function AgentPanel({
           if (findIdx >= 0 && replaceIdx >= 0) {
             args.oldString = body.slice(findIdx + 10, replaceIdx).trim();
             args.newString = body.slice(replaceIdx + 13).trim();
+          }
+        } else if (toolName === 'create_file') {
+          // If the model put content as an attribute (content="...") extract it
+          if (body.startsWith('content=')) {
+            const contentMatch = body.match(/^content=["']([\s\S]*?)["']$/);
+            if (contentMatch) {
+              args.content = contentMatch[1];
+            } else {
+              args.content = body;
+            }
+          } else {
+            args.content = body;
           }
         } else {
           args.content = body;
@@ -398,66 +594,83 @@ export default function AgentPanel({
   };
 
   const buildSystemPrompt = (wsId, activeFile, fileContent, mode = 'chat') => {
-    const readOnlyTools = `You have these READ-ONLY tools. Call them with a fenced code block:
-\`\`\`read_file filePath="relative/path.js"
-\`\`\`
-\`\`\`list_dir path="src"
-\`\`\`
-\`\`\`grep_search query="function name"
-\`\`\``;
-
-    const writeTools = `You also have these WRITE tools (Agent mode only):
-\`\`\`create_file filePath="relative/path.js"
-// Entire file content goes here — write the COMPLETE file
-\`\`\`
-
-\`\`\`replace_string_in_file filePath="relative/path.js"
-===FIND===
-exact old code to replace (must match exactly)
-===REPLACE===
-new replacement code
-\`\`\``;
-
-    let prompt = `You are Aurora Agent — an expert coding agent. You work in a LOOP: call tools, see their results, then call more tools.
-
-HOW TO CALL TOOLS — Use a fenced code block with the tool name and key="value" arguments:
-${readOnlyTools}
-
-IMPORTANT:
-- Arguments use filePath="value" (not path=) for file operations
-- create_file takes filePath="..." and the COMPLETE file content in the block body
-- replace_string_in_file takes filePath="..." and the block body must contain ===FIND=== and ===REPLACE=== sections
-- read_file and list_dir take their arguments on the opening fence line
-- You may call multiple tools in one response — put them in separate fenced blocks
-- After completing the task, respond WITHOUT any tool calls`;
-
+    // Agent mode: extremely forceful prompt that DEMANDS tool calls
     if (mode === 'agent') {
-      prompt += `
+      return `YOU ARE AN AUTONOMOUS CODING AGENT. YOU MUST USE TOOLS. NEVER describe what you'll do — DO IT.
 
-AGENT MODE — You have full write access.
-WORKFLOW FOR BUILDING APPS:
-1. First use list_dir to see what exists
-2. Then create files one by one with create_file (write COMPLETE file content — the workspace may be empty)
-3. For small changes, read_file first, then use replace_string_in_file
+You have a workspace at /api/workspace/${wsId}. Use RELATIVE paths for all tools: "." is root, "src/file.ts" for nested.
 
-RULES:
-- ALWAYS provide filePath="..." on the opening fence line
-- For create_file, put the ENTIRE file content in the block body
-- For replace_string_in_file, the ===FIND=== text must match the file EXACTLY
-- After all steps are done, respond WITHOUT tool calls`;
-      prompt += writeTools;
-    } else if (mode === 'plan') {
-      prompt += `\n\nPLAN MODE — Read-only. Explore the codebase, describe needed changes. NEVER use create_file or replace_string_in_file.`;
-    } else {
-      prompt += `\n\nCHAT MODE — Read-only, conversational. Suggest changes but don't make them. NEVER use create_file or replace_string_in_file.`;
+TOOL CALL FORMAT — You MUST use EXACTLY this syntax for EVERY action:
+\`\`\`create_file filePath="filename.ext"
+COMPLETE FILE CONTENT GOES HERE
+\`\`\`
+
+\`\`\`read_file filePath="filename.ext"
+\`\`\`
+
+\`\`\`list_dir path="."
+\`\`\`
+
+\`\`\`replace_string_in_file filePath="filename.ext"
+===FIND===
+exact text to replace
+===REPLACE===
+new text
+\`\`\`
+
+\`\`\`grep_search query="search pattern"
+\`\`\`
+
+CRITICAL: First step is ALWAYS \`list_dir path="."\` to see what exists.
+CRITICAL: create_file puts content INSIDE the block body, never as content="..." attribute.
+CRITICAL: Call ONE tool per response. Nothing outside the fenced block.
+CRITICAL: When done, respond "Task complete." with no tool block.`;
     }
+
+    // Plan mode
+    if (mode === 'plan') {
+      return `You are an expert code planner. Explore the workspace then produce a structured plan.
+
+TOOLS (use fenced code blocks to call them):
+\`\`\`read_file filePath="filename.ext"
+\`\`\`
+\`\`\`list_dir path="."
+\`\`\`
+\`\`\`grep_search query="pattern"
+\`\`\`
+
+PLAN OUTPUT FORMAT (after exploration):
+## Summary
+Brief explanation of the goal and approach.
+
+## Plan
+- [ ] Task description — *depends on Task #*
+- [ ] Another task
+
+Use 🟢🟡🔴 for complexity. NEVER use create_file or replace_string_in_file.
+
+Workspace ID: ${wsId}`;
+    }
+
+    // Chat mode
+    let prompt = `You are Aurora Agent — a helpful coding assistant. You can read code to answer questions.
+
+TOOLS (use fenced code blocks):
+\`\`\`read_file filePath="filename.ext"
+\`\`\`
+\`\`\`list_dir path="."
+\`\`\`
+\`\`\`grep_search query="pattern"
+\`\`\`
+
+You are in CHAT MODE — do NOT create or edit files. Answer questions conversationally. Only use read tools when needed.
+Workspace ID: ${wsId}`;
 
     if (activeFile) prompt += `\n\nActive file in editor: "${activeFile}"`;
     if (fileContent) {
       const truncated = fileContent.slice(0, 3000);
       prompt += `\n\nCurrent file content:\n\`\`\`\n${truncated}${fileContent.length > 3000 ? '\n... (truncated)' : ''}\n\`\`\``;
     }
-    prompt += `\n\nWorkspace ID: ${wsId}`;
     return prompt;
   };
 
@@ -589,14 +802,59 @@ RULES:
     }
   }, [workspaceId, onFileEdit]);
 
-  // Render message content with syntax highlighting
+  // Tool icon + color helpers
+  const getToolIcon = (name) => {
+    switch (name) {
+      case 'read_file': return '📖';
+      case 'create_file': return '📝';
+      case 'replace_string_in_file': return '✏️';
+      case 'grep_search': return '🔍';
+      case 'list_dir': return '📁';
+      case 'run_in_terminal': return '⚡';
+      default: return '🔧';
+    }
+  };
+  const getToolBorderColor = (name, status) => {
+    if (status === 'error') return 'border-red-500/30';
+    switch (name) {
+      case 'read_file': return 'border-sky-500/30';
+      case 'create_file': return 'border-emerald-500/30';
+      case 'replace_string_in_file': return 'border-amber-500/30';
+      case 'grep_search': return 'border-violet-500/30';
+      case 'list_dir': return 'border-cyan-500/30';
+      default: return 'border-zinc-600/30';
+    }
+  };
+  const getLangColor = (lang) => {
+    const colors = { javascript: 'text-amber-400', js: 'text-amber-400', jsx: 'text-amber-400',
+      typescript: 'text-sky-400', ts: 'text-sky-400', tsx: 'text-sky-400',
+      css: 'text-blue-400', scss: 'text-pink-400', html: 'text-orange-400',
+      python: 'text-green-400', py: 'text-green-400', json: 'text-yellow-400',
+      markdown: 'text-zinc-400', md: 'text-zinc-400', yaml: 'text-red-400',
+      bash: 'text-emerald-400', sh: 'text-emerald-400', sql: 'text-cyan-400' };
+    return colors[(lang || '').toLowerCase()] || 'text-zinc-500';
+  };
+
+  // Render message content with syntax highlighting (excludes tool fenced blocks)
   const renderMessageContent = (msg) => {
     if (msg.isError) {
       return <div className="text-red-400 text-xs">{msg.content}</div>;
     }
+    if (!msg.content) return null;
 
-    // Parse markdown-style code blocks
-    const parts = msg.content.split(/(```\w*\n[\s\S]*?\n```)/g);
+    // Remove tool call fenced blocks from displayed content (shown in tool cards)
+    const toolBlockRegex = /```(create_file|replace_string_in_file|read_file|list_dir|grep_search|run_in_terminal)\s+[^\n]*\n[\s\S]*?```/g;
+    const cleanContent = msg.content.replace(toolBlockRegex, '').trim();
+    // If tool blocks consumed everything, show the raw text (fallback for small models)
+    if (!cleanContent) {
+      // Show raw content but collapse whitespace-only responses
+      const trimmed = msg.content.trim();
+      if (!trimmed) return null;
+      return <span className="text-xs leading-relaxed text-zinc-300 whitespace-pre-wrap">{trimmed}</span>;
+    }
+
+    // Parse markdown-style code blocks (only non-tool blocks)
+    const parts = cleanContent.split(/(```\w*\n[\s\S]*?\n```)/g);
     
     return parts.map((part, i) => {
       const codeMatch = part.match(/```(\w*)\n([\s\S]*?)\n```/);
@@ -605,16 +863,30 @@ RULES:
         const code = codeMatch[2];
         return (
           <div key={i} className="relative my-2 group">
-            <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800 rounded-t-lg border border-zinc-700/40 border-b-0">
-              <span className="text-[10px] text-zinc-500 uppercase">{lang}</span>
-              <button
-                onClick={() => navigator.clipboard.writeText(code)}
-                className="text-zinc-600 hover:text-zinc-300 transition-colors"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
-              </button>
+            <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800/80 rounded-t-lg border border-zinc-700/30 border-b-0">
+              <div className="flex items-center gap-1.5">
+                <span className={`w-1.5 h-1.5 rounded-full ${getLangColor(lang).replace('text-', 'bg-')}`} />
+                <span className={`text-[10px] uppercase font-medium ${getLangColor(lang)}`}>{lang}</span>
+              </div>
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {msg.role === 'assistant' && onFileEdit && activeFilePath && (
+                  <button
+                    onClick={() => handleApplyEdit(activeFilePath, code)}
+                    className="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors px-1"
+                    title="Apply to editor"
+                  >
+                    Apply
+                  </button>
+                )}
+                <button
+                  onClick={() => navigator.clipboard.writeText(code)}
+                  className="text-zinc-600 hover:text-zinc-300 transition-colors"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                </button>
+              </div>
             </div>
             <SyntaxHighlighter
               language={lang}
@@ -625,7 +897,7 @@ RULES:
                 borderTopRightRadius: 0,
                 borderBottomLeftRadius: '0.5rem',
                 borderBottomRightRadius: '0.5rem',
-                border: '1px solid rgba(39,39,42,0.4)',
+                border: '1px solid rgba(39,39,42,0.3)',
                 borderTop: 'none',
                 fontSize: '11px',
                 lineHeight: 1.5,
@@ -641,16 +913,90 @@ RULES:
       // Regular text (handle inline code)
       const inlineParts = part.split(/(`[^`]+`)/g);
       return (
-        <span key={i}>
+        <span key={i} className="text-xs leading-relaxed text-zinc-300">
           {inlineParts.map((ip, j) => {
             if (ip.startsWith('`') && ip.endsWith('`')) {
-              return <code key={j} className="bg-zinc-700/60 text-zinc-200 px-1 py-0.5 rounded text-[11px] font-mono">{ip.slice(1, -1)}</code>;
+              return <code key={j} className="bg-zinc-700/50 text-zinc-200 px-1 py-0.5 rounded text-[11px] font-mono">{ip.slice(1, -1)}</code>;
             }
             return <span key={j}>{ip}</span>;
           })}
         </span>
       );
     });
+  };
+
+  // Render an individual tool call card (expandable)
+  const ToolCallCard = ({ tc, msgId }) => {
+    const isExpanded = expandedToolIds.has(tc.id);
+    const toggle = () => {
+      setExpandedToolIds(prev => {
+        const next = new Set(prev);
+        if (next.has(tc.id)) next.delete(tc.id);
+        else next.add(tc.id);
+        return next;
+      });
+    };
+    const borderColor = getToolBorderColor(tc.name, tc.status);
+    const fp = tc.args?.filePath || tc.args?.path || '';
+
+    return (
+      <div className={`mt-1 border-l-2 ${borderColor} bg-zinc-800/30 rounded-r-md overflow-hidden`}>
+        <button
+          type="button"
+          onClick={toggle}
+          className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[11px] hover:bg-zinc-800/40 transition-colors text-left"
+        >
+          <span className="text-xs">{getToolIcon(tc.name)}</span>
+          <span className="font-medium text-zinc-300">{tc.name}</span>
+          {fp && <span className="text-zinc-600 font-mono text-[10px] truncate max-w-[140px]">{fp}</span>}
+          <span className="ml-auto flex-shrink-0">
+            {tc.status === 'executing' ? (
+              <span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin inline-block" />
+            ) : tc.status === 'error' ? (
+              <span className="text-red-400 text-[10px]">✗</span>
+            ) : (
+              <span className="text-emerald-400 text-[10px]">✓</span>
+            )}
+          </span>
+          <svg className={`w-3 h-3 text-zinc-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
+        {isExpanded && (
+          <div className="px-3 py-2 border-t border-zinc-700/20 text-[10px] text-zinc-500 space-y-1">
+            {tc.args && Object.keys(tc.args).filter(k => k !== 'content' && k !== 'oldString' && k !== 'newString').length > 0 && (
+              <div>
+                <span className="text-zinc-600">Args: </span>
+                {Object.entries(tc.args).filter(([k]) => k !== 'content' && k !== 'oldString' && k !== 'newString').map(([k, v]) => (
+                  <span key={k} className="text-zinc-400">{k}=<span className="text-zinc-300">{String(v).slice(0, 80)}</span> </span>
+                ))}
+              </div>
+            )}
+            {tc.result?.error ? (
+              <div className="text-red-400">{tc.result.error}</div>
+            ) : tc.result?.content && tc.name === 'read_file' ? (
+              <pre className="text-zinc-400 whitespace-pre-wrap font-mono max-h-[120px] overflow-y-auto bg-zinc-900/50 p-2 rounded">{String(tc.result.content).slice(0, 500)}</pre>
+            ) : tc.result?.results && tc.name === 'grep_search' ? (
+              <div className="space-y-0.5">
+                {tc.result.results.slice(0, 8).map((r, i) => (
+                  <div key={i} className="text-zinc-400">
+                    <span className="text-zinc-600">{r.path}:{r.line}</span> — {r.content?.slice(0, 100)}
+                  </div>
+                ))}
+              </div>
+            ) : tc.result?.files && tc.name === 'list_dir' ? (
+              <div className="flex flex-wrap gap-1">
+                {tc.result.files.slice(0, 20).map(f => (
+                  <span key={f.name || f.path} className="text-zinc-400 bg-zinc-800/50 px-1.5 py-0.5 rounded">{f.name || f.path}</span>
+                ))}
+              </div>
+            ) : tc.status === 'done' ? (
+              <div className="text-emerald-400">{getToolSummary(tc.name, tc.args, tc.result || {})}</div>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
@@ -724,93 +1070,206 @@ RULES:
         </div>
       </div>
 
-      {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-3">
+      {/* Messages — Copilot-style flat layout */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-2">
         {messages.length === 0 && (
-          <div className="text-center py-8">
-            <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center mx-auto mb-3">
-              <svg className="w-5 h-5 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="flex flex-col items-center justify-center h-full text-center px-4">
+            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-indigo-500/10 flex items-center justify-center mb-4">
+              <svg className="w-6 h-6 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
               </svg>
             </div>
-            <p className="text-xs text-zinc-500">Ask me to read, search, or edit code</p>
-            <div className="flex flex-wrap gap-1.5 mt-3 justify-center">
-              <button onClick={() => setInput('Explain what this codebase does')} className="px-2.5 py-1 bg-zinc-800/60 border border-zinc-700/40 rounded-full text-[10px] text-zinc-400 hover:bg-zinc-700/60 transition-colors">
-                Explain codebase
-              </button>
-              <button onClick={() => setInput('Find all functions related to')} className="px-2.5 py-1 bg-zinc-800/60 border border-zinc-700/40 rounded-full text-[10px] text-zinc-400 hover:bg-zinc-700/60 transition-colors">
-                Search code
-              </button>
-              <button onClick={() => setInput('Add error handling to')} className="px-2.5 py-1 bg-zinc-800/60 border border-zinc-700/40 rounded-full text-[10px] text-zinc-400 hover:bg-zinc-700/60 transition-colors">
-                Improve code
-              </button>
+            <p className="text-sm font-medium text-zinc-400 mb-1">Ask anything about your codebase</p>
+            <p className="text-[11px] text-zinc-600 mb-4">I can read, search, explain, and edit files</p>
+            <div className="flex flex-wrap gap-1.5 justify-center">
+              {[
+                { label: 'Explain this file', query: 'Explain what this file does' },
+                { label: 'Find bugs', query: 'Find potential bugs and issues in this code' },
+                { label: 'Add tests', query: 'Write unit tests for this code' },
+                { label: 'Refactor', query: 'Suggest refactoring improvements' },
+              ].map(chip => (
+                <button
+                  key={chip.label}
+                  onClick={() => setInput(chip.query)}
+                  className="px-2.5 py-1.5 bg-zinc-800/40 border border-zinc-700/30 rounded-lg text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 hover:border-zinc-600/30 transition-all"
+                >
+                  {chip.label}
+                </button>
+              ))}
             </div>
           </div>
         )}
 
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : ''}`}>
-            {msg.role !== 'user' && (
-              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <span className="text-[9px] text-white font-bold">A</span>
-              </div>
-            )}
-            <div className={`max-w-[85%] rounded-xl px-3 py-2 text-xs leading-relaxed ${
-              msg.role === 'user'
-                ? 'bg-indigo-600 text-white rounded-tr-sm'
-                : msg.isError
-                  ? 'bg-red-950/30 border border-red-900/20 rounded-tl-sm text-red-300'
-                  : 'bg-zinc-800/60 border border-zinc-700/40 rounded-tl-sm text-zinc-200'
-            }`}>
-              {msg.iterationLabel && (
-                <div className="text-[9px] text-indigo-400 mb-1 font-medium">{msg.iterationLabel}</div>
-              )}
-              {renderMessageContent(msg)}
-              
-              {/* Tool calls display */}
-              {msg.toolCalls?.map((tc, i) => (
-                <div key={i} className={`mt-2 flex items-center gap-1.5 px-2 py-1 rounded text-[10px] ${
-                  tc.status === 'error' 
-                    ? 'bg-red-950/20 text-red-400' 
-                    : tc.status === 'executing' 
-                      ? 'bg-indigo-950/20 text-indigo-400'
-                      : 'bg-emerald-950/20 text-emerald-400'
-                }`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${
-                    tc.status === 'error' ? 'bg-red-400' : tc.status === 'executing' ? 'bg-indigo-400 animate-pulse' : 'bg-emerald-400'
-                  }`} />
-                  <span>{tc.name}</span>
-                  <span className="text-zinc-600">—</span>
-                  <span className="truncate">{getToolSummary(tc.name, tc.args, tc.result || {})}</span>
-                </div>
-              ))}
-              
-              <p className="text-[9px] mt-1 text-zinc-600">
-                {new Date(msg.timestamp).toLocaleTimeString()}
-              </p>
-            </div>
-            
-            {msg.role === 'user' && (
-              <div className="w-6 h-6 rounded-full bg-zinc-700 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <svg className="w-3 h-3 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                </svg>
-              </div>
-            )}
-          </div>
-        ))}
+        {messages.map((msg, i) => {
+          const isUser = msg.role === 'user';
+          const isLastAssistant = !isUser && i === messages.length - 1;
+          const isStreamingThis = isLastAssistant && isStreaming;
+          const hasThinking = !isUser && msg.thinking;
+          const isThinkingExpanded = expandedThinkingIds.has(msg.id);
+          const toggleThinking = () => {
+            setExpandedThinkingIds(prev => {
+              const next = new Set(prev);
+              if (next.has(msg.id)) next.delete(msg.id);
+              else next.add(msg.id);
+              return next;
+            });
+          };
 
-        {isThinking && (
-          <div className="flex gap-2">
-            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center flex-shrink-0 mt-0.5">
-              <span className="text-[9px] text-white font-bold">A</span>
-            </div>
-            <div className="bg-zinc-800/60 border border-zinc-700/40 rounded-xl rounded-tl-sm px-3 py-2">
-              <div className="flex gap-1">
-                <span className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <span className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+          return (
+          <div key={msg.id} className={`group relative ${i > 0 ? 'border-t border-zinc-800/20' : ''} ${isUser ? 'py-2' : 'py-2.5'}`}>
+            {/* Checkpoint banner */}
+            {msg.checkpointHash && (
+              <div className="flex items-center gap-1.5 px-2 py-1 mb-1 bg-amber-950/20 border border-amber-800/20 rounded text-[10px] text-amber-400">
+                <span>📸</span>
+                <span>Checkpoint</span>
+                <code className="text-amber-500 font-mono">{msg.checkpointHash}</code>
+                <span className="text-amber-600">— auto-saved before file changes</span>
               </div>
+            )}
+
+            {/* Plan todo list */}
+            {planTodos.length > 0 && i === messages.findIndex(m => m.role === 'assistant' && planTodos.length > 0) && (
+              <div className="mb-2 mx-1 border-l-2 border-indigo-500/30 bg-indigo-950/10 rounded-r-md px-3 py-2">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11px] font-medium text-indigo-300">Plan</span>
+                  <span className="text-[10px] text-zinc-500">
+                    {planTodos.filter(t => t.done).length}/{planTodos.length} done
+                  </span>
+                </div>
+                <div className="w-full h-1 bg-zinc-800 rounded-full mb-2 overflow-hidden">
+                  <div
+                    className="h-full bg-indigo-500 rounded-full transition-all duration-300"
+                    style={{ width: `${planTodos.length > 0 ? (planTodos.filter(t => t.done).length / planTodos.length) * 100 : 0}%` }}
+                  />
+                </div>
+                {planTodos.map(todo => (
+                  <label key={todo.id} className="flex items-start gap-2 py-0.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={todo.done}
+                      onChange={() => setPlanTodos(prev => prev.map(p => p.id === todo.id ? { ...p, done: !p.done } : p))}
+                      className="mt-0.5 w-3 h-3 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
+                    />
+                    <span className={`text-[11px] ${todo.done ? 'text-zinc-600 line-through' : 'text-zinc-300'}`}>
+                      {todo.text}
+                      {todo.dependsOn && <span className="text-[10px] text-zinc-600 ml-1">← {todo.dependsOn}</span>}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            {/* Message content */}
+            <div className="px-3">
+              {/* User message: simple right-aligned label */}
+              {isUser && (
+                <div className="flex items-baseline gap-2 mb-0.5">
+                  <span className="text-[10px] font-medium text-zinc-500">You</span>
+                  <span className="text-[9px] text-zinc-700">{new Date(msg.timestamp).toLocaleTimeString()}</span>
+                </div>
+              )}
+
+              {/* Assistant message: model badge + thinking + content */}
+              {!isUser && (
+                <div>
+                  {/* Model badge + timestamp + retry */}
+                  <div className="flex items-center gap-2 mb-0.5">
+                    {msg.iterationLabel ? (
+                      <span className="text-[10px] font-medium text-indigo-400">{msg.iterationLabel}</span>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <span className={`w-1.5 h-1.5 rounded-full ${sourceColorMap[currentModelInfo?.source] || 'bg-zinc-500'}`} />
+                        <span className="text-[10px] font-medium text-zinc-400">
+                          {msg.model || currentModelInfo?.name || 'Agent'}
+                        </span>
+                      </div>
+                    )}
+                    <span className="text-[9px] text-zinc-700">{new Date(msg.timestamp).toLocaleTimeString()}</span>
+                    {msg.isError && <span className="text-[10px] text-red-400">Error</span>}
+                    {/* Retry button */}
+                    {!isStreaming && !msg.isError && (
+                      <button
+                        type="button"
+                        onClick={() => handleRetry(msg.id)}
+                        className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-zinc-600 hover:text-zinc-300 transition-all flex items-center gap-1"
+                        title="Retry"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        Retry
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Thinking block */}
+                  {hasThinking && (
+                    <div className="mb-2">
+                      <button
+                        type="button"
+                        onClick={toggleThinking}
+                        className="flex items-center gap-1.5 text-[10px] text-zinc-500 hover:text-zinc-400 transition-colors w-full text-left"
+                      >
+                        <svg className={`w-2.5 h-2.5 transition-transform ${isThinkingExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                        <span>{getThinkingLabel(msg.thinking, isStreamingThis)}</span>
+                        {isStreamingThis && (
+                          <span className="inline-flex gap-0.5 ml-0.5">
+                            <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </span>
+                        )}
+                        {!isStreamingThis && hasThinking && (
+                          <span className="text-emerald-400 ml-1">✓</span>
+                        )}
+                      </button>
+                      {isThinkingExpanded && (
+                        isStreamingThis ? (
+                          <div className="mt-1.5 pl-3 border-l-2 border-zinc-700/40 relative">
+                            <div className="absolute top-0 left-3 right-0 h-6 bg-gradient-to-b from-zinc-900/50 via-zinc-900/20 to-transparent z-10 pointer-events-none" />
+                            <div
+                              ref={thinkingContainerRef}
+                              className="text-[11px] text-zinc-500 leading-relaxed whitespace-pre-wrap font-mono max-h-[5rem] overflow-y-auto"
+                              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                            >
+                              {msg.thinking}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="mt-1.5 pl-3 border-l-2 border-zinc-700/40 text-[11px] text-zinc-500 leading-relaxed whitespace-pre-wrap font-mono">
+                            {msg.thinking}
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Message body */}
+              <div className={isUser ? 'text-zinc-200' : 'text-zinc-300'}>
+                {renderMessageContent(msg)}
+              </div>
+
+              {/* Tool call cards */}
+              {msg.toolCalls?.map(tc => (
+                <ToolCallCard key={tc.id} tc={tc} msgId={msg.id} />
+              ))}
+            </div>
+          </div>
+          );
+        })}
+
+        {/* Streaming indicator — thin progress bar */}
+        {isThinking && messages.length > 0 && messages[messages.length - 1]?.role === 'user' && (
+          <div className="px-3 py-2 border-t border-zinc-800/20">
+            <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+              <div className="flex-1 h-0.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div className="h-full bg-indigo-500/50 animate-pulse rounded-full" style={{ width: '60%' }} />
+              </div>
+              <span>Agent is thinking...</span>
             </div>
           </div>
         )}
@@ -871,28 +1330,41 @@ RULES:
 
       {/* Input */}
       <div className="p-2 border-t border-zinc-800/40">
-        <form onSubmit={sendMessage} className="flex items-center gap-2">
+        <form id="agent-input-form" onSubmit={sendMessage} className="flex items-center gap-2">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask agent to read, search, or edit..."
+            placeholder={
+              agentMode === 'agent' ? 'Ask agent to build, edit, or fix...'
+              : agentMode === 'plan' ? 'Ask for a plan...'
+              : 'Ask about your codebase...'
+            }
             disabled={isStreaming}
-            className="flex-1 bg-zinc-800 border border-zinc-700/40 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 transition-all"
+            className="flex-1 bg-zinc-800 border border-zinc-700/40 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 transition-all disabled:opacity-50"
           />
-          <button
-            type="submit"
-            disabled={isStreaming || !input.trim()}
-            className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {isStreaming ? (
-              <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            ) : (
+          {isStreaming ? (
+            <button
+              type="button"
+              onClick={handleStop}
+              className="p-1.5 rounded-lg bg-red-600 hover:bg-red-500 transition-colors"
+              title="Stop generation"
+            >
+              <svg className="w-3.5 h-3.5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
               <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
               </svg>
-            )}
-          </button>
+            </button>
+          )}
         </form>
       </div>
     </div>
