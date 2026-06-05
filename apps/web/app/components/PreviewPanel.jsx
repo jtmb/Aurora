@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 
-export default function PreviewPanel({ workspaceId, previewInfo, onClose }) {
+export default function PreviewPanel({ workspaceId, previewInfo, onClose, onStartServer }) {
   const [serverStatus, setServerStatus] = useState({ running: false, port: null, url: null });
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -47,7 +47,7 @@ export default function PreviewPanel({ workspaceId, previewInfo, onClose }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           command: suggestedCommand || 'npm run dev',
-          port: defaultPort === 3000 ? 3001 : defaultPort
+          port: defaultPort
         })
       });
       const data = await res.json();
@@ -56,6 +56,10 @@ export default function PreviewPanel({ workspaceId, previewInfo, onClose }) {
       } else {
         setServerStatus(data);
         setIframeLoading(true);
+        // Notify parent to open terminal with the server command
+        if (onStartServer) {
+          onStartServer(suggestedCommand || 'npm run dev');
+        }
         // Poll for port detection
         let attempts = 0;
         const portCheck = setInterval(async () => {

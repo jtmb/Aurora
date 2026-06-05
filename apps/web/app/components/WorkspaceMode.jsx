@@ -2,12 +2,16 @@
 
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import dynamic from 'next/dynamic';
 import FileTree from './FileTree';
 import MonacoEditor from './MonacoEditor';
 import FileTabs from './FileTabs';
 import AgentPanel from './AgentPanel';
 import PreviewPanel from './PreviewPanel';
+
+// xterm.js uses browser APIs, must be client-only
+const TerminalPanel = dynamic(() => import('./TerminalPanel'), { ssr: false });
 
 export default function WorkspaceMode({}) {
   const [workspaces, setWorkspaces] = useState([]);
@@ -26,6 +30,61 @@ export default function WorkspaceMode({}) {
   const [createName, setCreateName] = useState('');
   const [previewInfo, setPreviewInfo] = useState(null);
   const [showPreview, setShowPreview] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [terminalCommand, setTerminalCommand] = useState('');
+
+  // === Resizable pane state ===
+  const MIN_LEFT = 200;     // minimum file tree width
+  const MIN_RIGHT = 280;    // minimum agent panel width
+  const MIN_TERMINAL = 120; // minimum terminal height
+  const DEFAULT_LEFT = 260;
+  const DEFAULT_RIGHT = 360;
+  const DEFAULT_TERMINAL = 220;
+
+  const [leftWidth, setLeftWidth] = useState(DEFAULT_LEFT);
+  const [rightWidth, setRightWidth] = useState(DEFAULT_RIGHT);
+  const [terminalHeight, setTerminalHeight] = useState(DEFAULT_TERMINAL);
+  const draggingRef = useRef(null); // { handle: 'left'|'right'|'terminal', startX, startY, startSize }
+
+  // Attach global mouse handlers for resize dragging
+  useEffect(() => {
+    const onMouseMove = (e) => {
+      if (!draggingRef.current) return;
+      const { handle, startX, startY, startSize } = draggingRef.current;
+
+      if (handle === 'left') {
+        const delta = e.clientX - startX;
+        setLeftWidth(Math.max(MIN_LEFT, startSize + delta));
+      } else if (handle === 'right') {
+        const delta = startX - e.clientX; // drag left = wider panel
+        setRightWidth(Math.max(MIN_RIGHT, startSize + delta));
+      } else if (handle === 'terminal') {
+        const delta = startY - e.clientY; // drag up = taller terminal
+        setTerminalHeight(Math.max(MIN_TERMINAL, startSize + delta));
+      }
+    };
+
+    const onMouseUp = () => {
+      draggingRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  const startDrag = (handle, e, currentSize) => {
+    e.preventDefault();
+    draggingRef.current = { handle, startX: e.clientX, startY: e.clientY, startSize: currentSize };
+    document.body.style.cursor = handle === 'terminal' ? 'row-resize' : 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+  // === End resizable pane state ===
 
   // Load workspaces on mount
   useEffect(() => {
@@ -51,6 +110,8 @@ export default function WorkspaceMode({}) {
     setFileContents({});
     setShowPreview(false);
     setPreviewInfo(null);
+    setShowTerminal(false);
+    setTerminalCommand('');
 
     try {
       const res = await fetch(`/api/workspace/${ws.id}/tree`);
@@ -398,108 +459,165 @@ export default function WorkspaceMode({}) {
 
   // Full IDE layout
   return (
-    <div className="flex-1 flex min-h-0">
-      {/* File Tree */}
-      <div className="w-[260px] flex-shrink-0">
-        {/* Workspace header */}
-        <div className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800/40">
-          <button
-            onClick={() => setActiveWorkspace(null)}
-            className="flex items-center gap-2 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-            <span className="font-medium truncate">{activeWorkspace.name}</span>
-          </button>
-          <div className="flex items-center gap-0.5">
-            {/* Preview toggle */}
-            {previewInfo && previewInfo.type !== 'none' && (
-              <button
-                onClick={() => setShowPreview(!showPreview)}
-                className={`p-1 rounded transition-colors ${showPreview ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
-                title={showPreview ? 'Show code editor' : `Preview ${previewInfo.framework || 'app'}`}
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                </svg>
-              </button>
-            )}
+    <div className="flex-1 flex flex-col min-h-0">
+      {/* Top Row: FileTree + Editor/Preview + AgentPanel */}
+      <div className="flex-1 flex min-h-0">
+        {/* Resize handle: left edge of file tree (only allow expanding from min) */}
+        {/* File Tree */}
+        <div className="flex-shrink-0 relative" style={{ width: leftWidth }}>
+          {/* Workspace header */}
+          <div className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800/40">
             <button
-              onClick={() => loadWorkspaces().then(() => openWorkspace(activeWorkspace))}
-              className="p-1 rounded text-zinc-500 hover:text-zinc-300 transition-colors"
-              title="Refresh"
+              onClick={() => setActiveWorkspace(null)}
+              className="flex items-center gap-2 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
             >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
               </svg>
+              <span className="font-medium truncate">{activeWorkspace.name}</span>
             </button>
-          </div>
-        </div>
-        <FileTree
-          tree={fileTree}
-          onFileClick={handleFileClick}
-          activeFile={activeFile}
-          searchQuery={treeSearch}
-          onSearchChange={setTreeSearch}
-        />
-      </div>
-
-      {/* Editor + Agent */}
-      <div className="flex-1 flex min-w-0">
-        {/* Editor Panel */}
-        <div className="flex-1 flex flex-col min-w-0">
-          {!showPreview && (
-            <FileTabs
-              openFiles={openFiles}
-              activeFile={activeFile}
-              onTabClick={handleTabClick}
-              onTabClose={handleTabClose}
-            />
-          )}
-          <div className="flex-1 min-h-0 relative">
-            <div className={showPreview && previewInfo ? 'absolute inset-0' : 'hidden'}>
-              <PreviewPanel
-                workspaceId={activeWorkspace.id}
-                previewInfo={previewInfo}
-                onClose={() => setShowPreview(false)}
-              />
-            </div>
-            <div className={!showPreview || !previewInfo ? 'absolute inset-0' : 'hidden'}>
-              <MonacoEditor
-                content={activeFile ? fileContents[activeFile] : null}
-                language={activeFile ? openFiles.find(f => f.path === activeFile)?.language : null}
-                filePath={activeFile}
-                onContentChange={handleContentChange}
-                readOnly={false}
-              />
+            <div className="flex items-center gap-0.5">
+              {/* Preview toggle */}
+              {previewInfo && previewInfo.type !== 'none' && (
+                <button
+                  onClick={() => setShowPreview(!showPreview)}
+                  className={`p-1 rounded transition-colors ${showPreview ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
+                  title={showPreview ? 'Show code editor' : `Preview ${previewInfo.framework || 'app'}`}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                </button>
+              )}
+              {/* Terminal toggle */}
+              <button
+                onClick={() => setShowTerminal(!showTerminal)}
+                className={`p-1 rounded transition-colors ${showTerminal ? 'text-green-400 bg-green-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
+                title={showTerminal ? 'Hide terminal' : 'Show terminal'}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => loadWorkspaces().then(() => openWorkspace(activeWorkspace))}
+                className="p-1 rounded text-zinc-500 hover:text-zinc-300 transition-colors"
+                title="Refresh"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
             </div>
           </div>
-          {/* Git status bar */}
-          {activeWorkspace?.isGitRepo && (
-            <GitStatusBar workspaceId={activeWorkspace.id} />
-          )}
-        </div>
-
-        {/* Agent Panel */}
-        <div className="w-[360px] flex-shrink-0">
-          <AgentPanel
-            workspaceId={activeWorkspace.id}
-            activeFilePath={activeFile}
-            onFileEdit={handleFileEdit}
-            onReadFile={async (path) => {
-              if (!activeWorkspace) return null;
-              const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path })
-              });
-              return res.json();
-            }}
-            currentFileContent={activeFile ? fileContents[activeFile] : null}
-            onOpenPreview={previewInfo && previewInfo.type !== 'none' ? () => setShowPreview(true) : undefined}
+          <FileTree
+            tree={fileTree}
+            onFileClick={handleFileClick}
+            activeFile={activeFile}
+            searchQuery={treeSearch}
+            onSearchChange={setTreeSearch}
           />
+          {/* Left resize sash — absolute overlay, VS Code style */}
+          <div
+            className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
+            style={{ right: 0, width: '6px', transform: 'translateX(50%)' }}
+            onMouseDown={(e) => startDrag('left', e, leftWidth)}
+          >
+            <div className="w-px h-full mx-auto bg-zinc-700 group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
+          </div>
+        </div>
+
+        {/* Editor + Agent */}
+        <div className="flex-1 flex min-w-0">
+          {/* Editor Panel */}
+          <div className="flex-1 flex flex-col min-w-0">
+            {!showPreview && (
+              <FileTabs
+                openFiles={openFiles}
+                activeFile={activeFile}
+                onTabClick={handleTabClick}
+                onTabClose={handleTabClose}
+              />
+            )}
+            <div className="flex-1 min-h-0 relative">
+              <div className={showPreview && previewInfo ? 'absolute inset-0' : 'hidden'}>
+                <PreviewPanel
+                  workspaceId={activeWorkspace.id}
+                  previewInfo={previewInfo}
+                  onClose={() => setShowPreview(false)}
+                  onStartServer={(cmd) => {
+                    setTerminalCommand(cmd);
+                    setShowTerminal(true);
+                  }}
+                />
+              </div>
+              <div className={!showPreview || !previewInfo ? 'absolute inset-0' : 'hidden'}>
+                <MonacoEditor
+                  content={activeFile ? fileContents[activeFile] : null}
+                  language={activeFile ? openFiles.find(f => f.path === activeFile)?.language : null}
+                  filePath={activeFile}
+                  onContentChange={handleContentChange}
+                  readOnly={false}
+                />
+              </div>
+            </div>
+            {/* Git status bar */}
+            {activeWorkspace?.isGitRepo && (
+              <GitStatusBar workspaceId={activeWorkspace.id} />
+            )}
+
+            {/* Terminal (inside editor column — only spans middle pane) */}
+            {showTerminal && activeWorkspace && (
+              <div className="flex-shrink-0 relative" style={{ height: terminalHeight }}>
+                {/* Terminal resize sash — absolute overlay, VS Code style */}
+                <div
+                  className="absolute left-0 right-0 z-10 cursor-row-resize group flex items-center"
+                  style={{ top: 0, height: '6px', transform: 'translateY(-50%)' }}
+                  onMouseDown={(e) => startDrag('terminal', e, terminalHeight)}
+                >
+                  <div className="h-px w-full bg-zinc-700 group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
+                </div>
+                <TerminalPanel
+                  workspaceId={activeWorkspace.id}
+                  initialCommand={terminalCommand || undefined}
+                  resizeKey={terminalHeight}
+                  onClose={() => {
+                    setShowTerminal(false);
+                    setTerminalCommand('');
+                  }}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Agent Panel */}
+          <div className="flex-shrink-0 relative" style={{ width: rightWidth }}>
+            {/* Right resize sash — absolute overlay, VS Code style */}
+            <div
+              className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
+              style={{ left: 0, width: '6px', transform: 'translateX(-50%)' }}
+              onMouseDown={(e) => startDrag('right', e, rightWidth)}
+            >
+              <div className="w-px h-full mx-auto bg-zinc-700 group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
+            </div>
+            <AgentPanel
+              workspaceId={activeWorkspace.id}
+              activeFilePath={activeFile}
+              onFileEdit={handleFileEdit}
+              onReadFile={async (path) => {
+                if (!activeWorkspace) return null;
+                const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ path })
+                });
+                return res.json();
+              }}
+              currentFileContent={activeFile ? fileContents[activeFile] : null}
+              onOpenPreview={previewInfo && previewInfo.type !== 'none' ? () => setShowPreview(true) : undefined}
+            />
+          </div>
         </div>
       </div>
     </div>

@@ -52,7 +52,7 @@ export async function GET(request, { params }) {
       const hasNextConfig = files.some(f => f.startsWith('next.config.'));
       if (hasNextConfig || depNames.includes('next')) {
         type = 'nextjs';
-        port = 3000;
+        port = 3001;  // 3000 is the Aurora app itself
         framework = 'Next.js';
         suggestedCommand = scriptKeys.includes('dev') ? 'npm run dev' : 'npx next dev';
       }
@@ -66,7 +66,7 @@ export async function GET(request, { params }) {
       // Create React App
       else if (depNames.includes('react-scripts')) {
         type = 'react';
-        port = 3000;
+        port = 3001;  // 3000 is the Aurora app itself
         framework = 'Create React App';
         suggestedCommand = scriptKeys.includes('start') ? 'npm start' : 'npx react-scripts start';
       }

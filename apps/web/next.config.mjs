@@ -4,7 +4,7 @@ const nextConfig = {
     '@aurora/auth-service',
     '@aurora/api-gateway',
   ],
-  serverExternalPackages: ['better-sqlite3'],
+  serverExternalPackages: ['better-sqlite3', 'node-pty', 'ws'],
   experimental: {
     externalDir: true,
   },
