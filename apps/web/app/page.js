@@ -643,15 +643,31 @@ export default function Home() {
 
   // Clean parenthesized URLs that LLMs often produce: (https://example.com) → [domain.com](https://example.com)
   // Uses negative lookbehind (?<!\]) to avoid double-converting already-valid [text](url) markdown links.
+  // Also moves trailing sentence punctuation (.!?;) from after a URL to before the link,
+  // so periods don't appear on a new line after block embed cards.
   // Applied at data-ingestion time so ReactMarkdown always receives clean markdown.
   const cleanMarkdownLinks = (text) => {
     if (!text) return text;
-    return text.replace(/(?<!\])(\((https?:\/\/[^\s()]+)\))/g, (match, _outer, url) => {
+    // Pass 1: Convert parenthesized bare URLs to markdown links
+    text = text.replace(/(?<!\])(\((https?:\/\/[^\s<>"']+?)\))/g, (match, _outer, url) => {
       try {
-        const domain = new URL(url).hostname.replace('www.', '');
-        return '[' + domain + '](' + url + ')';
+        const safeUrl = url.replace(/[)]/g, '');
+        if (!safeUrl) return match;
+        const domain = new URL(safeUrl).hostname.replace('www.', '');
+        return '[' + domain + '](' + safeUrl + ')';
       } catch { return match; }
     });
+    // Pass 2: Move trailing sentence punctuation before markdown links
+    //          [text](url).  →  .[text](url)   so the period stays with the sentence
+    text = text.replace(/(\[.*?\]\(https?:\/\/[^\s<>"')]+?\))([.!?;]+)/g, '$2$1');
+    // Pass 3: Handle bare URLs with trailing punctuation that weren't caught by pass 1
+    text = text.replace(/(https?:\/\/[^\s<>"')]+?)([.!?;]+)(\s|$)/g, (_match, url, punct, space) => {
+      try {
+        const domain = new URL(url).hostname.replace('www.', '');
+        return punct + ' [' + domain + '](' + url + ')' + space;
+      } catch { return _match; }
+    });
+    return text;
   };
 
   // Get dynamic thinking label based on content
@@ -1601,23 +1617,23 @@ export default function Home() {
                       <ReactMarkdown
                         remarkPlugins={[remarkGfm]}
                         components={msg.role === 'assistant' ? {
-                          a: ({ href, children, ...props }) => {
+                          a: ({ href, children }) => {
+                            // Safety: if href is missing or invalid, render as plain text
+                            if (!href) return <span>{children}</span>;
                             const preview = linkPreviews[href];
                             const hasPreview = preview && !preview.loading && !preview.error && (preview.title || preview.description);
                             let domain = '';
-                            try { domain = new URL(href).hostname.replace('www.', ''); } catch {}
+                            try { domain = new URL(href).hostname.replace('www.', ''); } catch { return <span>{children || href}</span>; }
 
-                            // Rich block-level preview card — <br/> forces own row, inline-block keeps trailing punctuation in flow
+                            // Rich block-level preview card — displayed as a standalone block in the message
                             if (hasPreview) {
                               return (
-                                <>
-                                  <br />
+                                <span className="block my-2">
                                   <a
                                     href={href}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    {...props}
-                                    className="inline-block my-1 rounded-lg bg-zinc-800/80 border border-zinc-700/50 hover:border-indigo-500/30 hover:bg-zinc-800 transition-colors no-underline overflow-hidden max-w-sm"
+                                    className="block rounded-lg bg-zinc-800/80 border border-zinc-700/50 hover:border-indigo-500/30 hover:bg-zinc-800 transition-colors no-underline overflow-hidden max-w-sm"
                                   >
                                   {preview.image && (
                                     <span className="block w-full h-16 bg-zinc-700/50 overflow-hidden">
@@ -1652,7 +1668,7 @@ export default function Home() {
                                     </span>
                                   </span>
                                 </a>
-                                </>
+                                </span>
                               );
                             }
 
@@ -1662,7 +1678,6 @@ export default function Home() {
                                 href={href}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                {...props}
                                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] no-underline bg-indigo-600/10 border border-indigo-500/20 text-indigo-300 hover:bg-indigo-600/20 hover:text-indigo-200 transition-colors align-baseline"
                               >
                                 <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
