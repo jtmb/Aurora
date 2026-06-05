@@ -1,6 +1,6 @@
 // @aurora/api/chat-completions - OpenAI-compatible chat completions endpoint
-// Supports: OpenAI, Anthropic, Ollama, LM Studio
-// API keys accepted via headers (x-openai-key, x-anthropic-key) or environment variables
+// Supports: DeepSeek, LM Studio
+// API keys accepted via headers (x-deepseek-key, x-lmstudio-url) or environment variables
 // When a valid JWT is provided, user-scoped keys from SQLite take priority over header keys
 
 import { NextResponse } from 'next/server';
@@ -35,15 +35,6 @@ const loadUserKeysFromStorage = async (userId) => {
     const result = {};
     for (const k of keys) {
       switch (k.provider?.toLowerCase()) {
-        case 'openai':
-          result.openai = result.openai || k.rawKey;
-          break;
-        case 'anthropic':
-          result.anthropic = result.anthropic || k.rawKey;
-          break;
-        case 'ollama':
-          result.ollamaBase = result.ollamaBase || k.rawKey;
-          break;
         case 'lmstudio':
         case 'lm_studio':
           result.lmStudioUrl = result.lmStudioUrl || k.rawKey;
@@ -67,12 +58,9 @@ const loadUserKeysFromStorage = async (userId) => {
  */
 const extractKeysFromHeaders = async (request) => {
   const headerKeys = {
-    openai: request.headers.get('x-openai-key') || process.env.OPENAI_API_KEY || '',
-    anthropic: request.headers.get('x-anthropic-key') || process.env.ANTHROPIC_API_KEY || '',
-    ollamaBase: request.headers.get('x-ollama-base') || process.env.OLLAMA_API_BASE || '',
     lmStudioUrl: request.headers.get('x-lmstudio-url') || '',
-    lmStudioHost: process.env.LM_STUDIO_HOST || '',
-    lmStudioPort: process.env.LM_STUDIO_PORT || '',
+    lmStudioHost: request.headers.get('x-lmstudio-host') || process.env.LM_STUDIO_HOST || '',
+    lmStudioPort: request.headers.get('x-lmstudio-port') || process.env.LM_STUDIO_PORT || '',
     lmStudioApiKey: request.headers.get('x-lmstudio-api-key') || process.env.LM_STUDIO_API_KEY || '',
     deepseek: request.headers.get('x-deepseek-key') || process.env.DEEPSEEK_API_KEY || '',
   };
@@ -81,10 +69,6 @@ const extractKeysFromHeaders = async (request) => {
   const userId = getUserId(request);
   if (userId) {
     const userKeys = await loadUserKeysFromStorage(userId);
-    // User-scoped keys override header/env keys when available
-    if (userKeys.openai) headerKeys.openai = userKeys.openai;
-    if (userKeys.anthropic) headerKeys.anthropic = userKeys.anthropic;
-    if (userKeys.ollamaBase) headerKeys.ollamaBase = userKeys.ollamaBase;
     if (userKeys.lmStudioUrl) headerKeys.lmStudioUrl = userKeys.lmStudioUrl;
     if (userKeys.deepseek) headerKeys.deepseek = userKeys.deepseek;
   }
@@ -97,24 +81,6 @@ const extractKeysFromHeaders = async (request) => {
  */
 const getProviders = (keys) => {
   const providers = [];
-  
-  if (keys.openai) {
-    providers.push({
-      id: 'openai',
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: keys.openai,
-      name: 'OpenAI'
-    });
-  }
-
-  if (keys.anthropic) {
-    providers.push({
-      id: 'anthropic',
-      baseUrl: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1',
-      apiKey: keys.anthropic,
-      name: 'Anthropic'
-    });
-  }
 
   // DeepSeek — OpenAI-compatible
   if (keys.deepseek) {
@@ -126,16 +92,7 @@ const getProviders = (keys) => {
     });
   }
 
-  // Ollama - try the configured base URL or default localhost
-  const ollamaBase = keys.ollamaBase || 'http://localhost:11434';
-  providers.push({
-    id: 'ollama',
-    baseUrl: ollamaBase,
-    apiKey: '',
-    name: 'Ollama'
-  });
-
-  // LM Studio - only if custom URL configured
+  // LM Studio — only if URL configured
   if (keys.lmStudioUrl || (keys.lmStudioHost && keys.lmStudioPort)) {
     const lmUrl = keys.lmStudioUrl || `http://${keys.lmStudioHost}:${keys.lmStudioPort}/v1`;
     providers.push({
@@ -153,54 +110,7 @@ const getProviders = (keys) => {
  * Normalize response to OpenAI v1 format regardless of provider
  */
 const normalizeToOpenAIFormat = (data, providerId, modelName) => {
-  if (providerId === 'anthropic') {
-    return {
-      id: `chatcmpl-${Date.now()}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: modelName,
-      choices: [{
-        index: 0,
-        message: {
-          role: 'assistant',
-          content: data.content?.[0]?.text || data.content || ''
-        },
-        finish_reason: data.stop_reason || 'stop'
-      }],
-      usage: {
-        prompt_tokens: data.usage?.input_tokens || 0,
-        completion_tokens: data.usage?.output_tokens || 0,
-        total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
-      },
-      system_fingerprint: 'fp_aurora_anthropic'
-    };
-  }
-
-  // Ollama typically returns OpenAI-compatible format
-  if (providerId === 'ollama') {
-    return {
-      id: data.id || `chatcmpl-${Date.now()}`,
-      object: 'chat.completion',
-      created: data.created || Math.floor(Date.now() / 1000),
-      model: data.model || modelName,
-      choices: [{
-        index: 0,
-        message: {
-          role: 'assistant',
-          content: data.message?.content || data.choices?.[0]?.message?.content || ''
-        },
-        finish_reason: data.done_reason || data.choices?.[0]?.finish_reason || 'stop'
-      }],
-      usage: {
-        prompt_tokens: data.prompt_eval_count || data.usage?.prompt_tokens || 0,
-        completion_tokens: data.eval_count || data.usage?.completion_tokens || 0,
-        total_tokens: (data.prompt_eval_count || 0) + (data.eval_count || 0) || data.usage?.total_tokens || 0
-      },
-      system_fingerprint: 'fp_aurora_ollama'
-    };
-  }
-
-  // OpenAI / LM Studio - already compatible
+  // DeepSeek / LM Studio — already OpenAI-compatible
   return {
     id: data.id || `chatcmpl-${Date.now()}`,
     object: 'chat.completion',
@@ -227,38 +137,6 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens,
   let url, body, headers = { 'Content-Type': 'application/json' };
 
   switch (provider.id) {
-    case 'openai':
-      url = `${provider.baseUrl}/chat/completions`;
-      headers['Authorization'] = `Bearer ${provider.apiKey}`;
-      body = { model, messages, temperature, max_tokens: maxTokens, stream };
-      break;
-
-    case 'anthropic':
-      url = `${provider.baseUrl}/messages`;
-      headers['x-api-key'] = provider.apiKey;
-      headers['anthropic-version'] = '2023-06-01';
-      // Anthropic requires system prompt as top-level, not in messages
-      const systemMsg = messages.find(m => m.role === 'system');
-      const chatMessages = messages.filter(m => m.role !== 'system');
-      body = {
-        model,
-        max_tokens: maxTokens || 4096,
-        system: systemMsg?.content || 'You are a helpful assistant.',
-        messages: chatMessages.map(m => ({ role: m.role, content: m.content })),
-        stream
-      };
-      break;
-
-    case 'ollama':
-      url = `${provider.baseUrl}/api/chat`;
-      body = {
-        model,
-        messages: messages.map(m => ({ role: m.role, content: m.content })),
-        stream,
-        options: { temperature }
-      };
-      break;
-
     case 'lmstudio':
       // LM Studio uses OpenAI-compatible /v1/chat/completions endpoint
       // Ensure /v1 prefix regardless of whether settings already includes it
@@ -284,7 +162,7 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens,
 export async function POST(request) {
   try {
     const body = await request.json();
-    const model = body.model || 'llama3';
+    const model = body.model || 'deepseek-chat';
     const messages = body.messages || [];
     const temperature = body.temperature ?? 0.7;
     const requestedProvider = body.provider || '';
@@ -314,18 +192,14 @@ export async function POST(request) {
     
     if (!selectedProvider) {
       // Prefer provider that matches the model name
-      if (model.startsWith('gpt-') && keys.openai) {
-        selectedProvider = providers.find(p => p.id === 'openai');
-      } else if (model.startsWith('claude-') && keys.anthropic) {
-        selectedProvider = providers.find(p => p.id === 'anthropic');
-      } else if (model.startsWith('deepseek-') && keys.deepseek) {
+      if (model.startsWith('deepseek-') && keys.deepseek) {
         selectedProvider = providers.find(p => p.id === 'deepseek');
       }
     }
 
     if (!selectedProvider) {
-      // Pick first provider with an API key, otherwise fall back to Ollama
-      selectedProvider = providers.find(p => p.apiKey) || providers.find(p => p.id === 'ollama');
+      // Pick first available provider (LM Studio doesn't require API key for local)
+      selectedProvider = providers[0];
     }
 
     if (!selectedProvider) {
