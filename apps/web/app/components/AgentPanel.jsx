@@ -16,7 +16,8 @@ export default function AgentPanel({
   currentFileContent,
   onOpenPreview,
   onToggleMode,
-  codeMode
+  codeMode,
+  previewInfo
 }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -36,7 +37,9 @@ export default function AgentPanel({
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [expandedThinkingIds, setExpandedThinkingIds] = useState(new Set());
   const [expandedToolIds, setExpandedToolIds] = useState(new Set());
-  const [planTodos, setPlanTodos] = useState([]); // [{ id, text, done, dependsOn }]
+  const [planTodos, setPlanTodos] = useState([]); // [{ id, text, done, dependsOn, complexity, phase, phaseNum }]
+  const [planSummary, setPlanSummary] = useState('');
+  const [planMessageId, setPlanMessageId] = useState(null); // id of the assistant message that contains the plan
   const modelDropdownRef = useRef(null);
 
   // Dynamic thinking label based on content (mirrors page.js pattern)
@@ -55,22 +58,64 @@ export default function AgentPanel({
     return 'Thinking';
   };
 
-  // Parse plan mode response into structured todo items
+  // Parse plan mode response into structured todo items with phases and complexity
   const parsePlanTodos = (content) => {
     const todos = [];
-    const regex = /^\s*(?:\d+\.|[-*])\s*\[([ xX])\]\s+(.+)$/gm;
-    let match;
-    while ((match = regex.exec(content)) !== null) {
-      const text = match[2].trim();
-      const dependsMatch = text.match(/\*depends on\s+(.+?)\*$/i);
-      todos.push({
-        id: `plan_${todos.length}`,
-        text: dependsMatch ? text.replace(dependsMatch[0], '').trim() : text,
-        done: match[1].toLowerCase() === 'x',
-        dependsOn: dependsMatch ? dependsMatch[1].trim() : null
-      });
+    let summary = '';
+
+    // Extract summary text
+    const summaryMatch = content.match(/###\s*Summary\s*\n([\s\S]*?)(?=\n###\s*Phase|\n*$)/i);
+    if (summaryMatch) {
+      summary = summaryMatch[1].trim();
     }
-    return todos;
+
+    // Extract phases and their tasks
+    // No 's' flag — phase name must be on one line, task content follows
+    const phaseRegex = /###\s*Phase\s*(\d+):\s*([^\n]+)\n([\s\S]*?)(?=\n###\s*Phase|$)/gi;
+    let phaseMatch;
+    while ((phaseMatch = phaseRegex.exec(content)) !== null) {
+      const phaseNum = parseInt(phaseMatch[1]);
+      const phaseName = phaseMatch[2].trim();
+      const phaseContent = phaseMatch[3];
+
+      // Parse tasks within this phase: - [ ] 🟢 Task — *depends on ...*
+      const taskRegex = /^\s*-\s*\[([ xX])\]\s*(🟢|🟡|🔴)\s+(.+)$/gm;
+      let taskMatch;
+      while ((taskMatch = taskRegex.exec(phaseContent)) !== null) {
+        const text = taskMatch[3].trim();
+        const dependsMatch = text.match(/\*\s*depends on\s+(.+?)\*\s*$/i);
+        todos.push({
+          id: `plan_${todos.length}`,
+          text: dependsMatch ? text.replace(dependsMatch[0], '').trim() : text,
+          done: taskMatch[1].toLowerCase() === 'x',
+          complexity: taskMatch[2],
+          phase: `${phaseNum}: ${phaseName}`,
+          phaseNum,
+          dependsOn: dependsMatch ? dependsMatch[1].trim() : null
+        });
+      }
+    }
+
+    // Fallback: if no structured phases found, try old flat format
+    if (todos.length === 0) {
+      const regex = /^\s*(?:\d+\.|[-*])\s*\[([ xX])\]\s+(.+)$/gm;
+      let match;
+      while ((match = regex.exec(content)) !== null) {
+        const text = match[2].trim();
+        const dependsMatch = text.match(/\*\s*depends on\s+(.+?)\*\s*$/i);
+        todos.push({
+          id: `plan_${todos.length}`,
+          text: dependsMatch ? text.replace(dependsMatch[0], '').trim() : text,
+          done: match[1].toLowerCase() === 'x',
+          complexity: '🟢',
+          phase: 'Plan',
+          phaseNum: 0,
+          dependsOn: dependsMatch ? dependsMatch[1].trim() : null
+        });
+      }
+    }
+
+    return { todos, summary };
   };
 
   // Auto-scroll thinking container during streaming
@@ -375,6 +420,8 @@ export default function AgentPanel({
     setIsStreaming(true);
     setIsThinking(true);
     setPlanTodos([]);
+    setPlanSummary('');
+    setPlanMessageId(null);
 
     const turnId = `turn_${++turnCounterRef.current}`;
     const userMsg = {
@@ -434,8 +481,16 @@ Content goes INSIDE the block body, NOT as a content="..." attribute.`;
 
         // Parse plan todos in plan mode
         if (agentMode === 'plan' && iter === 0) {
-          const todos = parsePlanTodos(rawContent);
-          if (todos.length > 0) setPlanTodos(todos);
+          const { todos, summary } = parsePlanTodos(rawContent);
+          if (todos.length > 0) {
+            setPlanTodos(todos);
+            setPlanSummary(summary);
+            setPlanMessageId(assistantId);
+            // Mark message so renderer hides raw content
+            setMessages(prev => prev.map(m =>
+              m.id === assistantId ? { ...m, isPlanResult: true } : m
+            ));
+          }
         }
 
         // Parse tool calls from the response
@@ -578,7 +633,10 @@ Content goes INSIDE the block body, NOT as a content="..." attribute.`;
         'create_file': 'create_file', 'read_file': 'read_file',
         'list_dir': 'list_dir', 'grep_search': 'grep_search',
         'replace_string_in_file': 'replace_string_in_file',
-        'run_in_terminal': 'run_in_terminal'
+        'run_in_terminal': 'run_in_terminal',
+        'dev_server_status': 'dev_server_status',
+        'dev_server_start': 'dev_server_start',
+        'dev_server_stop': 'dev_server_stop'
       };
       if (nameMap[toolName]) {
         // Validate required args before accepting the tool call
@@ -611,6 +669,9 @@ Content goes INSIDE the block body, NOT as a content="..." attribute.`;
         case 'grep_search': return await executeSearch(wsId, tc.args.query);
         case 'list_dir': return await executeListFiles(wsId, tc.args.path);
         case 'run_in_terminal': return { error: 'Terminal execution not yet implemented. Use create_file to write files instead.' };
+        case 'dev_server_status': return await executeDevServerStatus(wsId);
+        case 'dev_server_start': return await executeDevServerStart(wsId, tc.args.command);
+        case 'dev_server_stop': return await executeDevServerStop(wsId);
         default: return { error: `Unknown tool: ${tc.name}` };
       }
     } catch (err) {
@@ -630,6 +691,9 @@ Content goes INSIDE the block body, NOT as a content="..." attribute.`;
         const files = result.files || result.tree || [];
         return `Listed ${fp}: ${files.length} entries — ${files.slice(0, 20).map(f => f.name || f.path).join(', ')}${files.length > 20 ? '...' : ''}`;
       case 'git_status': return `Git branch: ${result.branch || 'unknown'}, modified: ${result.modified?.length || 0}`;
+      case 'dev_server_status': return result.running ? `Server running on port ${result.port} (${result.url}). ${result.logs?.length || 0} log lines.` : 'Server not running';
+      case 'dev_server_start': return result.running ? `Server started on port ${result.port} (${result.url}). Command: ${result.command}` : `Server start attempted. Check logs: ${result.logs?.length || 0} lines captured.`;
+      case 'dev_server_stop': return result.message || 'Server stopped';
       default: return 'Done';
     }
   };
@@ -660,33 +724,71 @@ new text
 \`\`\`grep_search query="search pattern"
 \`\`\`
 
+\`\`\`dev_server_status
+\`\`\`
+
+\`\`\`dev_server_start
+\`\`\`
+
+\`\`\`dev_server_stop
+\`\`\`
+
 - First step: ${'`'}list_dir path="."${'`'} to see what exists.
 - create_file puts content INSIDE the block body, never as content="..." attribute.
 - Call ONE tool per response. Nothing outside the fenced block.
-- When done, respond "Task complete." with no tool block.`;
+
+TESTING WORKFLOW — After creating/modifying files for a project:
+1. Use ${'`'}dev_server_start${'`'} to start the dev server. This returns build logs.
+2. Use ${'`'}dev_server_status${'`'} to check if the server is running and read build logs.
+3. If logs show errors → fix the offending files with ${'`'}replace_string_in_file${'`'} and re-check with ${'`'}dev_server_status${'`'}.
+4. When the build is clean (no errors in logs), respond "Build successful. Task complete."
+
+- When done and build is clean, respond "Task complete." with no tool block.
+
+${previewInfo && previewInfo.type !== 'none' ? `YOUR PROJECT: ${previewInfo.framework || previewInfo.type} app. Dev command: \`${previewInfo.suggestedCommand || 'npm run dev'}\`. Preview URL: http://localhost:${previewInfo.port || 'N/A'}. After building, ALWAYS start dev server and check logs for errors.
+
+` : ''}`;
     }
 
     // Plan mode
     if (mode === 'plan') {
-      return `Workspace: /api/workspace/${wsId}.
+      return `You are a planning assistant in a coding workspace. Your job is to create clear, structured, actionable implementation plans.
 
-TOOLS (use fenced code blocks to call them):
-\`\`\`read_file filePath="filename.ext"
-\`\`\`
-\`\`\`list_dir path="."
-\`\`\`
-\`\`\`grep_search query="pattern"
-\`\`\`
+## WORKFLOW
+1. FIRST, explore the workspace to understand existing files and structure. Use read_file on key files and list_dir to see what's there.
+2. THEN, output ONLY the plan in the format below. Do NOT continue past the plan.
 
-PLAN OUTPUT FORMAT (after exploration):
-## Summary
-Brief explanation of the goal and approach.
+## PLAN OUTPUT FORMAT
 
-## Plan
-- [ ] Task description — *depends on Task #*
-- [ ] Another task
+### Summary
+A concise 1-2 sentence description of what will be built or changed.
 
-Use 🟢🟡🔴 for complexity. NEVER use create_file or replace_string_in_file.`;
+### Phase 1: [Descriptive Name]
+- [ ] 🟢 Task description
+- [ ] 🟡 Task description — *depends on Task 1*
+- [ ] 🔴 Task description — *depends on Task 2*
+
+### Phase 2: [Descriptive Name]
+- [ ] 🟢 Task description
+
+### Phase 3: [Descriptive Name]
+- [ ] 🟢 Task description
+
+## COMPLEXITY GUIDE
+- 🟢 = Simple (boilerplate, config, imports, styling)
+- 🟡 = Medium (logic, state management, API routes, data fetching)
+- 🔴 = Complex (auth, real-time features, multi-step workflows, database)
+
+## RULES
+- ALWAYS include the 🟢🟡🔴 complexity indicator at the start of every task
+- ALWAYS note dependencies with — *depends on Phase X, Task Y* when tasks build on others
+- Group tasks into 2-7 numbered phases with descriptive names
+- 2-6 tasks per phase
+- Each task MUST be a specific, actionable item — never vague concepts like "set up project"
+- NEVER use create_file, replace_string_in_file, or any write/modify tools
+- NEVER use dev_server_start, dev_server_stop, or dev_server_status
+- Allowed tools: read_file, list_dir, grep_search only
+- Output NOTHING after the plan — end your response after the last task`;
     }
 
     // Agent mode (default)
@@ -707,7 +809,32 @@ COMPLETE FILE CONTENT GOES HERE
 exact text to replace
 ===REPLACE===
 new text
-\`\`\``;
+\`\`\`
+\`\`\`dev_server_status
+\`\`\`
+\`\`\`dev_server_start
+\`\`\`
+\`\`\`dev_server_stop
+\`\`\`
+
+TESTING WORKFLOW — After creating/modifying project files:
+1. Use \`dev_server_start\` to start the dev server. This returns build output logs.
+2. Use \`dev_server_status\` to check the server and read build logs.
+3. If logs show errors → fix files and re-check with \`dev_server_status\`.
+4. When build is clean, respond "Build successful. Task complete."
+`;
+
+    // Inject preview-info if available
+    if (previewInfo && previewInfo.type !== 'none') {
+      prompt += `\nYour app is a ${previewInfo.framework || previewInfo.type} project. `;
+      if (previewInfo.suggestedCommand) {
+        prompt += `Dev command: \`${previewInfo.suggestedCommand}\`. `;
+      }
+      if (previewInfo.port) {
+        prompt += `Preview URL: http://localhost:${previewInfo.port}. `;
+      }
+      prompt += `\nAfter building, ALWAYS start the dev server and check logs for errors before declaring task complete.`;
+    }
 
     if (activeFile) prompt += `\n\nActive file in editor: "${activeFile}"`;
     if (fileContent) {
@@ -820,6 +947,73 @@ new text
     return await res.json();
   };
 
+  // === Dev server tools ===
+
+  const executeDevServerStatus = async (wsId) => {
+    const res = await fetch(`/api/workspace/${wsId}/dev-server`);
+    if (!res.ok) throw new Error('Status check failed');
+    const data = await res.json();
+    if (data.error) return { error: data.error.message };
+    return {
+      running: data.running || false,
+      port: data.port || null,
+      url: data.url || null,
+      logs: data.logs || [],
+      startedAt: data.startedAt || null
+    };
+  };
+
+  const executeDevServerStart = async (wsId, command) => {
+    // If no command provided, detect from preview-info
+    let cmd = command;
+    if (!cmd) {
+      try {
+        const infoRes = await fetch(`/api/workspace/${wsId}/preview-info`);
+        const infoData = await infoRes.json();
+        if (!infoData.error && infoData.suggestedCommand) {
+          cmd = infoData.suggestedCommand;
+        } else {
+          cmd = 'npm run dev';
+        }
+      } catch {
+        cmd = 'npm run dev';
+      }
+    }
+
+    const res = await fetch(`/api/workspace/${wsId}/dev-server`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: cmd })
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error?.message || `Start failed (${res.status})`);
+    }
+    const data = await res.json();
+
+    // Wait a moment then check status for build output
+    await new Promise(r => setTimeout(r, 3000));
+
+    const statusRes = await fetch(`/api/workspace/${wsId}/dev-server`);
+    const statusData = await statusRes.json();
+
+    return {
+      running: statusData.running || false,
+      port: statusData.port || data.port || null,
+      url: statusData.url || data.url || null,
+      logs: statusData.logs || data.logs || [],
+      command: cmd,
+      message: data.message || 'Dev server started'
+    };
+  };
+
+  const executeDevServerStop = async (wsId) => {
+    const res = await fetch(`/api/workspace/${wsId}/dev-server`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Stop failed');
+    const data = await res.json();
+    return { running: false, message: data.message || 'Dev server stopped' };
+  };
+
   // UI display summary for tool call badges
   const getToolSummary = (name, args, result) => {
     const fp = args.filePath || args.path || '?';
@@ -830,6 +1024,9 @@ new text
       case 'grep_search': return `Found ${result.results?.length || 0} matches for "${args.query}"`;
       case 'list_dir': return `Listed ${fp}`;
       case 'run_in_terminal': return `Ran \`${args.command}\``;
+      case 'dev_server_status': return `Checked dev server status`;
+      case 'dev_server_start': return `Started dev server (${args.command || 'npm run dev'})`;
+      case 'dev_server_stop': return `Stopped dev server`;
       default: return 'Done';
     }
   };
@@ -854,6 +1051,9 @@ new text
       case 'grep_search': return '🔍';
       case 'list_dir': return '📁';
       case 'run_in_terminal': return '⚡';
+      case 'dev_server_status': return '🔍';
+      case 'dev_server_start': return '▶️';
+      case 'dev_server_stop': return '⏹️';
       default: return '🔧';
     }
   };
@@ -865,6 +1065,9 @@ new text
       case 'replace_string_in_file': return 'border-amber-500/30';
       case 'grep_search': return 'border-violet-500/30';
       case 'list_dir': return 'border-cyan-500/30';
+      case 'dev_server_status': return 'border-green-500/30';
+      case 'dev_server_start': return 'border-green-500/30';
+      case 'dev_server_stop': return 'border-red-500/30';
       default: return 'border-zinc-600/30';
     }
   };
@@ -884,6 +1087,8 @@ new text
       return <div className="text-red-400 text-xs">{msg.content}</div>;
     }
     if (!msg.content) return null;
+    // Plan result messages: don't show raw content, only the structured plan UI
+    if (msg.isPlanResult) return null;
 
     // Remove tool call fenced blocks from displayed content (shown in tool cards)
     const toolBlockRegex = /```(create_file|replace_string_in_file|read_file|list_dir|grep_search|run_in_terminal)\s+[^\n]*\n[\s\S]*?```/g;
@@ -1187,35 +1392,92 @@ new text
               </div>
             )}
 
-            {/* Plan todo list */}
-            {planTodos.length > 0 && i === messages.findIndex(m => m.role === 'assistant' && planTodos.length > 0) && (
-              <div className="mb-2 mx-1 border-l-2 border-indigo-500/30 bg-indigo-950/10 rounded-r-md px-3 py-2">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[11px] font-medium text-indigo-300">Plan</span>
+            {/* Plan — phased structured view */}
+            {planTodos.length > 0 && msg.isPlanResult && (
+              <div className="mb-3 mx-1">
+                {/* Summary banner */}
+                {planSummary && (
+                  <div className="mb-2 px-3 py-2 bg-indigo-950/20 border border-indigo-800/20 rounded-lg">
+                    <p className="text-[11px] text-indigo-200/80 leading-relaxed">{planSummary}</p>
+                  </div>
+                )}
+
+                {/* Overall progress */}
+                <div className="flex items-center justify-between mb-1.5 px-1">
+                  <span className="text-[10px] font-medium text-indigo-300 uppercase tracking-wider">Implementation Plan</span>
                   <span className="text-[10px] text-zinc-500">
-                    {planTodos.filter(t => t.done).length}/{planTodos.length} done
+                    {planTodos.filter(t => t.done).length}/{planTodos.length} tasks
                   </span>
                 </div>
-                <div className="w-full h-1 bg-zinc-800 rounded-full mb-2 overflow-hidden">
+                <div className="w-full h-1 bg-zinc-800 rounded-full mb-3 overflow-hidden">
                   <div
-                    className="h-full bg-indigo-500 rounded-full transition-all duration-300"
+                    className="h-full bg-indigo-500 rounded-full transition-all duration-500"
                     style={{ width: `${planTodos.length > 0 ? (planTodos.filter(t => t.done).length / planTodos.length) * 100 : 0}%` }}
                   />
                 </div>
-                {planTodos.map(todo => (
-                  <label key={todo.id} className="flex items-start gap-2 py-0.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={todo.done}
-                      onChange={() => setPlanTodos(prev => prev.map(p => p.id === todo.id ? { ...p, done: !p.done } : p))}
-                      className="mt-0.5 w-3 h-3 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
-                    />
-                    <span className={`text-[11px] ${todo.done ? 'text-zinc-600 line-through' : 'text-zinc-300'}`}>
-                      {todo.text}
-                      {todo.dependsOn && <span className="text-[10px] text-zinc-600 ml-1">← {todo.dependsOn}</span>}
-                    </span>
-                  </label>
-                ))}
+
+                {/* Group tasks by phase */}
+                {(() => {
+                  const phases = {};
+                  planTodos.forEach(t => {
+                    const key = t.phase || 'Plan';
+                    if (!phases[key]) phases[key] = [];
+                    phases[key].push(t);
+                  });
+                  return Object.entries(phases).map(([phaseName, tasks]) => {
+                    const phaseDone = tasks.filter(t => t.done).length;
+                    const phaseTotal = tasks.length;
+                    return (
+                      <div key={phaseName} className="mb-2 last:mb-0">
+                        {/* Phase header */}
+                        <div className="flex items-center gap-1.5 mb-1 px-1">
+                          <span className={`w-1.5 h-1.5 rounded-full ${phaseDone === phaseTotal ? 'bg-emerald-500' : phaseDone > 0 ? 'bg-amber-500' : 'bg-zinc-600'}`} />
+                          <span className="text-[10px] font-medium text-zinc-400">
+                            {phaseName}
+                          </span>
+                          <span className="text-[9px] text-zinc-600">{phaseDone}/{phaseTotal}</span>
+                        </div>
+                        {/* Phase tasks */}
+                        <div className="border-l-2 border-zinc-800/50 ml-1 pl-3 space-y-0.5">
+                          {tasks.map(todo => (
+                            <label key={todo.id} className="flex items-start gap-2 py-0.5 cursor-pointer group/task">
+                              <input
+                                type="checkbox"
+                                checked={todo.done}
+                                onChange={() => setPlanTodos(prev => prev.map(p => p.id === todo.id ? { ...p, done: !p.done } : p))}
+                                className="mt-0.5 w-3 h-3 rounded border-zinc-600 bg-zinc-800 accent-indigo-500 flex-shrink-0"
+                              />
+                              <span className={`text-[11px] leading-relaxed ${todo.done ? 'text-zinc-600 line-through' : 'text-zinc-300 group-hover/task:text-zinc-200'}`}>
+                                {todo.text}
+                                {todo.dependsOn && (
+                                  <span className="text-[10px] text-zinc-600 ml-1.5 italic">— depends on {todo.dependsOn}</span>
+                                )}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+
+                {/* Execute plan button */}
+                <div className="mt-3 pt-2 border-t border-zinc-800/30 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAgentMode('agent');
+                      localStorage.setItem('aurora_agent_mode', 'agent');
+                    }}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-medium transition-colors flex items-center gap-1.5"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Execute Plan
+                  </button>
+                  <span className="text-[9px] text-zinc-600">Switches to Agent mode to implement the plan</span>
+                </div>
               </div>
             )}
 

@@ -719,6 +719,7 @@ export default function WorkspaceMode({}) {
                 }}
                 onToggleMode={handleToggleMode}
                 codeMode={codeMode}
+                previewInfo={previewInfo}
               />
             </div>
           </div>
@@ -909,6 +910,7 @@ export default function WorkspaceMode({}) {
                 }}
                 onToggleMode={handleToggleMode}
                 codeMode={codeMode}
+                previewInfo={previewInfo}
               />
             </div>
           </div>

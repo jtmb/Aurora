@@ -151,7 +151,8 @@ export async function GET(request, { params }) {
       port: entry.port,
       pid: entry.process?.pid,
       url: entry.port ? `http://localhost:${entry.port}` : null,
-      startedAt: entry.startedAt
+      startedAt: entry.startedAt,
+      logs: entry.logs?.slice(-100) || []  // Last 100 log lines for agent inspection
     });
   } catch (error) {
     console.error('[workspace/dev-server] GET Error:', error.message);
@@ -235,39 +236,61 @@ export async function POST(request, { params }) {
     const startedAt = new Date().toISOString();
     let detectedPort = null;  // Start null so output parsing can detect it
     
-    // Capture stdout/stderr to detect the port
-    let outputBuffer = '';
+    // Rolling log buffer (max 200 lines, ~10KB) for agent error inspection
+    const MAX_LOG_LINES = 200;
+    
+    // Pre-register the store entry so stdout/stderr listeners can access it
+    const entry = {
+      process: proc,
+      port: assignedPort,
+      pid: proc.pid,
+      startedAt,
+      command,
+      logs: []
+    };
+    serverStore.set(id, entry);
+    
+    const appendLog = (text) => {
+      const lines = text.split('\n');
+      for (const line of lines) {
+        if (line.trim()) {
+          entry.logs.push(`[${new Date().toISOString()}] ${line}`);
+          if (entry.logs.length > MAX_LOG_LINES) entry.logs.shift();
+        }
+      }
+    };
     
     proc.stdout.on('data', (data) => {
       const text = data.toString();
-      outputBuffer += text;
+      appendLog(text);
       
       // Try to detect port from output (Next.js may use its own port despite PORT env)
       const port = parsePortFromOutput(text);
       if (port && port !== assignedPort) {
         detectedPort = port;
-        const entry = serverStore.get(id);
         if (entry) entry.port = port;
       }
     });
     
     proc.stderr.on('data', (data) => {
-      outputBuffer += data.toString();
-      const port = parsePortFromOutput(data.toString());
+      const text = data.toString();
+      appendLog(text);
+      const port = parsePortFromOutput(text);
       if (port && port !== assignedPort) {
         detectedPort = port;
-        const entry = serverStore.get(id);
         if (entry) entry.port = port;
       }
     });
     
     proc.on('exit', (code) => {
+      appendLog(`Process exited with code ${code}`);
       console.log(`[workspace/dev-server] Spawn process for ${id} exited with code ${code}`);
       // Don't delete from store — npm exits after launching the real dev server.
       // Port aliveness check in GET handler determines if server is truly gone.
     });
     
     proc.on('error', (err) => {
+      appendLog(`Process error: ${err.message}`);
       console.error(`[workspace/dev-server] Process error for ${id}:`, err.message);
       // Only delete if we never detected a port (true startup failure)
       if (!detectedPort) {
@@ -275,22 +298,19 @@ export async function POST(request, { params }) {
       }
     });
     
-    // Store the process — use detectedPort if output revealed a different port, else assignedPort
+    // Update the stored entry with detected port if different from assigned
+    if (detectedPort && detectedPort !== assignedPort) {
+      entry.port = detectedPort;
+    }
     const finalPort = detectedPort || assignedPort;
-    serverStore.set(id, {
-      process: proc,
-      port: finalPort,
-      pid: proc.pid,
-      startedAt,
-      command
-    });
-    
+
     return NextResponse.json({
       running: true,
       port: finalPort,
       pid: proc.pid,
       url: finalPort ? `http://localhost:${finalPort}` : null,
       startedAt,
+      logs: entry.logs.slice(-50),  // Return last 50 lines on start
       command,
       message: portChanged ? `Dev server started on port ${finalPort}` : 'Dev server started'
     }, { status: 201 });
