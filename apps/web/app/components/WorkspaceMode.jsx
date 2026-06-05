@@ -7,6 +7,7 @@ import FileTree from './FileTree';
 import MonacoEditor from './MonacoEditor';
 import FileTabs from './FileTabs';
 import AgentPanel from './AgentPanel';
+import PreviewPanel from './PreviewPanel';
 
 export default function WorkspaceMode({}) {
   const [workspaces, setWorkspaces] = useState([]);
@@ -23,6 +24,8 @@ export default function WorkspaceMode({}) {
   const [cloneName, setCloneName] = useState('');
   const [cloneLoading, setCloneLoading] = useState(false);
   const [createName, setCreateName] = useState('');
+  const [previewInfo, setPreviewInfo] = useState(null);
+  const [showPreview, setShowPreview] = useState(false);
 
   // Load workspaces on mount
   useEffect(() => {
@@ -46,6 +49,8 @@ export default function WorkspaceMode({}) {
     setOpenFiles([]);
     setActiveFile(null);
     setFileContents({});
+    setShowPreview(false);
+    setPreviewInfo(null);
 
     try {
       const res = await fetch(`/api/workspace/${ws.id}/tree`);
@@ -60,6 +65,15 @@ export default function WorkspaceMode({}) {
     } finally {
       setIsLoading(false);
     }
+
+    // Fetch preview info
+    try {
+      const previewRes = await fetch(`/api/workspace/${ws.id}/preview-info`);
+      const previewData = await previewRes.json();
+      if (!previewData.error) {
+        setPreviewInfo(previewData);
+      }
+    } catch {}
   };
 
   const handleFileClick = async (node) => {
@@ -398,15 +412,30 @@ export default function WorkspaceMode({}) {
             </svg>
             <span className="font-medium truncate">{activeWorkspace.name}</span>
           </button>
-          <button
-            onClick={() => loadWorkspaces().then(() => openWorkspace(activeWorkspace))}
-            className="p-1 rounded text-zinc-500 hover:text-zinc-300 transition-colors"
-            title="Refresh"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-0.5">
+            {/* Preview toggle */}
+            {previewInfo && previewInfo.type !== 'none' && (
+              <button
+                onClick={() => setShowPreview(!showPreview)}
+                className={`p-1 rounded transition-colors ${showPreview ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
+                title={showPreview ? 'Show code editor' : `Preview ${previewInfo.framework || 'app'}`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+              </button>
+            )}
+            <button
+              onClick={() => loadWorkspaces().then(() => openWorkspace(activeWorkspace))}
+              className="p-1 rounded text-zinc-500 hover:text-zinc-300 transition-colors"
+              title="Refresh"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
+          </div>
         </div>
         <FileTree
           tree={fileTree}
@@ -421,20 +450,31 @@ export default function WorkspaceMode({}) {
       <div className="flex-1 flex min-w-0">
         {/* Editor Panel */}
         <div className="flex-1 flex flex-col min-w-0">
-          <FileTabs
-            openFiles={openFiles}
-            activeFile={activeFile}
-            onTabClick={handleTabClick}
-            onTabClose={handleTabClose}
-          />
-          <div className="flex-1 min-h-0">
-            <MonacoEditor
-              content={activeFile ? fileContents[activeFile] : null}
-              language={activeFile ? openFiles.find(f => f.path === activeFile)?.language : null}
-              filePath={activeFile}
-              onContentChange={handleContentChange}
-              readOnly={false}
+          {!showPreview && (
+            <FileTabs
+              openFiles={openFiles}
+              activeFile={activeFile}
+              onTabClick={handleTabClick}
+              onTabClose={handleTabClose}
             />
+          )}
+          <div className="flex-1 min-h-0 relative">
+            <div className={showPreview && previewInfo ? 'absolute inset-0' : 'hidden'}>
+              <PreviewPanel
+                workspaceId={activeWorkspace.id}
+                previewInfo={previewInfo}
+                onClose={() => setShowPreview(false)}
+              />
+            </div>
+            <div className={!showPreview || !previewInfo ? 'absolute inset-0' : 'hidden'}>
+              <MonacoEditor
+                content={activeFile ? fileContents[activeFile] : null}
+                language={activeFile ? openFiles.find(f => f.path === activeFile)?.language : null}
+                filePath={activeFile}
+                onContentChange={handleContentChange}
+                readOnly={false}
+              />
+            </div>
           </div>
           {/* Git status bar */}
           {activeWorkspace?.isGitRepo && (
@@ -458,6 +498,7 @@ export default function WorkspaceMode({}) {
               return res.json();
             }}
             currentFileContent={activeFile ? fileContents[activeFile] : null}
+            onOpenPreview={previewInfo && previewInfo.type !== 'none' ? () => setShowPreview(true) : undefined}
           />
         </div>
       </div>
