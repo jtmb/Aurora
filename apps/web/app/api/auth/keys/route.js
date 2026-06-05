@@ -1,6 +1,7 @@
-// @aurora/api/auth/keys - API key management (Redis-backed)
+// @aurora/api/auth/keys - API key management (SQLite-backed)
 
 import { NextResponse } from 'next/server';
+import { runMigrations } from '@aurora/shared/db-migrate';
 import { AuthHandler } from '@aurora/auth-service/handlers';
 import { ApiKeyManager } from '@aurora/auth-service/handlers';
 
@@ -18,6 +19,7 @@ function getUserId(request) {
 
 export async function POST(request) {
   try {
+    runMigrations();
     const userId = getUserId(request);
     if (!userId) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
@@ -43,6 +45,7 @@ export async function POST(request) {
 
 export async function GET(request) {
   try {
+    runMigrations();
     const userId = getUserId(request);
     if (!userId) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
@@ -58,6 +61,7 @@ export async function GET(request) {
 
 export async function PUT(request) {
   try {
+    runMigrations();
     const userId = getUserId(request);
     if (!userId) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });

@@ -1,17 +1,20 @@
-// @aurora/api/auth/login - User authentication (Redis-backed, real JWT)
+// @aurora/api/auth/login - User authentication (SQLite-backed, real JWT)
 
 import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
-import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
-import { KEYS } from '@aurora/shared/redis-keys';
-import { AuthHandler } from '@aurora/auth-service/handlers';
-import { SessionManager } from '@aurora/auth-service/handlers';
+import { getDb } from '@aurora/shared/db-client';
+import { runMigrations } from '@aurora/shared/db-migrate';
+import { AuthHandler, SessionManager } from '@aurora/auth-service/handlers';
 
 const authHandler = new AuthHandler();
 const sessionManager = new SessionManager();
 
 export async function POST(request) {
   try {
+    // Ensure database tables exist
+    runMigrations();
+    const db = getDb();
+
     const body = await request.json();
     
     if (!body.email || !body.password) {
@@ -21,18 +24,7 @@ export async function POST(request) {
       );
     }
 
-    const redis = getRedis();
-
-    // Require Redis — no fallback
-    if (!isRedisAvailable()) {
-      return NextResponse.json(
-        { error: { message: 'Backend database is currently unavailable. Please try again later.' } },
-        { status: 503 }
-      );
-    }
-
-    let user = await redis.hgetall(KEYS.USER_BY_EMAIL(body.email));
-    if (!user || Object.keys(user).length === 0) user = null;
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(body.email);
     
     if (!user) {
       return NextResponse.json(
@@ -42,7 +34,7 @@ export async function POST(request) {
     }
 
     // Verify password with bcrypt
-    const valid = await bcrypt.compare(body.password, user.hashedPassword);
+    const valid = await bcrypt.compare(body.password, user.hashed_password);
     if (!valid) {
       return NextResponse.json(
         { error: { message: 'Invalid credentials' } },
@@ -70,8 +62,8 @@ export async function POST(request) {
   } catch (error) {
     console.error('Login error:', error);
     return NextResponse.json(
-      { error: { message: 'Authentication failed. Backend database may be unavailable.' } },
-      { status: 503 }
+      { error: { message: 'Authentication failed' } },
+      { status: 500 }
     );
   }
 }

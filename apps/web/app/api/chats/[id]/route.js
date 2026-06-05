@@ -1,8 +1,8 @@
-// @aurora/api/chats/[id] - Single chat operations
+// @aurora/api/chats/[id] - Single chat operations (SQLite-backed)
 
 import { NextResponse } from 'next/server';
-import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
-import { KEYS } from '@aurora/shared/redis-keys';
+import { getDb } from '@aurora/shared/db-client';
+import { runMigrations } from '@aurora/shared/db-migrate';
 import { AuthHandler } from '@aurora/auth-service/handlers';
 
 const authHandler = new AuthHandler();
@@ -18,6 +18,8 @@ function getUserId(request) {
 // GET /api/chats/[id] — get chat with messages
 export async function GET(request, { params }) {
   try {
+    runMigrations();
+    const db = getDb();
     const userId = getUserId(request);
     if (!userId) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
@@ -25,22 +27,24 @@ export async function GET(request, { params }) {
 
     const { id } = await params;
 
-    if (isRedisAvailable()) {
-      const redis = getRedis();
-      const chat = await redis.hgetall(KEYS.CHAT(id));
-      if (!chat || Object.keys(chat).length === 0) {
-        return NextResponse.json({ error: { message: 'Chat not found' } }, { status: 404 });
-      }
-      
-      const messagesRaw = await redis.lrange(KEYS.CHAT_MESSAGES(id), 0, -1);
-      const messages = messagesRaw.map(m => {
-        try { return JSON.parse(m); } catch { return { role: 'assistant', content: m }; }
-      });
-
-      return NextResponse.json({ id, ...chat, messages });
+    const chat = db.prepare('SELECT * FROM chats WHERE id = ? AND user_id = ?').get(id, userId);
+    if (!chat) {
+      return NextResponse.json({ error: { message: 'Chat not found' } }, { status: 404 });
     }
 
-    return NextResponse.json({ id, messages: [] });
+    const messages = db.prepare(`
+      SELECT * FROM messages WHERE chat_id = ? ORDER BY position ASC
+    `).all(id);
+
+    return NextResponse.json({
+      id: chat.id,
+      title: chat.title,
+      modelId: chat.model_id,
+      provider: chat.provider,
+      messageCount: chat.message_count,
+      createdAt: chat.created_at,
+      messages: messages.map(m => ({ id: m.id, role: m.role, content: m.content, timestamp: m.timestamp, model: m.model, provider: m.provider }))
+    });
   } catch (error) {
     console.error('Get chat error:', error);
     return NextResponse.json({ error: { message: 'Failed to get chat' } }, { status: 500 });
@@ -50,6 +54,8 @@ export async function GET(request, { params }) {
 // PATCH /api/chats/[id] — rename or update chat
 export async function PATCH(request, { params }) {
   try {
+    runMigrations();
+    const db = getDb();
     const userId = getUserId(request);
     if (!userId) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
@@ -58,18 +64,22 @@ export async function PATCH(request, { params }) {
     const { id } = await params;
     const body = await request.json();
 
-    if (isRedisAvailable()) {
-      const redis = getRedis();
-      const chat = await redis.hgetall(KEYS.CHAT(id));
-      if (!chat || Object.keys(chat).length === 0) {
-        return NextResponse.json({ error: { message: 'Chat not found' } }, { status: 404 });
-      }
-      if (body.title !== undefined) await redis.hset(KEYS.CHAT(id), 'title', body.title);
-      if (body.modelId !== undefined) await redis.hset(KEYS.CHAT(id), 'modelId', body.modelId);
-      return NextResponse.json({ id, ...chat, ...body });
+    const chat = db.prepare('SELECT * FROM chats WHERE id = ? AND user_id = ?').get(id, userId);
+    if (!chat) {
+      return NextResponse.json({ error: { message: 'Chat not found' } }, { status: 404 });
     }
 
-    return NextResponse.json({ id });
+    if (body.title !== undefined) {
+      db.prepare('UPDATE chats SET title = ? WHERE id = ?').run(body.title, id);
+    }
+    if (body.modelId !== undefined) {
+      db.prepare('UPDATE chats SET model_id = ? WHERE id = ?').run(body.modelId, id);
+    }
+    if (body.provider !== undefined) {
+      db.prepare('UPDATE chats SET provider = ? WHERE id = ?').run(body.provider, id);
+    }
+
+    return NextResponse.json({ id, title: body.title || chat.title, modelId: body.modelId || chat.model_id, provider: body.provider || chat.provider });
   } catch (error) {
     console.error('Patch chat error:', error);
     return NextResponse.json({ error: { message: 'Failed to update chat' } }, { status: 500 });
@@ -79,6 +89,8 @@ export async function PATCH(request, { params }) {
 // DELETE /api/chats/[id] — delete chat
 export async function DELETE(request, { params }) {
   try {
+    runMigrations();
+    const db = getDb();
     const userId = getUserId(request);
     if (!userId) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
@@ -86,12 +98,8 @@ export async function DELETE(request, { params }) {
 
     const { id } = await params;
 
-    if (isRedisAvailable()) {
-      const redis = getRedis();
-      await redis.del(KEYS.CHAT(id));
-      await redis.del(KEYS.CHAT_MESSAGES(id));
-      await redis.zrem(KEYS.USER_CHATS(userId), id);
-    }
+    // Foreign key cascade handles messages cleanup
+    db.prepare('DELETE FROM chats WHERE id = ? AND user_id = ?').run(id, userId);
 
     return NextResponse.json({ deleted: true });
   } catch (error) {

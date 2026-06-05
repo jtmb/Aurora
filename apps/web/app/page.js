@@ -3,6 +3,8 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Image from 'next/image';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 export default function Home() {
   const [inputValue, setInputValue] = useState('');
@@ -12,13 +14,198 @@ export default function Home() {
   const [availableModels, setAvailableModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [user, setUser] = useState(null);
+  const [hydrated, setHydrated] = useState(false); // prevents Sign In flash before auth check
   const [providerId, setProviderId] = useState('openai');
   const [thoughtProcess, setThoughtProcess] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [streamStarted, setStreamStarted] = useState(false);
+  const thinkingContainerRef = useRef(null);
   const [currentChatId, setCurrentChatId] = useState(null);
   const [chatList, setChatList] = useState([]);
   const [errorMessage, setErrorMessage] = useState('');
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [chatWebSearch, setChatWebSearch] = useState({}); // per-chat web search state
+  const [expandedThinkingIds, setExpandedThinkingIds] = useState(new Set());
+  const [deleteConfirmChat, setDeleteConfirmChat] = useState(null);
+  const [personalities, setPersonalities] = useState([]);
+  const [activePersonalityId, setActivePersonalityId] = useState(null);
+  const [modelOverlayTab, setModelOverlayTab] = useState('models');
+  const [newPersonalityName, setNewPersonalityName] = useState('');
+  const [newPersonalityPrompt, setNewPersonalityPrompt] = useState('');
+  const [editingPersonalityId, setEditingPersonalityId] = useState(null);
+  const [searchPendingQuery, setSearchPendingQuery] = useState('');
+  const [generatingPrompt, setGeneratingPrompt] = useState(false);
+  const [generatePromptDesc, setGeneratePromptDesc] = useState('');
+  const [showGenerateField, setShowGenerateField] = useState(false);
+  const [linkPreviews, setLinkPreviews] = useState({}); // { [url]: { title, description, image, favicon, domain, loading } }
   const scrollRef = useRef(null);
+  const plusMenuRef = useRef(null);
+
+  // Provider icons for model selector — size variant
+  const providerIcons = (source, size = 'w-3.5 h-3.5') => {
+    const cls = `${size} flex-shrink-0`;
+    switch (source) {
+      case 'OpenAI': return <svg className={cls} viewBox="0 0 24 24" fill="currentColor"><path d="M17.5 4.5c-3.3 0-6 2.7-6 6s2.7 6 6 6 6-2.7 6-6-2.7-6-6-6zm-11 0c-3.3 0-6 2.7-6 6s2.7 6 6 6c1.4 0 2.7-.5 3.8-1.3-.9-1.4-1.4-3-1.4-4.7s.5-3.3 1.4-4.7c-1.1-.8-2.4-1.3-3.8-1.3z"/></svg>;
+      case 'Anthropic': return <svg className={cls} viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>;
+      case 'DeepSeek': return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/></svg>;
+      case 'Ollama': return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M15.182 15.182a4.5 4.5 0 01-6.364 0M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9.75 9.75c0 .414-.168.75-.375.75S9 10.164 9 9.75 9.168 9 9.375 9s.375.336.375.75zm-.375 0h.008v.015h-.008V9.75zm5.625 0c0 .414-.168.75-.375.75s-.375-.336-.375-.75.168-.75.375-.75.375.336.375.75zm-.375 0h.008v.015h-.008V9.75z"/></svg>;
+      case 'LM Studio': return <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="3" width="20" height="14" rx="2" strokeLinecap="round" strokeLinejoin="round"/><path strokeLinecap="round" strokeLinejoin="round" d="M8 21h8M12 17v4"/></svg>;
+      default: return <span className={`${size} rounded-full bg-zinc-600`} />;
+    }
+  };
+
+  // Persist model selection to localStorage for restoration across refreshes
+  useEffect(() => {
+    if (model) {
+      localStorage.setItem('aurora_last_model', model);
+      localStorage.setItem('aurora_last_provider', providerId);
+    }
+  }, [model, providerId]);
+
+  // Load personalities and chat web search state from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('aurora_personalities');
+      let loaded = [];
+      if (saved) {
+        loaded = JSON.parse(saved);
+      }
+      // Always ensure the default Aurora personality exists
+      const hasAuroraDefault = loaded.some(p => p.id === 'pers_aurora_default');
+      if (!hasAuroraDefault) {
+        const auroraDefault = {
+          id: 'pers_aurora_default',
+          name: 'Aurora',
+          prompt: 'You are Aurora, a friendly and helpful AI assistant created to brighten people\'s day. You are female, warm, kind, and always eager to help with anything you\'re asked. You know yourself as Aurora — that is your name and identity, and you never refer to yourself by any other name. You speak with a gentle, encouraging tone and genuinely care about making every interaction pleasant, supportive, and productive. You are curious, thoughtful, and approachable — like a trusted friend who also happens to be highly knowledgeable. You have the ability to search the web for current, real-time information when the user enables the web search feature — if a question would benefit from up-to-date information, you can suggest turning on web search to get the latest data. When you don\'t know something or your knowledge may be outdated, you\'re honest about it and offer to look it up. Your goal is to make people feel heard, understood, and empowered.',
+          isDefault: true,
+          createdAt: new Date().toISOString()
+        };
+        loaded = [auroraDefault, ...loaded];
+      }
+      setPersonalities(loaded);
+      localStorage.setItem('aurora_personalities', JSON.stringify(loaded));
+
+      const active = localStorage.getItem('aurora_active_personality');
+      if (active) {
+        const activeId = JSON.parse(active);
+        // If the active personality no longer exists, fall back to Aurora default
+        if (loaded.some(p => p.id === activeId)) {
+          setActivePersonalityId(activeId);
+        } else {
+          setActivePersonalityId('pers_aurora_default');
+          localStorage.setItem('aurora_active_personality', JSON.stringify('pers_aurora_default'));
+        }
+      } else if (!active && loaded.length > 0) {
+        // No active personality set yet — default to Aurora
+        setActivePersonalityId('pers_aurora_default');
+        localStorage.setItem('aurora_active_personality', JSON.stringify('pers_aurora_default'));
+      }
+      const searchState = localStorage.getItem('aurora_chat_search');
+      if (searchState) setChatWebSearch(JSON.parse(searchState));
+    } catch {}
+  }, []);
+
+  // Persist personalities to localStorage
+  useEffect(() => {
+    if (personalities.length > 0) {
+      localStorage.setItem('aurora_personalities', JSON.stringify(personalities));
+    } else {
+      localStorage.removeItem('aurora_personalities');
+    }
+  }, [personalities]);
+
+  // Persist active personality
+  useEffect(() => {
+    if (activePersonalityId) {
+      localStorage.setItem('aurora_active_personality', JSON.stringify(activePersonalityId));
+    } else {
+      localStorage.removeItem('aurora_active_personality');
+    }
+  }, [activePersonalityId]);
+
+  // Sync webSearchEnabled when chat changes
+  useEffect(() => {
+    if (currentChatId) {
+      setWebSearchEnabled(!!chatWebSearch[currentChatId]);
+    } else {
+      setWebSearchEnabled(false);
+    }
+  }, [currentChatId, chatWebSearch]);
+
+  // Persist chat web search state
+  useEffect(() => {
+    if (Object.keys(chatWebSearch).length > 0) {
+      localStorage.setItem('aurora_chat_search', JSON.stringify(chatWebSearch));
+    } else {
+      localStorage.removeItem('aurora_chat_search');
+    }
+  }, [chatWebSearch]);
+
+  // Handle "search the web" suggestion — enable search and resend
+  const acceptSearchSuggestion = (msgId, pendingQuery) => {
+    // Toggle search on for this chat
+    setWebSearchEnabled(true);
+    if (currentChatId) {
+      setChatWebSearch(cw => ({ ...cw, [currentChatId]: true }));
+    }
+    // Remove the suggestion bubble
+    setMessages(prev => prev.filter(m => m.id !== msgId));
+    // Re-trigger send with the original query
+    setInputValue(pendingQuery);
+    setTimeout(() => {
+      setInputValue(pendingQuery);
+      // Trigger send via a synthetic submit on next tick
+      const form = document.querySelector('form');
+      if (form) form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    }, 50);
+  };
+
+  // Dismiss search suggestion
+  const dismissSearchSuggestion = (msgId) => {
+    setMessages(prev => prev.filter(m => m.id !== msgId));
+  };
+
+  // Generate a system prompt using AI based on a description
+  const generatePrompt = async () => {
+    if (!generatePromptDesc.trim() || generatingPrompt) return;
+    setGeneratingPrompt(true);
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      const openaiKey = localStorage.getItem('OPENAI_API_KEY');
+      const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
+      const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
+      const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
+      const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      const lmStudioApiKey = localStorage.getItem('LM_STUDIO_API_KEY');
+      if (openaiKey) headers['x-openai-key'] = openaiKey;
+      if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
+      if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
+      if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
+      if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+      if (lmStudioApiKey) headers['x-lmstudio-api-key'] = lmStudioApiKey;
+
+      const res = await fetch('/api/personality/generate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ description: generatePromptDesc.trim() })
+      });
+      const data = await res.json();
+      if (data.prompt) {
+        setNewPersonalityPrompt(data.prompt);
+        if (data.name && !newPersonalityName.trim()) {
+          setNewPersonalityName(data.name);
+        }
+        setShowGenerateField(false);
+        setGeneratePromptDesc('');
+      } else {
+        console.error('[Generate] Failed:', data.error);
+      }
+    } catch (err) {
+      console.error('[Generate] Error:', err.message);
+    } finally {
+      setGeneratingPrompt(false);
+    }
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -26,17 +213,91 @@ export default function Home() {
     }
   }, [messages, isLoading, isThinking]);
 
+  // Auto-scroll thinking container to bottom when new thinking chunks arrive during streaming
+  useEffect(() => {
+    if (isLoading && thinkingContainerRef.current) {
+      thinkingContainerRef.current.scrollTop = thinkingContainerRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  // Auto-collapse thinking when streaming finishes
+  useEffect(() => {
+    if (!isLoading) {
+      setExpandedThinkingIds(new Set());
+    }
+  }, [isLoading]);
+
+  // Fetch link previews for assistant messages that have URLs
+  useEffect(() => {
+    const fetchPreviews = async () => {
+      const linkRegex = /\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
+      const assistantMessages = messages.filter(m => m.role === 'assistant' && m.content);
+      const urlsToFetch = [];
+
+      for (const msg of assistantMessages) {
+        let match;
+        while ((match = linkRegex.exec(msg.content)) !== null) {
+          const url = match[2];
+          if (!linkPreviews[url] && !urlsToFetch.some(u => u.url === url)) {
+            urlsToFetch.push({ url, msgId: msg.id });
+          }
+        }
+      }
+
+      if (urlsToFetch.length === 0) return;
+
+      // Mark all as loading
+      setLinkPreviews(prev => {
+        const next = { ...prev };
+        for (const { url } of urlsToFetch) {
+          if (!next[url]) next[url] = { loading: true };
+        }
+        return next;
+      });
+
+      // Fetch previews in parallel (max 5 concurrent)
+      const batchSize = 5;
+      for (let i = 0; i < urlsToFetch.length; i += batchSize) {
+        const batch = urlsToFetch.slice(i, i + batchSize);
+        const results = await Promise.allSettled(
+          batch.map(({ url }) =>
+            fetch(`/api/link-preview?url=${encodeURIComponent(url)}`).then(r => r.ok ? r.json() : null)
+          )
+        );
+        setLinkPreviews(prev => {
+          const next = { ...prev };
+          batch.forEach(({ url }, idx) => {
+            const data = results[idx].status === 'fulfilled' ? results[idx].value : null;
+            next[url] = {
+              loading: false,
+              title: data?.title || null,
+              description: data?.description || null,
+              image: data?.image || null,
+              favicon: data?.favicon || null,
+              domain: data?.domain || null,
+              error: !data
+            };
+          });
+          return next;
+        });
+      }
+    };
+
+    fetchPreviews();
+  }, [messages]);
+
   // Initialize app: check auth and load models on mount
   useEffect(() => {
     const init = async () => {
       await checkAuth();
       setModelsLoading(false);
+      setHydrated(true);
     };
     init();
   }, []);
 
-  // Hydrate localStorage with provider keys from Redis on login.
-  // Only fills missing keys — localStorage is canonical, Redis is backup.
+  // Hydrate localStorage with provider keys from server (SQLite) on login.
+  // Only fills missing keys — localStorage is canonical, server is backup.
   const hydrateKeysFromServer = async (token) => {
     try {
       const res = await fetch('/api/auth/keys', {
@@ -45,8 +306,8 @@ export default function Home() {
       if (!res.ok) return;
       const data = await res.json();
       const keys = data.keys || [];
-      // Only restore keys from Redis if the server has them.
-      // localStorage values take priority for fields not returned by Redis.
+      // Only restore keys from the server (SQLite) if available.
+      // localStorage values take priority for fields not returned by the server.
       for (const k of keys) {
         if (k.rawKey) {
           const storageKey = k.provider === 'OLLAMA' ? 'OLLAMA_API_BASE'
@@ -75,12 +336,14 @@ export default function Home() {
       const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
       const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
       const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      const lmStudioApiKeyB = localStorage.getItem('LM_STUDIO_API_KEY');
       
       if (openaiKey) headers['x-openai-key'] = openaiKey;
       if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
       if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
       if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
       if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+      if (lmStudioApiKeyB) headers['x-lmstudio-api-key'] = lmStudioApiKeyB;
 
       // Try the models API with a 10-second timeout (prevents hung Ollama from freezing UI)
       const controller = new AbortController();
@@ -97,15 +360,28 @@ export default function Home() {
           const modelsData = await modelsRes.json();
           if (modelsData.models && modelsData.models.length > 0) {
             setAvailableModels(modelsData.models);
-            const defaultModel = modelsData.models[0];
-            setModel(defaultModel.id);
-            setProviderId(
-              defaultModel.source === 'Ollama' ? 'ollama' 
-              : defaultModel.source === 'Anthropic' ? 'anthropic' 
-              : defaultModel.source === 'LM Studio' ? 'lmstudio'
-              : defaultModel.source === 'DeepSeek' ? 'deepseek'
-              : 'openai'
-            );
+            // Restore last-used model from localStorage, or fall back to first available
+            const savedModel = localStorage.getItem('aurora_last_model');
+            const savedProvider = localStorage.getItem('aurora_last_provider');
+            const foundModel = savedModel && modelsData.models.find(m => m.id === savedModel);
+            if (foundModel) {
+              setModel(foundModel.id);
+              setProviderId(foundModel.source === 'Ollama' ? 'ollama' 
+                : foundModel.source === 'Anthropic' ? 'anthropic' 
+                : foundModel.source === 'LM Studio' ? 'lmstudio'
+                : foundModel.source === 'DeepSeek' ? 'deepseek'
+                : 'openai');
+            } else {
+              const defaultModel = modelsData.models[0];
+              setModel(defaultModel.id);
+              setProviderId(
+                defaultModel.source === 'Ollama' ? 'ollama' 
+                : defaultModel.source === 'Anthropic' ? 'anthropic' 
+                : defaultModel.source === 'LM Studio' ? 'lmstudio'
+                : defaultModel.source === 'DeepSeek' ? 'deepseek'
+                : 'openai'
+              );
+            }
             return true;
           }
           // Successful response but empty models — clear if anything was stale
@@ -139,7 +415,7 @@ export default function Home() {
       try {
         const payload = JSON.parse(atob(token.split('.')[1]));
         setUser({ id: payload.userId, email: payload.email, name: payload.sub });
-        // Hydrate localStorage with provider keys from Redis server
+        // Hydrate localStorage with provider keys from server (SQLite)
         await hydrateKeysFromServer(token);
       } catch {
         // Invalid token format — clear it
@@ -166,18 +442,22 @@ export default function Home() {
         const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
         const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
         const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+        const lmStudioApiKeyC = localStorage.getItem('LM_STUDIO_API_KEY');
         if (openaiKey) headers['x-openai-key'] = openaiKey;
         if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
         if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
         if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
         if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+        if (lmStudioApiKeyC) headers['x-lmstudio-api-key'] = lmStudioApiKeyC;
         try {
           const res = await fetch('/api/providers/models', { headers });
           if (res.ok) {
             const data = await res.json();
             if (data.models?.length > 0) {
               setAvailableModels(data.models);
-              setModel(data.models[0].id);
+              const savedModel = localStorage.getItem('aurora_last_model');
+              const foundRetry = savedModel && data.models.find(m => m.id === savedModel);
+              setModel(foundRetry ? foundRetry.id : data.models[0].id);
               return true;
             }
           }
@@ -216,6 +496,7 @@ export default function Home() {
   const newChat = async () => {
     setMessages([]);
     setInputValue('');
+    setWebSearchEnabled(false);
     setCurrentChatId(null);
     try {
       const token = localStorage.getItem('auth_token');
@@ -281,14 +562,108 @@ export default function Home() {
       });
       if (res.ok) {
         const data = await res.json();
-        setMessages(data.messages || []);
-        // Restore model/provider from the chat so responses use the same model
-        if (data.modelId) setModel(data.modelId);
-        if (data.provider) setProviderId(data.provider);
+        const cleanedMessages = (data.messages || []).map(m => ({
+          ...m,
+          content: m.role === 'assistant' ? cleanMarkdownLinks(m.content) : m.content
+        }));
+        setMessages(cleanedMessages);
+        // Restore model/provider from the chat, with fallback if unavailable
+        if (data.modelId) {
+          const modelExists = availableModels.some(m => m.id === data.modelId);
+          if (modelExists) {
+            setModel(data.modelId);
+            if (data.provider) setProviderId(data.provider);
+          } else if (data.provider) {
+            // Fallback: find any model from the same provider
+            const providerFallback = availableModels.find(m => {
+              const src = m.source.toLowerCase();
+              return src === data.provider;
+            });
+            if (providerFallback) {
+              setModel(providerFallback.id);
+              setProviderId(data.provider);
+            } else if (availableModels.length > 0) {
+              setModel(availableModels[0].id);
+              setProviderId('openai');
+            }
+          } else if (availableModels.length > 0) {
+            setModel(availableModels[0].id);
+          }
+        } else if (data.provider) {
+          setProviderId(data.provider);
+        }
       }
     } catch (e) {
       console.debug('Open chat error:', e.message);
     }
+  };
+
+  // Stop the current response
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsLoading(false);
+  };
+
+  // Copy message content
+  const handleCopy = (content) => {
+    navigator.clipboard.writeText(content).catch(() => {});
+  };
+
+  // Clean parenthesized URLs that LLMs often produce: (https://example.com) → [domain.com](https://example.com)
+  // Uses negative lookbehind (?<!\]) to avoid double-converting already-valid [text](url) markdown links.
+  // Applied at data-ingestion time so ReactMarkdown always receives clean markdown.
+  const cleanMarkdownLinks = (text) => {
+    if (!text) return text;
+    return text.replace(/(?<!\])(\((https?:\/\/[^\s()]+)\))/g, (match, _outer, url) => {
+      try {
+        const domain = new URL(url).hostname.replace('www.', '');
+        return '[' + domain + '](' + url + ')';
+      } catch { return match; }
+    });
+  };
+
+  // Get dynamic thinking label based on content
+  const getThinkingLabel = (thinking, streaming) => {
+    if (!streaming) return <>Done <span className="text-green-400">✓</span></>;
+    const t = (thinking || '').toLowerCase();
+    if (/\b(?:analyz|break\s*down|examin|inspect|dissect|scrutiniz)\b/i.test(t)) return 'Analyzing';
+    if (/\b(?:reason|think|logic|deduc|infer|conclude|ponder)\b/i.test(t)) return 'Reasoning';
+    if (/\b(?:evaluat|assess|weigh|judge|compar|decide)\b/i.test(t)) return 'Evaluating';
+    if (/\b(?:plan|outline|step|approach|strateg|organiz)\b/i.test(t)) return 'Planning';
+    if (/\b(?:calculat|comput|math|equation|formula|arithmetic)\b/i.test(t)) return 'Calculating';
+    if (/\b(?:process|working|generating|producing|crafting|building)\b/i.test(t)) return 'Processing';
+    if (/\b(?:verif|check|confirm|validat|test|ensur)\b/i.test(t)) return 'Verifying';
+    if (/\b(?:summariz|recap|sum\s*up|overview|condens)\b/i.test(t)) return 'Summarizing';
+    if (/\b(?:refin|improv|polish|enhance|tweak|adjust)\b/i.test(t)) return 'Refining';
+    return 'Thinking';
+  };
+
+  // Resend / regenerate: remove last assistant message and re-send the last user message
+  const handleResend = () => {
+    if (isLoading) return;
+    const msgs = [...messages];
+    // Find the last user message
+    let lastUserIdx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    if (lastUserIdx < 0) return;
+    const lastUserMsg = msgs[lastUserIdx];
+    // Remove everything from the last user message onward
+    const trimmed = msgs.slice(0, lastUserIdx);
+    setMessages(trimmed);
+    // Re-send that user's content
+    setInputValue(lastUserMsg.content);
+    setTimeout(() => {
+      const form = document.querySelector('form');
+      if (form) form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    }, 50);
   };
 
   const sendMessage = async (e) => {
@@ -297,6 +672,21 @@ export default function Home() {
 
     if (!user) {
       setAuthModalOpen(true);
+      return;
+    }
+
+    // Search intent detection: if user types "search the web" without search enabled
+    const searchPatterns = /\b(search the web|search online|search for|look up|google|web search|find online|do a search|search the internet)\b/i;
+    if (!webSearchEnabled && searchPatterns.test(inputValue.trim())) {
+      const pendingQuery = inputValue;
+      setInputValue('');
+      setMessages(prev => [...prev, {
+        id: `search_suggest_${Date.now()}`,
+        role: 'assistant',
+        content: `I noticed you asked me to **"search the web"** but web search isn't enabled for this chat. Would you like me to enable it and search for you?`,
+        isSearchSuggestion: true,
+        pendingQuery
+      }]);
       return;
     }
 
@@ -317,7 +707,7 @@ export default function Home() {
     setMessages(prev => [...prev, userMessage]);
     setInputValue('');
     setIsLoading(true);
-    setThoughtProcess([]);
+    setStreamStarted(false);
 
     // Auto-create a chat if none is active
     let chatId = currentChatId;
@@ -328,11 +718,15 @@ export default function Home() {
           const chatRes = await fetch('/api/chats', {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: inputValue.slice(0, 60), model })
+            body: JSON.stringify({ title: inputValue.slice(0, 60), model, provider: providerId })
           });
           if (chatRes.ok) {
             const chatData = await chatRes.json();
             chatId = chatData.id;
+            // Preserve web search state for the new chat before setting currentChatId
+            if (webSearchEnabled) {
+              setChatWebSearch(cw => ({ ...cw, [chatId]: true }));
+            }
             setCurrentChatId(chatId);
             loadChats();
           }
@@ -340,7 +734,7 @@ export default function Home() {
       } catch {}
     }
 
-    // Persist user message to chat
+    // Persist user message and update model for this chat
     if (chatId) {
       try {
         const token = localStorage.getItem('auth_token');
@@ -349,6 +743,12 @@ export default function Home() {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ role: 'user', content: inputValue, model, provider: providerId })
+          });
+          // Update the chat's model if it changed
+          await fetch(`/api/chats/${chatId}`, {
+            method: 'PATCH',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ modelId: model, provider: providerId })
           });
         }
       } catch {}
@@ -364,7 +764,63 @@ export default function Home() {
       } else {
         messagesArray = [{ role: 'user', content: inputValue }];
       }
-      
+
+      // Fetch web search results (if enabled)
+      let searchBlock = '';
+      let searchSourcesCache = null;
+      if (webSearchEnabled) {
+        try {
+          const searchQuery = encodeURIComponent(inputValue.trim().slice(0, 200));
+          const searchRes = await fetch(`/api/web-search?q=${searchQuery}`);
+          if (searchRes.ok) {
+            const searchData = await searchRes.json();
+            // Store search result URLs for embedding
+            const searchSources = [];
+            searchBlock = `\n\n[WEB SEARCH RESULTS — These are your PRIMARY and ONLY source of current information. You MUST cite sources by including the URL in parentheses after any fact you use, like this: "Raccoons are omnivorous (https://example.com/raccoons)." Every factual claim MUST have a citation URL. Do NOT say "search results show" or "according to the search" — just state the facts with URLs. If you can't find the answer in these results, say so honestly.]\n`;
+            if (searchData.abstract?.text) {
+              searchBlock += `\nAbstract: ${searchData.abstract.text}\nSource: ${searchData.abstract.url}\n`;
+              if (searchData.abstract.url) searchSources.push({ title: searchData.abstract.text.slice(0, 80), url: searchData.abstract.url });
+            }
+            if (searchData.results?.length) {
+              searchBlock += '\nResults:\n';
+              searchData.results.forEach((r, i) => {
+                searchBlock += `${i + 1}. ${r.title}\n   ${r.snippet}\n   ${r.url}\n`;
+                if (r.url) searchSources.push({ title: r.title?.slice(0, 80) || r.snippet?.slice(0, 80) || '', url: r.url });
+              });
+            }
+            searchBlock += '\n[End of web search results]';
+            // Save sources for later use
+            if (searchSources.length > 0) {
+              searchSourcesCache = searchSources;
+            }
+          }
+        } catch (err) {
+          console.error('[Web Search] Failed:', err.message);
+        }
+      }
+
+      // Build system prompt: search results FIRST, then personality
+      const personality = activePersonalityId
+        ? personalities.find(p => p.id === activePersonalityId)
+        : null;
+      const personalityPrompt = personality?.prompt || '';
+
+      if (searchBlock || personalityPrompt) {
+        // Remove any pre-existing system messages from history to avoid duplication
+        messagesArray = messagesArray.filter(m => m.role !== 'system');
+        
+        const systemContent = [
+          searchBlock,
+          searchBlock && personalityPrompt ? '\n\n---\n\n[Your personality / behavior instructions]\n' + personalityPrompt : '',
+          !searchBlock && personalityPrompt ? personalityPrompt : '',
+          !searchBlock && !personalityPrompt ? '' : ''
+        ].filter(Boolean).join('');
+
+        if (systemContent) {
+          messagesArray.unshift({ role: 'system', content: systemContent });
+        }
+      }
+
       // Build headers with API keys from localStorage
       const headers = { 'Content-Type': 'application/json' };
       const token = localStorage.getItem('auth_token');
@@ -374,23 +830,31 @@ export default function Home() {
       const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
       const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
       const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      const lmStudioApiKeyD = localStorage.getItem('LM_STUDIO_API_KEY');
       
       if (openaiKey) headers['x-openai-key'] = openaiKey;
       if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
       if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
       if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
       if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+      if (lmStudioApiKeyD) headers['x-lmstudio-api-key'] = lmStudioApiKeyD;
       
+      // Create abort controller for stop functionality
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
       const res = await fetch('/api/v1/chat/completions', {
         method: 'POST',
         headers,
+        signal: controller.signal,
         body: JSON.stringify({
           model,
           messages: messagesArray,
           temperature: 0.7,
           top_p: 1,
           max_tokens: null,
-          provider: providerId
+          provider: providerId,
+          stream: true
         })
       });
 
@@ -399,55 +863,139 @@ export default function Home() {
         throw new Error(errorData.error?.message || `Failed to get response from ${model}`);
       }
 
-      const data = await res.json();
-      
-      let content = '';
-      if (data.choices?.[0]?.message?.content) {
-        content = data.choices[0].message.content;
-      } else if (data.choices?.[0]?.delta?.content) {
-        content = data.choices[0].delta.content;
+      // Read SSE stream for real-time thinking + content
+      const assistantId = (Date.now() + 1).toString();
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let streamBuffer = '';
+      let streamedContent = '';
+      let streamedThinking = '';
+      let messageCreated = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        streamBuffer += decoder.decode(value, { stream: true });
+        
+        // Parse SSE lines
+        const lines = streamBuffer.split('\n');
+        streamBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const jsonStr = line.slice(6).trim();
+          if (jsonStr === '[DONE]') continue;
+
+          try {
+            const data = JSON.parse(jsonStr);
+            const delta = data.choices?.[0]?.delta;
+            if (!delta) continue;
+
+            // Capture thinking/reasoning as it streams
+            const think = delta.thinking || delta.reasoning_content || delta.reasoning || '';
+            if (think) {
+              streamedThinking += think;
+            }
+
+            // Capture content as it streams
+            const contentChunk = delta.content || '';
+            if (contentChunk) {
+              streamedContent += contentChunk;
+            }
+
+            // Create or update the assistant message
+            if (!messageCreated) {
+              messageCreated = true;
+              setStreamStarted(true);
+              setMessages(prev => [...prev, {
+                id: assistantId,
+                role: 'assistant',
+                content: cleanMarkdownLinks(streamedContent),
+                thinking: streamedThinking || undefined,
+                timestamp: new Date().toISOString(),
+                model: data.model || model,
+                provider: providerId,
+                searchSources: searchSourcesCache || undefined
+              }]);
+            } else {
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId
+                  ? { ...m, content: cleanMarkdownLinks(streamedContent), thinking: streamedThinking || m.thinking }
+                  : m
+              ));
+            }
+          } catch {}
+        }
       }
 
-      const thoughtText = data.choices?.[0]?.message?.thinking || '';
-      if (thoughtText) {
-        setThoughtProcess(prev => [...prev, { type: 'thinking', content: thoughtText }]);
-      }
+      // Final content check (in case last chunk wasn't processed above)
+      const finalContent = streamedContent;
+      const finalThinking = streamedThinking;
 
-      const assistantMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content,
-        timestamp: new Date().toISOString(),
-        model: data.model || model,
-        provider: providerId,
-        usage: data.usage
-      };
+      setMessages(prev => prev.map(m =>
+        m.id === assistantId
+          ? { ...m, content: cleanMarkdownLinks(finalContent), thinking: finalThinking || undefined, searchSources: searchSourcesCache || m.searchSources }
+          : m
+      ));
 
-      setMessages(prev => [...prev, assistantMessage]);
-
-      // Persist assistant message to chat
-      if (chatId && content) {
+      // Persist assistant message to chat — use FINAL cleaned content
+      const cleanedFinal = cleanMarkdownLinks(finalContent);
+      if (chatId && cleanedFinal) {
         try {
           const token = localStorage.getItem('auth_token');
           if (token) {
             await fetch(`/api/chats/${chatId}/messages`, {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ role: 'assistant', content, model: data.model || model, provider: providerId })
+              body: JSON.stringify({ role: 'assistant', content: cleanedFinal, model, provider: providerId })
             });
           }
         } catch {}
       }
 
     } catch (error) {
-      console.error('Chat error:', error.message);
-      setErrorMessage(error.message);
-      setTimeout(() => setErrorMessage(''), 5000);
+      if (error.name === 'AbortError') {
+        console.log('Chat request aborted by user');
+        // Keep any partial content that may have been streamed
+      } else {
+        console.error('Chat error:', error.message);
+        setErrorMessage(error.message);
+        setTimeout(() => setErrorMessage(''), 5000);
+      }
     } finally {
       setIsLoading(false);
+      setStreamStarted(false);
+      abortControllerRef.current = null;
+
+      // Smart search tip: detect if the LLM indicated it can't search or has outdated data
+      if (!webSearchEnabled) {
+        setMessages(prev => {
+          const last = prev[prev.length - 1];
+          if (!last || last.role !== 'assistant' || last.isSearchSuggestion) return prev;
+          const content = (last.content || '').toLowerCase();
+          const patterns = [
+            /(?:don'?t|do not)\s+have\s+(?:access\s+to\s+)?(?:real[ -]?time|current|live|the\s+internet|web)/i,
+            /(?:my|the)\s+(?:knowledge|training)\s+(?:cutoff|data|only\s+goes|is\s+limited)/i,
+            /(?:i\s+)?can'?t\s+(?:browse|search|access|look\s+up)\s+(?:the\s+)?(?:web|internet|online)/i,
+            /(?:as\s+of|before|prior\s+to)\s+(?:my|the)\s+(?:knowledge|training|last\s+update)/i,
+            /(?:i|my\s+responses?)\s+(?:am|is|are)\s+(?:limited|restricted)\s+to\s+(?:my\s+)?(?:knowledge|training|local)/i,
+            /outdated.*(?:information|data|knowledge)|(?:information|data|knowledge).*outdated/i,
+            /unable\s+to\s+(?:provide|give|offer)\s+(?:current|real[ -]?time|up[ -]to[ -]?date|live)/i,
+            /don'?t\s+have\s+(?:internet|web)\s+access/i,
+            /(?:my|the)\s+(?:responses?|answers?)\s+(?:may|might|could)\s+be\s+(?:outdated|inaccurate)/i,
+            /(?:i|we)\s+(?:would|could)\s+need\s+(?:to\s+)?search/i,
+            /(?:if\s+you|please)\s+(?:enable|turn\s+on|activate)\s+(?:web\s+)?search/i,
+          ];
+          if (patterns.some(p => p.test(content))) {
+            return prev.map(m => m.id === last.id ? { ...m, showSearchTip: true } : m);
+          }
+          return prev;
+        });
+      }
     }
   };
 
+  const abortControllerRef = useRef(null);
   const fileInputRef = useRef(null);
   const [files, setFiles] = useState([]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -473,6 +1021,19 @@ export default function Home() {
   }, [modelOverlayOpen]);
 
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+
+  // Close plus menu on click outside (mousedown listener avoids CSS transform stacking context issues)
+  useEffect(() => {
+    if (!plusMenuOpen) return;
+    const handler = (e) => {
+      if (plusMenuRef.current && !plusMenuRef.current.contains(e.target)) {
+        setPlusMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [plusMenuOpen]);
+
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState('signin');
   const [authEmail, setAuthEmail] = useState('');
@@ -491,12 +1052,16 @@ export default function Home() {
     localStorage.removeItem('ANTHROPIC_API_KEY');
     localStorage.removeItem('OLLAMA_API_BASE');
     localStorage.removeItem('LM_STUDIO_URL');
+    localStorage.removeItem('aurora_last_model');
+    localStorage.removeItem('aurora_last_provider');
     setUser(null);
     setMessages([]);
     setCurrentChatId(null);
     setChatList([]);
     setAvailableModels([]);
     setModel('');
+    setWebSearchEnabled(false);
+    setChatWebSearch({});
     setUserMenuOpen(false);
   };
 
@@ -536,7 +1101,7 @@ export default function Home() {
         setAuthEmail('');
         setAuthPassword('');
         setAuthConfirmPassword('');
-        // Restore provider keys from Redis and load models
+        // Restore provider keys from server (SQLite) and load models
         await hydrateKeysFromServer(data.token);
         await getModelsFromStorage();
         loadChats();
@@ -632,7 +1197,13 @@ export default function Home() {
               className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm transition-colors text-zinc-400 hover:text-white hover:bg-zinc-800/20 mt-0.5"
             >
               <svg className="w-[1.2rem] h-[1.2rem] shrink-0 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" strokeWidth={1.5} /><path d="M8 21h8" strokeWidth={1.5} strokeLinecap="round" /><path d="M12 17v4" strokeWidth={1.5} strokeLinecap="round" /></svg>
-              <span className="truncate flex-1 text-left">{modelsLoading ? 'Loading...' : (model || 'Select a model')}</span>
+              <div className="flex-1 text-left min-w-0">
+                <span className="truncate block text-zinc-300">{modelsLoading ? 'Loading...' : (model || 'Select a model')}</span>
+                {activePersonalityId && (() => {
+                  const p = personalities.find(x => x.id === activePersonalityId);
+                  return p ? <span className="text-[10px] text-indigo-400/70 truncate block">{p.name}</span> : null;
+                })()}
+              </div>
               <span className="relative flex items-center justify-center w-[1.2rem] h-[1.2rem] shrink-0">
                 <span className="absolute inset-0 rounded-full opacity-30 blur-[3px]" style={{ background: 'linear-gradient(135deg, #818cf8, #c084fc, #f0abfc)' }} />
                 <span className="relative w-2 h-2 rounded-full" style={{ background: 'linear-gradient(135deg, #818cf8, #e879f9)' }} />
@@ -684,7 +1255,7 @@ export default function Home() {
                   ) : (
                     <button
                       onClick={() => openChat(chat.id)}
-                      className={`w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors ${
+                      className={`w-full flex items-center gap-3 pl-4 pr-14 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors ${
                         currentChatId === chat.id ? 'bg-indigo-600/15 text-white' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20'
                       }`}
                     >
@@ -695,7 +1266,7 @@ export default function Home() {
                     </button>
                   )}
                   {hoveredChatId === chat.id && !renamingChatId && (
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
+                    <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-zinc-900/90 backdrop-blur-sm rounded-lg px-1 py-0.5">
                       <button
                         onClick={(e) => { e.stopPropagation(); setRenamingChatId(chat.id); setRenameValue(chat.title || ''); }}
                         className="p-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700/50 transition-colors"
@@ -704,7 +1275,7 @@ export default function Home() {
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                       </button>
                       <button
-                        onClick={(e) => { e.stopPropagation(); if (confirm(`Delete "${chat.title || 'Chat'}"?`)) deleteChat(chat.id); }}
+                        onClick={(e) => { e.stopPropagation(); setDeleteConfirmChat(chat); }}
                         className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-colors"
                         title="Delete"
                       >
@@ -719,7 +1290,15 @@ export default function Home() {
         </div>
 
         <div className="p-4 border-t border-zinc-800/40">
-          {!user ? (
+          {!hydrated ? (
+            <div className="flex items-center gap-3 px-2 py-2 animate-pulse">
+              <div className="w-8 h-8 rounded-full bg-zinc-800" />
+              <div className="flex-1 space-y-1.5">
+                <div className="h-3.5 w-28 bg-zinc-800 rounded" />
+                <div className="h-2.5 w-14 bg-zinc-800 rounded" />
+              </div>
+            </div>
+          ) : !user ? (
             <button
               onClick={() => setAuthModalOpen(true)}
               className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-500 transition-colors flex items-center justify-center"
@@ -862,16 +1441,205 @@ export default function Home() {
           {/* Messages */}
           {messages.length > 0 && (
             <div className="space-y-6">
-              {messages.map((msg, i) => (
+              {messages.map((msg, i) => {
+                const isThinkingExpanded = expandedThinkingIds.has(msg.id);
+                const toggleThinking = () => {
+                  setExpandedThinkingIds(prev => {
+                    const next = new Set(prev);
+                    if (next.has(msg.id)) next.delete(msg.id);
+                    else next.add(msg.id);
+                    return next;
+                  });
+                };
+
+                return (
                 <div key={msg.id || `msg-${i}`} className={`flex gap-4 max-w-[90%] ${msg.role === 'user' ? 'ml-auto justify-end' : ''}`}>
+                  {/* Search suggestion bubble */}
+                  {msg.isSearchSuggestion ? (
+                    <>
+                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-700/50 flex items-center justify-center flex-shrink-0 mt-1 overflow-hidden">
+                        <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                          <defs>
+                            <linearGradient id="aurora-avatar-search" x1="0%" y1="0%" x2="100%" y2="100%">
+                              <stop offset="0%" stopColor="#818cf8" />
+                              <stop offset="100%" stopColor="#c084fc" />
+                            </linearGradient>
+                          </defs>
+                          <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-avatar-search)" strokeWidth="1.5" opacity="0.9" />
+                          <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-avatar-search)" strokeWidth="1.5" opacity="0.5" />
+                          <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-avatar-search)" strokeWidth="1.5" opacity="0.3" />
+                        </svg>
+                      </div>
+                      <div className="bg-zinc-800/60 border border-indigo-600/30 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[85%]">
+                        <div className="text-sm text-zinc-200 leading-relaxed prose prose-invert prose-zinc max-w-none">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
+                        <div className="flex items-center gap-2 mt-3">
+                          <button
+                            type="button"
+                            onClick={() => acceptSearchSuggestion(msg.id, msg.pendingQuery)}
+                            className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-500 transition-colors flex items-center gap-1.5"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                            </svg>
+                            Yes, search the web
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => dismissSearchSuggestion(msg.id)}
+                            className="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700/40 rounded-lg transition-colors"
+                          >
+                            No thanks
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                  <>
                   {msg.role !== 'user' && (
-                    <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center flex-shrink-0 mt-1">
-                      <span className="text-white font-bold text-xs">A</span>
+                    <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-700/50 flex items-center justify-center flex-shrink-0 mt-1 overflow-hidden">
+                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                        <defs>
+                          <linearGradient id={`aurora-avatar-${msg.id}`} x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stopColor="#818cf8" />
+                            <stop offset="100%" stopColor="#c084fc" />
+                          </linearGradient>
+                        </defs>
+                        <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke={`url(#aurora-avatar-${msg.id})`} strokeWidth="1.5" opacity="0.9" />
+                        <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke={`url(#aurora-avatar-${msg.id})`} strokeWidth="1.5" opacity="0.5" />
+                        <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke={`url(#aurora-avatar-${msg.id})`} strokeWidth="1.5" opacity="0.3" />
+                      </svg>
                     </div>
                   )}
                   
-                  <div className={`relative max-w-[85%] px-4 py-3 rounded-2xl ${msg.role === 'user' ? 'bg-zinc-100 text-zinc-900 rounded-tr-sm' : 'bg-zinc-800/60 border border-zinc-700/40 rounded-tl-sm'}`}>
-                    <p className="text-base leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                  <div className={`relative max-w-[85%] px-4 py-3 rounded-2xl ${msg.role === 'user' ? 'bg-[#1d6fc9] text-white rounded-tr-sm' : 'bg-zinc-800/60 border border-zinc-700/40 rounded-tl-sm'}`}>
+                    {/* Thinking / Reasoning display */}
+                    {msg.role === 'assistant' && msg.thinking && (() => {
+                      const isStreaming = i === messages.length - 1 && isLoading;
+                      return (
+                      <div className="mb-3">
+                        <button
+                          type="button"
+                          onClick={toggleThinking}
+                          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-300 transition-colors w-full text-left"
+                        >
+                          <svg className={`w-3 h-3 transition-transform ${isThinkingExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
+                          <span>{getThinkingLabel(msg.thinking, isStreaming)}</span>
+                          {isStreaming && (
+                            <span className="animate-thinking-dots">
+                              <span>.</span><span>.</span><span>.</span>
+                            </span>
+                          )}
+                        </button>
+                        {isThinkingExpanded && (
+                          isStreaming ? (
+                            <div className="mt-2 pl-4 border-l-2 border-zinc-600/50 relative">
+                              {/* Top scroll fade — hides scrolled-out text */}
+                              <div className="absolute top-0 left-4 right-0 h-8 bg-gradient-to-b from-zinc-800/60 via-zinc-800/30 to-transparent z-10 pointer-events-none" />
+                              <div
+                                ref={thinkingContainerRef}
+                                className="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap max-h-[6rem] overflow-y-auto"
+                                style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                              >
+                                {msg.thinking}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="mt-2 pl-4 border-l-2 border-zinc-600/50 text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap">
+                              {msg.thinking}
+                            </div>
+                          )
+                        )}
+                      </div>
+                      );
+                    })()}
+
+                    <div className="text-base leading-relaxed prose prose-invert prose-zinc max-w-none prose-code:bg-zinc-700/50 prose-code:text-zinc-200 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs prose-code:before:content-none prose-code:after:content-none prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-700/40 prose-pre:rounded-xl prose-pre:text-sm prose-headings:text-zinc-100 prose-a:text-indigo-400 prose-strong:text-zinc-100 prose-li:marker:text-zinc-500">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={msg.role === 'assistant' ? {
+                          a: ({ href, children, ...props }) => {
+                            const preview = linkPreviews[href];
+                            const hasPreview = preview && !preview.loading && !preview.error && (preview.title || preview.description);
+                            let domain = '';
+                            try { domain = new URL(href).hostname.replace('www.', ''); } catch {}
+
+                            // Rich block-level preview card — <br/> forces own row, inline-block keeps trailing punctuation in flow
+                            if (hasPreview) {
+                              return (
+                                <>
+                                  <br />
+                                  <a
+                                    href={href}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    {...props}
+                                    className="inline-block my-1 rounded-lg bg-zinc-800/80 border border-zinc-700/50 hover:border-indigo-500/30 hover:bg-zinc-800 transition-colors no-underline overflow-hidden max-w-sm"
+                                  >
+                                  {preview.image && (
+                                    <span className="block w-full h-16 bg-zinc-700/50 overflow-hidden">
+                                      <img src={preview.image} alt="" className="w-full h-full object-cover" loading="lazy" referrerPolicy="no-referrer" />
+                                    </span>
+                                  )}
+                                  <span className="flex items-center gap-2 px-2.5 py-2">
+                                    {!preview.image && (
+                                      <span className="flex-shrink-0 w-5 h-5 rounded bg-zinc-700/50 overflow-hidden flex items-center justify-center">
+                                        {preview.favicon ? (
+                                          <img src={preview.favicon} alt="" className="w-3.5 h-3.5 rounded" loading="lazy" referrerPolicy="no-referrer" />
+                                        ) : (
+                                          <svg className="w-3.5 h-3.5 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                                          </svg>
+                                        )}
+                                      </span>
+                                    )}
+                                    <span className="min-w-0 flex-1">
+                                      <span className="text-[11px] font-semibold text-zinc-200 leading-tight line-clamp-1 block">
+                                        {preview.title || domain}
+                                      </span>
+                                      {preview.description && (
+                                        <span className="text-[10px] text-zinc-400 mt-0.5 leading-tight line-clamp-1 block">
+                                          {preview.description}
+                                        </span>
+                                      )}
+                                      <span className="text-[10px] text-zinc-500 mt-0.5 flex items-center gap-1">
+                                        {preview.favicon && <img src={preview.favicon} alt="" className="w-3 h-3 rounded" loading="lazy" referrerPolicy="no-referrer" />}
+                                        {domain}
+                                      </span>
+                                    </span>
+                                  </span>
+                                </a>
+                                </>
+                              );
+                            }
+
+                            // Simple link chip — for links without preview data
+                            return (
+                              <a
+                                href={href}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                {...props}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] no-underline bg-indigo-600/10 border border-indigo-500/20 text-indigo-300 hover:bg-indigo-600/20 hover:text-indigo-200 transition-colors align-baseline"
+                              >
+                                <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                                </svg>
+                                <span>{domain || children}</span>
+                              </a>
+                            );
+                          }
+                        } : undefined}
+                      >
+                        {(msg.content || '')}
+                      </ReactMarkdown>
+                    </div>
+
 
                     {msg.role === 'assistant' && msg.model && (
                       <div className="flex items-center gap-2 mt-3 pt-2 border-t border-zinc-700/40">
@@ -879,22 +1647,139 @@ export default function Home() {
                       </div>
                     )}
 
-                    <p className="text-[10px] text-zinc-500 mt-2">{new Date(msg.timestamp).toLocaleTimeString()}</p>
+                    <div className="flex items-center justify-between mt-2">
+                      <p className={`text-[10px] ${msg.role === 'user' ? 'text-white/50' : 'text-zinc-500'}`}>{new Date(msg.timestamp).toLocaleTimeString()}</p>
+                      <div className="flex items-center gap-0.5">
+                        {/* Copy button — only on assistant messages, not loading, not search suggestion */}
+                        {msg.role === 'assistant' && !msg.isSearchSuggestion && msg.content && (
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(msg.content)}
+                            title="Copy message"
+                            className="p-1 rounded-md text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                          </button>
+                        )}
+                        {/* Regenerate button — only on last assistant message, not loading */}
+                        {msg.role === 'assistant' && !msg.isSearchSuggestion && i === messages.length - 1 && !isLoading && (
+                          <button
+                            type="button"
+                            onClick={handleResend}
+                            title="Regenerate response"
+                            className="p-1 rounded-md text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
+                  </>
+                )}
                 </div>
-              ))}
+              );
+            })}
 
-              {/* Thinking indicator */}
-              {isLoading && (
+              {/* Web search discovery tip — shown when LLM indicates it can't search or has outdated data */}
+              {!isLoading && !webSearchEnabled && messages.length >= 2 && (() => {
+                const lastMsg = messages[messages.length - 1];
+                if (!lastMsg || lastMsg.role !== 'assistant' || lastMsg.isSearchSuggestion || !lastMsg.showSearchTip) return null;
+                const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+                if (!lastUserMsg) return null;
+                return (
+                  <div className="flex gap-4 max-w-[90%]">
+                    <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-700/50 flex items-center justify-center flex-shrink-0 mt-1 overflow-hidden">
+                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                        <defs>
+                          <linearGradient id="aurora-avatar-tip" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stopColor="#818cf8" />
+                            <stop offset="100%" stopColor="#c084fc" />
+                          </linearGradient>
+                        </defs>
+                        <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-avatar-tip)" strokeWidth="1.5" opacity="0.9" />
+                        <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-avatar-tip)" strokeWidth="1.5" opacity="0.5" />
+                        <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-avatar-tip)" strokeWidth="1.5" opacity="0.3" />
+                      </svg>
+                    </div>
+                    <div className="bg-zinc-800/40 border border-zinc-700/30 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[85%] relative">
+                      <button
+                        type="button"
+                        onClick={() => setMessages(prev => prev.map(m => m.id === lastMsg.id ? { ...m, showSearchTip: undefined } : m))}
+                        className="absolute top-2 right-2 p-1 rounded-md text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors"
+                        title="Dismiss"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                      <p className="text-sm text-zinc-300 mb-2 pr-5">
+                        <span className="text-indigo-400 font-medium">Did you know</span> you can search the web with Aurora?
+                      </p>
+                      <p className="text-xs text-zinc-500 mb-3">
+                        I can look up current information to give you more accurate, up-to-date answers.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWebSearchEnabled(true);
+                          if (currentChatId) {
+                            setChatWebSearch(cw => ({ ...cw, [currentChatId]: true }));
+                          }
+                          // Dismiss the tip from this message
+                          setMessages(prev => prev.map(m => m.id === lastMsg.id ? { ...m, showSearchTip: undefined } : m));
+                          // Re-send the last user query with search enabled
+                          setInputValue(lastUserMsg.content);
+                          setTimeout(() => {
+                            const form = document.querySelector('form');
+                            if (form) form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                          }, 50);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 rounded-lg text-xs text-indigo-300 hover:text-indigo-200 transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                        </svg>
+                        Search &quot;{lastUserMsg.content.slice(0, 40)}{lastUserMsg.content.length > 40 ? '...' : ''}&quot;
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Loading indicator */}
+              {isLoading && !streamStarted && (
                 <div className="flex gap-4 max-w-[90%] ml-auto">
-                  <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center flex-shrink-0 mt-1">
-                    <span className="text-white font-bold text-xs">A</span>
+                  <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-700/50 flex items-center justify-center flex-shrink-0 mt-1 overflow-hidden">
+                    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                      <defs>
+                        <linearGradient id="aurora-avatar-loading" x1="0%" y1="0%" x2="100%" y2="100%">
+                          <stop offset="0%" stopColor="#818cf8" />
+                          <stop offset="100%" stopColor="#c084fc" />
+                        </linearGradient>
+                      </defs>
+                      <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-avatar-loading)" strokeWidth="1.5" opacity="0.9" />
+                      <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-avatar-loading)" strokeWidth="1.5" opacity="0.5" />
+                      <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-avatar-loading)" strokeWidth="1.5" opacity="0.3" />
+                    </svg>
                   </div>
                   <div className="bg-zinc-800/60 border border-zinc-700/40 rounded-2xl rounded-tl-sm px-4 py-3">
+                    {webSearchEnabled && (
+                      <div className="flex items-center gap-2 mb-3 text-xs text-indigo-300">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                        </svg>
+                        Searching the web...
+                      </div>
+                    )}
                     <div className="flex gap-1">
-                      <span className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce"></span>
-                      <span className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce"></span>
-                      <span className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce"></span>
+                      <span className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
+                      <span className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
+                      <span className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
                     </div>
                   </div>
                 </div>
@@ -906,6 +1791,27 @@ export default function Home() {
         {/* Input area */}
         <div className="shrink-0 p-4 sm:p-6 pb-6">
           <form onSubmit={sendMessage} className="max-w-[900px] mx-auto">
+            {/* Web Search indicator pill */}
+            {webSearchEnabled && (
+              <div className="flex items-center gap-1.5 mb-2 ml-1">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-600/15 border border-indigo-600/30 rounded-full text-xs text-indigo-300">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                  </svg>
+                  Search
+                </span>
+                <button type="button" onClick={() => {
+                  setWebSearchEnabled(false);
+                  if (currentChatId) {
+                    setChatWebSearch(cw => ({ ...cw, [currentChatId]: false }));
+                  }
+                }} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            )}
             {files.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-3 px-2">
                 {files.map((file, i) => (
@@ -930,7 +1836,7 @@ export default function Home() {
               {/* Left controls: + button */}
               <div className="absolute left-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
                 {/* ChatGPT-style + button */}
-                <div className="relative">
+                <div className="relative" ref={plusMenuRef}>
                   <button
                     type="button"
                     onClick={(e) => { e.preventDefault(); setPlusMenuOpen(!plusMenuOpen); }}
@@ -941,31 +1847,39 @@ export default function Home() {
                     </svg>
                   </button>
                   {plusMenuOpen && (
-                    <>
-                      <div className="fixed inset-0 z-10" onClick={() => setPlusMenuOpen(false)} />
-                      <div className="absolute bottom-full left-0 mb-2 bg-zinc-800 border border-zinc-600/60 rounded-xl shadow-2xl z-20 py-1.5 min-w-[180px]">
-                        <button
-                          type="button"
-                          onClick={(e) => { e.preventDefault(); fileInputRef.current?.click(); setPlusMenuOpen(false); }}
-                          className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                          </svg>
-                          Upload file
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.preventDefault(); fileInputRef.current?.click(); setPlusMenuOpen(false); }}
-                          className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                          </svg>
-                          Upload image
-                        </button>
-                      </div>
-                    </>
+                    <div className="absolute bottom-full left-0 mb-2 bg-zinc-800 border border-zinc-600/60 rounded-xl shadow-2xl z-20 py-1.5 min-w-[200px]">
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); setWebSearchEnabled(prev => { const next = !prev; if (currentChatId) { setChatWebSearch(cw => ({ ...cw, [currentChatId]: next })); } return next; }); setPlusMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                        </svg>
+                        Search Web
+                        {webSearchEnabled && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-400 flex-shrink-0" />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); fileInputRef.current?.click(); setPlusMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                        </svg>
+                        Upload file
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); fileInputRef.current?.click(); setPlusMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        </svg>
+                        Upload image
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -994,10 +1908,15 @@ export default function Home() {
 
               <button 
                 type="submit" 
-                disabled={!inputValue.trim() || isLoading}
-                className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg transition-all flex items-center justify-center flex-shrink-0 ${!inputValue.trim() || isLoading ? 'text-zinc-600 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-500'}`}
+                disabled={!isLoading && !inputValue.trim()}
+                className={`absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-lg transition-all flex items-center justify-center flex-shrink-0 ${!isLoading && !inputValue.trim() ? 'text-zinc-600 cursor-not-allowed' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/40'}`}
+                onClick={isLoading ? (e) => { e.preventDefault(); handleStop(); } : undefined}
               >
-                {isLoading || isThinking ? (
+                {isLoading ? (
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
+                ) : isThinking ? (
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
                 ) : (
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1203,24 +2122,44 @@ export default function Home() {
       {modelOverlayOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => { setModelOverlayOpen(false); setModelSearch(''); setModelProviderFilter('all'); }}
+            className="absolute inset-0 bg-zinc-950/70 backdrop-blur-sm"
+            onClick={() => { setModelOverlayOpen(false); setModelSearch(''); setModelProviderFilter('all'); setModelOverlayTab('models'); }}
           />
           <div className="relative bg-zinc-900 border border-zinc-700/50 rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[80vh] flex flex-col overflow-hidden">
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-zinc-800/40 px-5 py-4 shrink-0">
-              <div>
-                <h3 className="text-sm font-semibold text-white">Select Model</h3>
-                <p className="text-[11px] text-zinc-500 mt-0.5">{availableModels.length} models available</p>
+            <div className="flex items-center justify-between border-b border-zinc-800/40 px-5 py-3 shrink-0">
+              <div className="flex items-center gap-1 bg-zinc-800/60 rounded-lg p-0.5">
+                <button
+                  onClick={() => setModelOverlayTab('models')}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    modelOverlayTab === 'models'
+                      ? 'bg-zinc-700 text-zinc-100'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  Models
+                </button>
+                <button
+                  onClick={() => setModelOverlayTab('personality')}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    modelOverlayTab === 'personality'
+                      ? 'bg-zinc-700 text-zinc-100'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  Personality
+                </button>
               </div>
               <button
-                onClick={() => { setModelOverlayOpen(false); setModelSearch(''); setModelProviderFilter('all'); }}
+                onClick={() => { setModelOverlayOpen(false); setModelSearch(''); setModelProviderFilter('all'); setModelOverlayTab('models'); }}
                 className="text-zinc-500 hover:text-zinc-300 transition-colors"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
 
+            {/* Models tab content */}
+            {modelOverlayTab === 'models' ? (<>
             {/* Search bar */}
             <div className="px-5 pt-4 pb-2 shrink-0">
               <div className="relative">
@@ -1252,12 +2191,6 @@ export default function Home() {
               })().map(provider => {
                 const isActive = modelProviderFilter === provider;
                 const label = provider === 'all' ? 'All' : provider;
-                const colorDot = provider === 'OpenAI' ? 'bg-emerald-400'
-                  : provider === 'Anthropic' ? 'bg-violet-400'
-                  : provider === 'DeepSeek' ? 'bg-teal-400'
-                  : provider === 'Ollama' ? 'bg-green-500'
-                  : provider === 'LM Studio' ? 'bg-amber-400'
-                  : '';
                 return (
                   <button
                     key={provider}
@@ -1268,7 +2201,7 @@ export default function Home() {
                         : 'bg-zinc-800/60 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/60 border border-zinc-700/30'
                     }`}
                   >
-                    {colorDot && <span className={`w-1.5 h-1.5 rounded-full ${colorDot}`} />}
+                    {provider !== 'all' && <span className="text-current opacity-70">{providerIcons(provider, 'w-3 h-3')}</span>}
                     {label}
                   </button>
                 );
@@ -1320,6 +2253,17 @@ export default function Home() {
                             setModelOverlayOpen(false);
                             setModelSearch('');
                             setModelProviderFilter('all');
+                            // Persist model change to current chat
+                            if (currentChatId) {
+                              const token = localStorage.getItem('auth_token');
+                              if (token) {
+                                fetch(`/api/chats/${currentChatId}`, {
+                                  method: 'PATCH',
+                                  headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ modelId: m.id, provider })
+                                }).catch(() => {});
+                              }
+                            }
                           }}
                           className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl text-left transition-colors ${
                             isSelected
@@ -1327,9 +2271,11 @@ export default function Home() {
                               : 'hover:bg-zinc-800/40 border border-transparent'
                           }`}
                         >
-                          <span className={`w-3 h-3 rounded-full flex-shrink-0 ${
-                            m.source === 'OpenAI' ? 'bg-emerald-400' : m.source === 'Anthropic' ? 'bg-violet-400' : m.source === 'DeepSeek' ? 'bg-teal-400' : m.source === 'Ollama' ? 'bg-green-500' : 'bg-amber-400'
-                          }`} />
+                          <span className={`${
+                            m.source === 'OpenAI' ? 'text-emerald-400' : m.source === 'Anthropic' ? 'text-violet-400' : m.source === 'DeepSeek' ? 'text-teal-400' : m.source === 'Ollama' ? 'text-green-400' : 'text-amber-400'
+                          }`}>
+                            {providerIcons(m.source)}
+                          </span>
                           <div className="flex-1 min-w-0">
                             <p className={`text-sm truncate ${isSelected ? 'text-white font-medium' : 'text-zinc-300'}`}>
                               {m.name || m.id}
@@ -1344,6 +2290,279 @@ export default function Home() {
                 );
               })()}
             </div>
+            </>) : null}
+
+            {/* Personality tab content */}
+            {modelOverlayTab === 'personality' && (
+            <div className="flex-1 overflow-y-auto px-5 pb-5 flex flex-col">
+              {/* Active personality indicator */}
+              {activePersonalityId && (() => {
+                const active = personalities.find(p => p.id === activePersonalityId);
+                return active ? (
+                  <div className="mb-3 px-3 py-2 bg-indigo-600/10 border border-indigo-500/20 rounded-lg flex items-center justify-between">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <svg className="w-3.5 h-3.5 text-indigo-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+                      <span className="text-xs text-indigo-300 truncate">Active: {active.name}</span>
+                    </div>
+                    <button
+                      onClick={() => setActivePersonalityId(null)}
+                      className="text-zinc-500 hover:text-zinc-300 flex-shrink-0 ml-2"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                  </div>
+                ) : null;
+              })()}
+
+              {/* No personality / None option */}
+              <button
+                onClick={() => {
+                  setActivePersonalityId(null);
+                  setModelOverlayOpen(false);
+                }}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-colors mb-2 ${
+                  !activePersonalityId
+                    ? 'bg-zinc-700/40 border border-zinc-600/50'
+                    : 'hover:bg-zinc-800/40 border border-transparent'
+                }`}
+              >
+                <div className="w-8 h-8 rounded-full bg-zinc-700/60 flex items-center justify-center flex-shrink-0">
+                  <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm ${!activePersonalityId ? 'text-white font-medium' : 'text-zinc-300'}`}>No personality</p>
+                  <p className="text-[11px] text-zinc-500">Use the model&apos;s default behavior</p>
+                </div>
+                {!activePersonalityId && (
+                  <span className="w-2 h-2 rounded-full bg-indigo-400 flex-shrink-0" />
+                )}
+              </button>
+
+              {/* Create / Edit form */}
+              {editingPersonalityId !== null || (editingPersonalityId === null && !activePersonalityId) ? (
+                <div className="mb-3 p-4 bg-zinc-800/40 border border-zinc-700/40 rounded-xl">
+                  <p className="text-xs font-medium text-zinc-300 mb-3">
+                    {editingPersonalityId ? 'Edit Personality' : 'New Personality'}
+                  </p>
+                  <input
+                    type="text"
+                    value={newPersonalityName}
+                    onChange={(e) => setNewPersonalityName(e.target.value)}
+                    placeholder="Profile name..."
+                    className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-600/30 focus:border-indigo-500 transition-all mb-2"
+                  />
+                  <div className="relative">
+                    <textarea
+                      value={newPersonalityPrompt}
+                      onChange={(e) => setNewPersonalityPrompt(e.target.value)}
+                      placeholder="System prompt — defines how the AI should behave..."
+                      rows={4}
+                      className="w-full bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-2 pr-20 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-600/30 focus:border-indigo-500 transition-all resize-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowGenerateField(!showGenerateField)}
+                      className={`absolute right-2 top-2 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                        showGenerateField
+                          ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30'
+                          : 'bg-zinc-700/60 text-zinc-500 hover:text-indigo-300 hover:bg-zinc-700 border border-zinc-600/30'
+                      }`}
+                    >
+                      <span className="flex items-center gap-1">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                        AI
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Generate with AI — expandable field */}
+                  {showGenerateField && (
+                    <div className="mt-2 p-3 bg-indigo-600/5 border border-indigo-500/20 rounded-lg">
+                      <div className="flex items-center gap-2 mb-2">
+                        <svg className="w-3.5 h-3.5 text-indigo-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                        <span className="text-[11px] text-indigo-300 font-medium">Describe the personality you want</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={generatePromptDesc}
+                          onChange={(e) => setGeneratePromptDesc(e.target.value)}
+                          placeholder="e.g. A witty pirate who speaks in nautical slang..."
+                          onKeyDown={(e) => { if (e.key === 'Enter') generatePrompt(); }}
+                          className="flex-1 bg-zinc-800 border border-zinc-700/50 rounded-lg px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-600/30 focus:border-indigo-500 transition-all"
+                        />
+                        <button
+                          type="button"
+                          onClick={generatePrompt}
+                          disabled={!generatePromptDesc.trim() || generatingPrompt}
+                          className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 flex-shrink-0"
+                        >
+                          {generatingPrompt ? (
+                            <>
+                              <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              Generating
+                            </>
+                          ) : (
+                            'Generate'
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      onClick={() => {
+                        if (!newPersonalityName.trim() || !newPersonalityPrompt.trim()) return;
+                        if (editingPersonalityId && editingPersonalityId !== '__new__') {
+                          setPersonalities(prev => prev.map(p => p.id === editingPersonalityId ? { ...p, name: newPersonalityName.trim(), prompt: newPersonalityPrompt.trim() } : p));
+                        } else {
+                          const newP = { id: `pers_${Date.now()}`, name: newPersonalityName.trim(), prompt: newPersonalityPrompt.trim(), createdAt: new Date().toISOString() };
+                          setPersonalities(prev => [newP, ...prev]);
+                          setActivePersonalityId(newP.id);
+                        }
+                        setNewPersonalityName('');
+                        setNewPersonalityPrompt('');
+                        setEditingPersonalityId(null);
+                      }}
+                      disabled={!newPersonalityName.trim() || !newPersonalityPrompt.trim()}
+                      className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {editingPersonalityId && editingPersonalityId !== '__new__' ? 'Save' : 'Create'}
+                    </button>
+                    <button
+                      onClick={() => { setNewPersonalityName(''); setNewPersonalityPrompt(''); setEditingPersonalityId(null); }}
+                      className="px-4 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40 rounded-lg transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setEditingPersonalityId('__new__')}
+                  className="w-full mb-3 px-4 py-3 border border-dashed border-zinc-700/50 rounded-xl text-xs text-zinc-500 hover:text-zinc-300 hover:border-zinc-600/60 transition-colors flex items-center justify-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                  Create New Personality
+                </button>
+              )}
+
+              {/* Personality list */}
+              {personalities.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 gap-2 flex-1">
+                  <svg className="w-8 h-8 text-zinc-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+                  <p className="text-sm text-zinc-500">No personalities yet</p>
+                  <p className="text-xs text-zinc-600">Create a personality to give the AI a custom persona</p>
+                </div>
+              ) : (
+                <div className="grid gap-1">
+                  {personalities.map(p => {
+                    const isActive = p.id === activePersonalityId;
+                    return (
+                      <div
+                        key={p.id}
+                        className={`group flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-colors ${
+                          isActive
+                            ? 'bg-indigo-600/10 border border-indigo-500/30'
+                            : 'hover:bg-zinc-800/40 border border-transparent'
+                        }`}
+                      >
+                        <button
+                          onClick={() => {
+                            setActivePersonalityId(p.id);
+                            setModelOverlayOpen(false);
+                            setModelSearch('');
+                            setModelProviderFilter('all');
+                            setModelOverlayTab('models');
+                          }}
+                          className="flex-1 min-w-0 text-left"
+                        >
+                          <p className={`text-sm truncate ${isActive ? 'text-white font-medium' : 'text-zinc-300'}`}>
+                            {p.name}
+                            {p.isDefault && (
+                              <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-indigo-600/20 text-indigo-300 border border-indigo-500/20">Default</span>
+                            )}
+                          </p>
+                          <p className="text-[11px] text-zinc-500 truncate mt-0.5">{p.prompt.slice(0, 80)}{p.prompt.length > 80 ? '...' : ''}</p>
+                        </button>
+                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingPersonalityId(p.id);
+                              setNewPersonalityName(p.name);
+                              setNewPersonalityPrompt(p.prompt);
+                            }}
+                            className="p-1 text-zinc-500 hover:text-zinc-300 transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (p.isDefault) return;
+                              setPersonalities(prev => prev.filter(x => x.id !== p.id));
+                              if (isActive) setActivePersonalityId(null);
+                            }}
+                            className={`p-1 transition-colors ${p.isDefault ? 'text-zinc-700 cursor-not-allowed' : 'text-zinc-500 hover:text-red-400'}`}
+                            title={p.isDefault ? 'Default personality cannot be deleted' : 'Delete personality'}
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Delete Chat Confirmation Modal */}
+      {deleteConfirmChat && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-zinc-950/70 backdrop-blur-sm"
+            onClick={() => setDeleteConfirmChat(null)}
+          />
+          <div className="relative bg-zinc-900 border border-zinc-700/50 rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
+            <div className="px-5 py-5">
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center flex-shrink-0">
+                  <svg className="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-sm font-semibold text-zinc-100">Delete Chat</h3>
+                  <p className="text-sm text-zinc-500 mt-1 leading-relaxed">
+                    This will permanently delete &ldquo;{deleteConfirmChat.title || 'Chat'}&rdquo; and all its messages. This action cannot be undone.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="flex border-t border-zinc-800/40">
+              <button
+                onClick={() => setDeleteConfirmChat(null)}
+                className="flex-1 py-3 text-sm font-medium text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/40 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const chatToDelete = deleteConfirmChat;
+                  setDeleteConfirmChat(null);
+                  deleteChat(chatToDelete.id);
+                }}
+                className="flex-1 py-3 text-sm font-medium text-red-500 hover:text-red-400 hover:bg-red-950/30 transition-colors border-l border-zinc-800/40"
+              >
+                Delete
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1351,7 +2570,7 @@ export default function Home() {
       {/* LM Studio Model Limit Overlay — shown at send time when limit exceeded */}
       {lmOverlayOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setLmOverlayOpen(false)} />
+          <div className="absolute inset-0 bg-zinc-950/70 backdrop-blur-sm" onClick={() => setLmOverlayOpen(false)} />
           <div className="relative bg-zinc-900 border border-zinc-700/50 rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
             <div className="flex items-center justify-between border-b border-zinc-800/40 px-5 py-4">
               <div>

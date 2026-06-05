@@ -1,14 +1,18 @@
-// @aurora/api/auth/me - Get current user (real JWT verify, Redis-backed)
+// @aurora/api/auth/me - Get current user (JWT verify, SQLite-backed)
 
 import { NextResponse } from 'next/server';
-import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
-import { KEYS } from '@aurora/shared/redis-keys';
+import { getDb } from '@aurora/shared/db-client';
+import { runMigrations } from '@aurora/shared/db-migrate';
 import { AuthHandler } from '@aurora/auth-service/handlers';
 
 const authHandler = new AuthHandler();
 
 export async function GET(request) {
   try {
+    // Ensure database tables exist
+    runMigrations();
+    const db = getDb();
+
     const authHeader = request.headers.get('Authorization') || '';
     
     if (!authHeader.startsWith('Bearer ')) {
@@ -31,14 +35,7 @@ export async function GET(request) {
     }
 
     const userId = decoded.userId;
-    
-    // Look up user via Redis
-    let user = null;
-    if (isRedisAvailable()) {
-      const redis = getRedis();
-      user = await redis.hgetall(KEYS.USER_BY_ID(userId));
-      if (!user || Object.keys(user).length === 0) user = null;
-    }
+    const user = db.prepare('SELECT id, email, name, role FROM users WHERE id = ?').get(userId);
 
     if (!user) {
       return NextResponse.json(

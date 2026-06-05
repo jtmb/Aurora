@@ -1,10 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   transpilePackages: [
-    '@aurora/shared',
     '@aurora/auth-service',
     '@aurora/api-gateway',
   ],
+  serverExternalPackages: ['better-sqlite3'],
   experimental: {
     externalDir: true,
   },

@@ -5,15 +5,15 @@
   "exports": {
     ".": "./src/index.js",
     "./types": "./src/types/index.js",
-    "./redis-client": "./src/redis-client.js",
-    "./redis-keys": "./src/redis-keys.js",
+    "./db-client": "./src/db-client.js",
+    "./db-migrate": "./src/db-migrate.js",
     "./seed": "./src/seed.js"
   },
   "files": [
     "src/**/*.js"
   ],
   "dependencies": {
-    "ioredis": "^5.4.1",
+    "better-sqlite3": "^11.0.0",
     "bcryptjs": "^3.0.3"
   }
 }

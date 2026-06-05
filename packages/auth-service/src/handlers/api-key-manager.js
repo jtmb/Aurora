@@ -1,153 +1,118 @@
-// @aurora/auth-service - API Key Manager (Redis-backed)
-// Manages user API keys with Redis persistence + in-memory fallback.
+// @aurora/auth-service - API Key Manager (SQLite-backed)
+// Manages user API keys with SQLite persistence.
 
 import crypto from 'crypto';
-import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
-import { KEYS, TTL } from '@aurora/shared/redis-keys';
+import { getDb } from '@aurora/shared/db-client';
 
 export class ApiKeyManager {
   constructor(options = {}) {
-    // Derive a stable encryption key from JWT_SECRET so keys survive server restarts.
-    // Falls back to API_KEY_ENCRYPTION_KEY env var, then explicit option, then a
-    // SHA-256 derivation of JWT_SECRET (consistent across restarts).
     const jwtSecret = process.env.JWT_SECRET || 'aurora-fallback-jwt-secret-min-32-chars';
     this.encryptionKey = options.encryptionKey
       || process.env.API_KEY_ENCRYPTION_KEY
       || crypto.createHash('sha256').update(jwtSecret).digest('hex');
     this.keyPrefix = 'ak_';
-    this.keys = new Map();
   }
 
-  _getStorage() { return isRedisAvailable() ? 'redis' : 'memory'; }
-
   async createApiKey(userId, provider, options = {}) {
-    // Accept user-provided key or auto-generate one
+    const db = getDb();
     const rawKey = options.rawKey || `${this.keyPrefix}${crypto.randomBytes(16).toString('hex')}`;
     const encryptedKey = this._encrypt(rawKey);
     const keyId = `key_${Date.now()}_${Math.random().toString(36).substring(2)}`;
-    
+
+    // Check if user already has a key for this provider — update it
+    const existing = db.prepare(`
+      SELECT id FROM api_keys WHERE user_id = ? AND provider = ? AND revoked_at = ''
+    `).get(userId, provider);
+
     const keyData = {
-      id: keyId, userId, provider, encryptedKey,
-      isPrimary: options.isPrimary ? '1' : '0',
+      id: existing ? existing.id : keyId,
+      userId,
+      provider,
+      encryptedKey,
+      isPrimary: options.isPrimary ? 1 : 0,
       name: options.name || `${provider} API Key`,
-      createdAt: new Date().toISOString(),
-      lastRotated: '', rotationCount: '0', revokedAt: ''
+      createdAt: new Date().toISOString()
     };
 
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      // Check if user already has a key for this provider — if so, update it
-      const existingIds = await redis.smembers(KEYS.USER_API_KEYS(userId));
-      let existingKeyId = null;
-      for (const kid of existingIds) {
-        const existing = await redis.hgetall(KEYS.API_KEY(kid));
-        if (existing && existing.provider === provider) {
-          existingKeyId = kid;
-          break;
-        }
-      }
-      if (existingKeyId) {
-        // Update existing key with new value
-        await redis.hset(KEYS.API_KEY(existingKeyId), { ...keyData, id: existingKeyId });
-        return { id: existingKeyId, rawKey, provider, createdAt: keyData.createdAt, isPrimary: options.isPrimary ?? false, name: keyData.name };
-      }
-      await redis.hset(KEYS.API_KEY(keyId), keyData);
-      await redis.expire(KEYS.API_KEY(keyId), TTL.API_KEY);
-      await redis.sadd(KEYS.USER_API_KEYS(userId), keyId);
-    } else {
-      this.keys.set(keyId, { ...keyData, rawKey });
+    if (existing) {
+      db.prepare(`
+        UPDATE api_keys SET encrypted_key = ?, is_primary = ?, name = ?, last_rotated = datetime('now')
+        WHERE id = ?
+      `).run(encryptedKey, keyData.isPrimary, keyData.name, existing.id);
+      return { id: existing.id, rawKey, provider, createdAt: keyData.createdAt, isPrimary: options.isPrimary ?? false, name: keyData.name };
     }
+
+    db.prepare(`
+      INSERT INTO api_keys (id, user_id, provider, encrypted_key, is_primary, name, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(keyId, userId, provider, encryptedKey, keyData.isPrimary, keyData.name, keyData.createdAt);
+
     return { id: keyId, rawKey, provider, createdAt: keyData.createdAt, isPrimary: options.isPrimary ?? false, name: keyData.name };
   }
 
   async getPrimaryKey(userId, provider) {
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      const keyIds = await redis.smembers(KEYS.USER_API_KEYS(userId));
-      for (const keyId of keyIds) {
-        const data = await redis.hgetall(KEYS.API_KEY(keyId));
-        if (data && data.provider === provider && !data.revokedAt) {
-          return { ...data, rawKey: this._decrypt(data.encryptedKey) };
-        }
-      }
-      return null;
-    }
-    const keys = Array.from(this.keys.values()).filter(k => k.userId === userId && k.provider === provider);
-    return keys.find(k => k.isPrimary === '1') || keys.find(k => !k.revokedAt) || null;
+    const db = getDb();
+    const row = db.prepare(`
+      SELECT * FROM api_keys WHERE user_id = ? AND provider = ? AND revoked_at = ''
+      ORDER BY is_primary DESC LIMIT 1
+    `).get(userId, provider);
+
+    if (!row) return null;
+    return { ...row, rawKey: this._decrypt(row.encrypted_key), isPrimary: row.is_primary === 1 };
   }
 
   async listKeys(userId) {
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      const keyIds = await redis.smembers(KEYS.USER_API_KEYS(userId));
-      const keys = [];
-      for (const keyId of keyIds) {
-        const data = await redis.hgetall(KEYS.API_KEY(keyId));
-        if (data && Object.keys(data).length > 0) {
-          try {
-            const rawKey = this._decrypt(data.encryptedKey);
-            keys.push({
-              id: data.id, provider: data.provider, name: data.name,
-              createdAt: data.createdAt, isPrimary: data.isPrimary === '1',
-              rawKey
-            });
-          } catch {
-            // Stale/corrupt encrypted key (e.g. encryption key changed) — skip it
-            // Remove the bad entry so it doesn't keep failing
-            await redis.del(KEYS.API_KEY(keyId));
-            await redis.srem(KEYS.USER_API_KEYS(userId), keyId);
-          }
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT * FROM api_keys WHERE user_id = ? AND revoked_at = '' ORDER BY created_at DESC
+    `).all(userId);
+
+    return rows
+      .map(row => {
+        try {
+          return {
+            id: row.id,
+            provider: row.provider,
+            name: row.name,
+            createdAt: row.created_at,
+            isPrimary: row.is_primary === 1,
+            rawKey: this._decrypt(row.encrypted_key)
+          };
+        } catch {
+          // Stale/corrupt key — remove it
+          db.prepare('DELETE FROM api_keys WHERE id = ?').run(row.id);
+          return null;
         }
-      }
-      return keys;
-    }
-    return Array.from(this.keys.values()).filter(k => k.userId === userId)
-      .map(k => ({ id: k.id, provider: k.provider, name: k.name, createdAt: k.createdAt, isPrimary: k.isPrimary === '1', rawKey: k.rawKey }));
+      })
+      .filter(Boolean);
   }
 
   async rotateKey(keyId, userId) {
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      const data = await redis.hgetall(KEYS.API_KEY(keyId));
-      if (!data || data.userId !== userId) throw new Error('Invalid or unauthorized key');
-      const bytes = crypto.randomBytes(16);
-      const newRawKey = `${this.keyPrefix}${bytes.toString('hex')}`;
-      await redis.hset(KEYS.API_KEY(keyId), { encryptedKey: this._encrypt(newRawKey), lastRotated: new Date().toISOString(), rotationCount: (parseInt(data.rotationCount || '0') + 1).toString() });
-      return { keyId, rawKey: newRawKey, rotationTimestamp: new Date().toISOString() };
-    }
-    const key = this.keys.get(keyId);
-    if (!key || key.userId !== userId) throw new Error('Invalid or unauthorized key');
-    const bytes = crypto.randomBytes(16);
-    const newRawKey = `${this.keyPrefix}${bytes.toString('hex')}`;
-    key.rawKey = newRawKey;
-    key.encryptedKey = this._encrypt(newRawKey);
-    key.lastRotated = new Date().toISOString();
-    key.rotationCount = (parseInt(key.rotationCount || '0') + 1).toString();
-    return { keyId, rawKey: newRawKey, rotationTimestamp: key.lastRotated };
+    const db = getDb();
+    const row = db.prepare('SELECT * FROM api_keys WHERE id = ? AND user_id = ?').get(keyId, userId);
+    if (!row) throw new Error('Invalid or unauthorized key');
+
+    const newRawKey = `${this.keyPrefix}${crypto.randomBytes(16).toString('hex')}`;
+    db.prepare(`
+      UPDATE api_keys SET encrypted_key = ?, last_rotated = datetime('now'), rotation_count = rotation_count + 1
+      WHERE id = ?
+    `).run(this._encrypt(newRawKey), keyId);
+
+    return { keyId, rawKey: newRawKey, rotationTimestamp: new Date().toISOString() };
   }
 
   async revokeKey(keyId, userId) {
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      const data = await redis.hgetall(KEYS.API_KEY(keyId));
-      if (!data || data.userId !== userId) throw new Error('Invalid or unauthorized key');
-      await redis.hset(KEYS.API_KEY(keyId), 'revokedAt', new Date().toISOString());
-      await redis.srem(KEYS.USER_API_KEYS(userId), keyId);
-      return { revoked: true };
-    }
-    const key = this.keys.get(keyId);
-    if (!key || key.userId !== userId) throw new Error('Invalid or unauthorized key');
-    key.revokedAt = new Date().toISOString();
-    this.keys.delete(keyId);
+    const db = getDb();
+    const row = db.prepare('SELECT * FROM api_keys WHERE id = ? AND user_id = ?').get(keyId, userId);
+    if (!row) throw new Error('Invalid or unauthorized key');
+
+    db.prepare("UPDATE api_keys SET revoked_at = datetime('now') WHERE id = ?").run(keyId);
     return { revoked: true };
   }
 
   async deleteKey(keyId, userId) {
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      await redis.del(KEYS.API_KEY(keyId));
-      await redis.srem(KEYS.USER_API_KEYS(userId), keyId);
-    } else { this.keys.delete(keyId); }
+    const db = getDb();
+    db.prepare('DELETE FROM api_keys WHERE id = ? AND user_id = ?').run(keyId, userId);
     return { deleted: true };
   }
 

@@ -1,106 +1,76 @@
-// @aurora/auth-service - Session Manager (Redis-backed)
-// Manages user sessions with Redis persistence and native TTL.
-// Falls back to in-memory Map if Redis is unavailable.
+// @aurora/auth-service - Session Manager (SQLite-backed)
+// Manages user sessions with SQLite persistence and expires_at for TTL.
 
-import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
-import { KEYS, TTL } from '@aurora/shared/redis-keys';
+import { getDb } from '@aurora/shared/db-client';
 
 export class SessionManager {
   constructor(options = {}) {
     this.maxConcurrentSessions = options.maxConcurrentSessions ?? 10;
-    this.sessionTtlMinutes = options.sessionTtlMinutes ?? 2880;
-    this.sessionTtlSeconds = this.sessionTtlMinutes * 60;
-    this.sessions = new Map();
-  }
-
-  _getStorage() {
-    return isRedisAvailable() ? 'redis' : 'memory';
+    this.sessionTtlMinutes = options.sessionTtlMinutes ?? 2880; // 48h
   }
 
   async createSession(token, userId) {
-    const sessionKey = KEYS.SESSION(token);
-    const sessionData = {
-      id: crypto.randomUUID(),
-      userId: userId || 'unknown',
-      token,
-      createdAt: Date.now().toString(),
-      lastAccessed: Date.now().toString(),
-      status: 'active'
-    };
+    const db = getDb();
+    const sessionId = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + this.sessionTtlMinutes * 60 * 1000).toISOString();
 
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      await redis.hset(sessionKey, sessionData);
-      await redis.expire(sessionKey, TTL.SESSION);
-    } else {
-      const mapKey = `session:${token}`;
-      if (this.sessions.has(mapKey)) return this.rotateToken(mapKey);
-      this.sessions.set(mapKey, sessionData);
-    }
-    return { sessionId: sessionData.id };
+    db.prepare(`
+      INSERT INTO sessions (token, user_id, session_data, created_at, last_accessed, expires_at, status)
+      VALUES (?, ?, ?, datetime('now'), datetime('now'), ?, 'active')
+    `).run(token, userId, JSON.stringify({ id: sessionId, userId }), expiresAt);
+
+    // Clean up expired sessions for this user
+    db.prepare("DELETE FROM sessions WHERE user_id = ? AND expires_at < datetime('now')").run(userId);
+
+    return { sessionId };
   }
 
   async accessSession(token) {
-    const sessionKey = KEYS.SESSION(token);
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      const exists = await redis.exists(sessionKey);
-      if (!exists) throw new Error('Session not found');
-      await redis.hset(sessionKey, 'lastAccessed', Date.now().toString());
-      return true;
-    }
-    const session = this.sessions.get(`session:${token}`);
+    const db = getDb();
+    const session = db.prepare(`
+      SELECT * FROM sessions WHERE token = ? AND expires_at > datetime('now')
+    `).get(token);
+
     if (!session) throw new Error('Session not found');
-    session.lastAccessed = Date.now();
+
+    db.prepare(`
+      UPDATE sessions SET last_accessed = datetime('now') WHERE token = ?
+    `).run(token);
+
     return true;
   }
 
   deleteExpiredSessions() {
-    if (this._getStorage() === 'redis') return 0;
-    const now = Date.now();
-    const ttlMs = this.sessionTtlMinutes * 60 * 1000;
-    for (const [key, session] of this.sessions.entries()) {
-      if (now - parseInt(session.createdAt) > ttlMs || session.status === 'expired') {
-        this.sessions.delete(key);
-      }
-    }
-    return this.sessions.size;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM sessions WHERE expires_at < datetime('now')").run();
+    return result.changes;
   }
 
   async rotateToken(oldToken) {
-    const oldKey = KEYS.SESSION(oldToken);
-    let sessionData;
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      sessionData = await redis.hgetall(oldKey);
-      if (!sessionData || Object.keys(sessionData).length === 0) return null;
-    } else {
-      sessionData = this.sessions.get(`session:${oldToken}`);
-      if (!sessionData) return null;
-    }
-    
+    const db = getDb();
+    const session = db.prepare(`
+      SELECT * FROM sessions WHERE token = ? AND expires_at > datetime('now')
+    `).get(oldToken);
+
+    if (!session) return null;
+
     const newToken = crypto.randomUUID();
-    const newSession = { ...sessionData, token: newToken, createdAt: Date.now().toString(), lastAccessed: Date.now().toString() };
-    
-    if (this._getStorage() === 'redis') {
-      const redis = getRedis();
-      const newKey = KEYS.SESSION(newToken);
-      await redis.hset(newKey, newSession);
-      await redis.expire(newKey, TTL.SESSION);
-      await redis.expire(oldKey, TTL.TOKEN_GRACE);
-    } else {
-      this.sessions.set(`session:${newToken}`, newSession);
-    }
-    return { sessionId: newSession.id, newToken };
+    const expiresAt = new Date(Date.now() + this.sessionTtlMinutes * 60 * 1000).toISOString();
+
+    db.prepare(`
+      INSERT INTO sessions (token, user_id, session_data, created_at, last_accessed, expires_at, status)
+      VALUES (?, ?, ?, datetime('now'), datetime('now'), ?, 'active')
+    `).run(newToken, session.user_id, session.session_data, expiresAt);
+
+    // Give old token a brief grace period then expire
+    db.prepare("UPDATE sessions SET expires_at = datetime('now', '+5 minutes') WHERE token = ?").run(oldToken);
+
+    return { sessionId: crypto.randomUUID(), newToken };
   }
 
   async invalidateSession(token) {
-    const sessionKey = KEYS.SESSION(token);
-    if (this._getStorage() === 'redis') {
-      await getRedis().del(sessionKey);
-    } else {
-      this.sessions.delete(`session:${token}`);
-    }
+    const db = getDb();
+    db.prepare("UPDATE sessions SET status = 'expired', expires_at = datetime('now') WHERE token = ?").run(token);
     return true;
   }
 }

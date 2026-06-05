@@ -275,6 +275,7 @@ export class LMStudioAPIAdapter {
    */
   constructor(config = {}) {
     this.baseUrl = config.baseUrl || process.env.LM_STUDIO_BASE_URL || 'http://localhost:1234';
+    this.apiKey = config.apiKey || '';
     this.defaultModel = config.defaultModel || process.env.DEFAULT_MODEL;
   }
 
@@ -298,11 +299,14 @@ export class LMStudioAPIAdapter {
       body.stop = [options.stop];
     }
 
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.apiKey) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    }
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers,
       body: JSON.stringify(body),
       signal: options.timeout ? AbortSignal.timeout(options.timeout) : undefined
     });
@@ -385,11 +389,14 @@ export class GenericProviderAdapter {
       body.stop = options.stop;
     }
 
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.apiKey) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    }
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers,
       body: JSON.stringify(body),
       signal: options.timeout ? AbortSignal.timeout(options.timeout) : undefined
     });

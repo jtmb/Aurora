@@ -3,5 +3,5 @@
 
 export * from './types';
 export { formatDate, formatDuration, truncateText } from './utils';
-export { getRedis, isRedisAvailable, closeRedis } from './redis-client';
-export { KEYS, TTL } from './redis-keys';
+export { getDb, isDbAvailable, closeDb } from './db-client';
+export { runMigrations, SCHEMA } from './db-migrate';

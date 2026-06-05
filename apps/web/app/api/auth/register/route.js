@@ -1,15 +1,19 @@
-// @aurora/api/auth/register - User registration (Redis-backed, real JWT)
+// @aurora/api/auth/register - User registration (SQLite-backed, real JWT)
 
 import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
-import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
-import { KEYS } from '@aurora/shared/redis-keys';
+import { getDb } from '@aurora/shared/db-client';
+import { runMigrations } from '@aurora/shared/db-migrate';
 import { AuthHandler } from '@aurora/auth-service/handlers';
 
 const authHandler = new AuthHandler();
 
 export async function POST(request) {
   try {
+    // Ensure database tables exist
+    runMigrations();
+    const db = getDb();
+
     const body = await request.json();
     
     if (!body.email || !body.password) {
@@ -34,18 +38,9 @@ export async function POST(request) {
       );
     }
 
-    const redis = getRedis();
-    
-    // Require Redis — no fallback
-    if (!isRedisAvailable()) {
-      return NextResponse.json(
-        { error: { message: 'Backend database is currently unavailable. Please try again later.' } },
-        { status: 503 }
-      );
-    }
-    
-    const exists = await redis.exists(KEYS.USER_BY_EMAIL(body.email));
-    if (exists) {
+    // Check for existing user
+    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(body.email);
+    if (existing) {
       return NextResponse.json(
         { error: { message: 'User with this email already exists' } },
         { status: 409 }
@@ -56,17 +51,10 @@ export async function POST(request) {
     const userId = crypto.randomUUID();
     const hashedPassword = await bcrypt.hash(body.password, 10);
     
-    const userData = {
-      id: userId,
-      email: body.email,
-      hashedPassword,
-      name: body.name || null,
-      role: 'user',
-      createdAt: new Date().toISOString()
-    };
-
-    await redis.hset(KEYS.USER_BY_EMAIL(body.email), userData);
-    await redis.hset(KEYS.USER_BY_ID(userId), userData);
+    db.prepare(`
+      INSERT INTO users (id, email, hashed_password, name, role, created_at)
+      VALUES (?, ?, ?, ?, 'user', datetime('now'))
+    `).run(userId, body.email, hashedPassword, body.name || null);
 
     // Generate real JWT
     const token = authHandler.signToken({
@@ -84,8 +72,8 @@ export async function POST(request) {
   } catch (error) {
     console.error('Registration error:', error);
     return NextResponse.json(
-      { error: { message: 'Registration failed. Backend database may be unavailable.' } },
-      { status: 503 }
+      { error: { message: 'Registration failed' } },
+      { status: 500 }
     );
   }
 }

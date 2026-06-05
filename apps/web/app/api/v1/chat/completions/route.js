@@ -1,11 +1,13 @@
 // @aurora/api/chat-completions - OpenAI-compatible chat completions endpoint
 // Supports: OpenAI, Anthropic, Ollama, LM Studio
 // API keys accepted via headers (x-openai-key, x-anthropic-key) or environment variables
-// When a valid JWT is provided, user-scoped keys from Redis take priority over header keys
+// When a valid JWT is provided, user-scoped keys from SQLite take priority over header keys
 
 import { NextResponse } from 'next/server';
 import { AuthHandler } from '@aurora/auth-service/handlers';
 import { ApiKeyManager } from '@aurora/auth-service/handlers';
+import { getDb } from '@aurora/shared/db-client';
+import { runMigrations } from '@aurora/shared/db-migrate';
 
 const authHandler = new AuthHandler();
 const apiKeyManager = new ApiKeyManager();
@@ -23,7 +25,7 @@ const getUserId = (request) => {
 };
 
 /**
- * Load user-scoped API keys from Redis (encrypted storage, per-user)
+ * Load user-scoped API keys from SQLite (encrypted storage, per-user)
  * Returns keys object compatible with extractKeysFromHeaders format.
  */
 const loadUserKeysFromStorage = async (userId) => {
@@ -61,7 +63,7 @@ const loadUserKeysFromStorage = async (userId) => {
 /**
  * Extract API keys from request headers (sent by frontend from localStorage)
  * Falls back to environment variables for production deployments.
- * User-scoped keys from Redis take priority over header/env keys when JWT is present.
+ * User-scoped keys from SQLite take priority over header/env keys when JWT is present.
  */
 const extractKeysFromHeaders = async (request) => {
   const headerKeys = {
@@ -71,6 +73,7 @@ const extractKeysFromHeaders = async (request) => {
     lmStudioUrl: request.headers.get('x-lmstudio-url') || '',
     lmStudioHost: process.env.LM_STUDIO_HOST || '',
     lmStudioPort: process.env.LM_STUDIO_PORT || '',
+    lmStudioApiKey: request.headers.get('x-lmstudio-api-key') || process.env.LM_STUDIO_API_KEY || '',
     deepseek: request.headers.get('x-deepseek-key') || process.env.DEEPSEEK_API_KEY || '',
   };
 
@@ -138,7 +141,7 @@ const getProviders = (keys) => {
     providers.push({
       id: 'lmstudio',
       baseUrl: lmUrl,
-      apiKey: '',
+      apiKey: keys.lmStudioApiKey || '',
       name: 'LM Studio'
     });
   }
@@ -220,14 +223,14 @@ const normalizeToOpenAIFormat = (data, providerId, modelName) => {
 /**
  * Build the provider-specific request URL and body
  */
-const buildProviderRequest = (provider, model, messages, temperature, maxTokens) => {
+const buildProviderRequest = (provider, model, messages, temperature, maxTokens, stream = false) => {
   let url, body, headers = { 'Content-Type': 'application/json' };
 
   switch (provider.id) {
     case 'openai':
       url = `${provider.baseUrl}/chat/completions`;
       headers['Authorization'] = `Bearer ${provider.apiKey}`;
-      body = { model, messages, temperature, max_tokens: maxTokens };
+      body = { model, messages, temperature, max_tokens: maxTokens, stream };
       break;
 
     case 'anthropic':
@@ -241,7 +244,8 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens)
         model,
         max_tokens: maxTokens || 4096,
         system: systemMsg?.content || 'You are a helpful assistant.',
-        messages: chatMessages.map(m => ({ role: m.role, content: m.content }))
+        messages: chatMessages.map(m => ({ role: m.role, content: m.content })),
+        stream
       };
       break;
 
@@ -250,7 +254,7 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens)
       body = {
         model,
         messages: messages.map(m => ({ role: m.role, content: m.content })),
-        stream: false,
+        stream,
         options: { temperature }
       };
       break;
@@ -260,14 +264,14 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens)
       // Ensure /v1 prefix regardless of whether settings already includes it
       const lmBase = provider.baseUrl.endsWith('/v1') ? provider.baseUrl : `${provider.baseUrl}/v1`;
       url = `${lmBase}/chat/completions`;
-      body = { model, messages, temperature, max_tokens: maxTokens };
+      body = { model, messages, temperature, max_tokens: maxTokens, stream };
       break;
 
     case 'deepseek':
       // DeepSeek uses OpenAI-compatible API
       url = `${provider.baseUrl}/chat/completions`;
       headers['Authorization'] = `Bearer ${provider.apiKey}`;
-      body = { model, messages, temperature, max_tokens: maxTokens };
+      body = { model, messages, temperature, max_tokens: maxTokens, stream };
       break;
 
     default:
@@ -332,14 +336,15 @@ export async function POST(request) {
     }
 
     // Build and send the provider request
+    const streamMode = body.stream === true;
     const { url, body: providerBody, headers } = buildProviderRequest(
-      selectedProvider, model, messages, temperature, body.max_tokens
+      selectedProvider, model, messages, temperature, body.max_tokens, streamMode
     );
 
-    console.log(`[Aurora] Routing to ${selectedProvider.name} (${selectedProvider.id}) -> ${url}`);
+    console.log(`[Aurora] Routing to ${selectedProvider.name} (${selectedProvider.id}) -> ${url}${streamMode ? ' [stream]' : ''}`);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     let response;
     try {
@@ -363,9 +368,94 @@ export async function POST(request) {
       throw new Error(errorMessage);
     }
 
+    // Streaming mode: pipe provider SSE stream directly to client
+    if (streamMode && response.body) {
+      const reader = response.body.getReader();
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          let buffer = '';
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) {
+                // Flush remaining buffer
+                if (buffer.trim()) {
+                  controller.enqueue(encoder.encode(buffer));
+                }
+                controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                controller.close();
+                break;
+              }
+              const chunk = decoder.decode(value, { stream: true });
+              buffer += chunk;
+              // Relay SSE events as-is
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
+              for (const line of lines) {
+                controller.enqueue(encoder.encode(line + '\n'));
+              }
+            }
+          } catch (err) {
+            console.error('[Aurora] Stream error:', err.message);
+            controller.error(err);
+          }
+        }
+      });
+
+      // Track usage — fire and forget for streaming too
+      const userId = getUserId(request);
+      if (userId) {
+        try {
+          runMigrations();
+          const db = getDb();
+          db.prepare(`
+            INSERT INTO usage_records (user_id, provider, model, prompt_tokens, completion_tokens, total_tokens)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(userId, selectedProvider.id, model, 0, 0, 0);
+        } catch (err) {
+          console.error('[Aurora] Failed to track usage:', err.message);
+        }
+      }
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'X-Provider': selectedProvider.id
+        }
+      });
+    }
+
+    // Non-streaming mode: return normalized JSON
     const data = await response.json();
     const normalized = normalizeToOpenAIFormat(data, selectedProvider.id, model);
     normalized.provider = selectedProvider.id;
+
+    // Track usage — fire and forget (don't block the response)
+    const userId = getUserId(request);
+    if (userId) {
+      try {
+        runMigrations();
+        const db = getDb();
+        db.prepare(`
+          INSERT INTO usage_records (user_id, provider, model, prompt_tokens, completion_tokens, total_tokens)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          userId,
+          selectedProvider.id,
+          model,
+          normalized.usage?.prompt_tokens || 0,
+          normalized.usage?.completion_tokens || 0,
+          normalized.usage?.total_tokens || 0
+        );
+      } catch (err) {
+        console.error('[Aurora] Failed to track usage:', err.message);
+      }
+    }
 
     return NextResponse.json(normalized);
 

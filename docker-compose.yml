@@ -1,17 +1,3 @@
-services:
-  redis:
-    image: redis:7-alpine
-    container_name: aurora-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-volumes:
-  redis-data:
+# Aurora Gateway — no external services required (SQLite is embedded)
+# This file is intentionally empty after Redis removal.
+# SQLite database (aurora.db) is created automatically by the application.

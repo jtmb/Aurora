@@ -1,6 +1,6 @@
 // @aurora/api/providers/models - Get available models from configured providers
 // API keys accepted via request headers (x-openai-key, x-anthropic-key, etc.)
-// When a valid JWT is provided, user-scoped keys from Redis take priority over header keys
+// When a valid JWT is provided, user-scoped keys from SQLite take priority over header keys
 
 import { NextResponse } from 'next/server';
 import { AuthHandler } from '@aurora/auth-service/handlers';

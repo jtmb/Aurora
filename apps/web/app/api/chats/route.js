@@ -1,8 +1,8 @@
-// @aurora/api/chats - Chat CRUD (Redis-backed, real JWT)
+// @aurora/api/chats - Chat CRUD (SQLite-backed, real JWT)
 
 import { NextResponse } from 'next/server';
-import { getRedis, isRedisAvailable } from '@aurora/shared/redis-client';
-import { KEYS } from '@aurora/shared/redis-keys';
+import { getDb } from '@aurora/shared/db-client';
+import { runMigrations } from '@aurora/shared/db-migrate';
 import { AuthHandler } from '@aurora/auth-service/handlers';
 
 const authHandler = new AuthHandler();
@@ -18,26 +18,18 @@ function getUserId(request) {
 // GET /api/chats — list user's chats (newest first)
 export async function GET(request) {
   try {
+    runMigrations();
+    const db = getDb();
     const userId = getUserId(request);
     if (!userId) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
     }
 
-    if (isRedisAvailable()) {
-      const redis = getRedis();
-      const chatIds = await redis.zrevrange(KEYS.USER_CHATS(userId), 0, 49);
-      const chats = [];
-      for (const chatId of chatIds) {
-        const data = await redis.hgetall(KEYS.CHAT(chatId));
-        if (data && Object.keys(data).length > 0) {
-          chats.push({ id: chatId, ...data });
-        }
-      }
-      return NextResponse.json({ chats });
-    }
+    const chats = db.prepare(`
+      SELECT * FROM chats WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
+    `).all(userId);
 
-    // In-memory fallback: return empty list
-    return NextResponse.json({ chats: [] });
+    return NextResponse.json({ chats: chats.map(c => ({ id: c.id, ...c })) });
   } catch (error) {
     console.error('List chats error:', error);
     return NextResponse.json({ chats: [], error: error.message });
@@ -47,6 +39,8 @@ export async function GET(request) {
 // POST /api/chats — create new chat
 export async function POST(request) {
   try {
+    runMigrations();
+    const db = getDb();
     const userId = getUserId(request);
     if (!userId) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
@@ -56,19 +50,19 @@ export async function POST(request) {
     const chatId = `chat_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     
     const chatData = {
+      id: chatId,
       userId,
       title: body.title || 'New Chat',
       modelId: body.model || '',
       provider: body.provider || '',
       createdAt: new Date().toISOString(),
-      messageCount: '0'
+      messageCount: 0
     };
 
-    if (isRedisAvailable()) {
-      const redis = getRedis();
-      await redis.hset(KEYS.CHAT(chatId), chatData);
-      await redis.zadd(KEYS.USER_CHATS(userId), Date.now(), chatId);
-    }
+    db.prepare(`
+      INSERT INTO chats (id, user_id, title, model_id, provider, message_count, created_at)
+      VALUES (?, ?, ?, ?, ?, 0, ?)
+    `).run(chatId, userId, chatData.title, chatData.modelId, chatData.provider, chatData.createdAt);
 
     return NextResponse.json({ id: chatId, ...chatData }, { status: 201 });
   } catch (error) {

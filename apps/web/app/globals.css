@@ -143,6 +143,31 @@ code {
   animation-delay: 0.4s;
 }
 
+/* Thinking label animated dots */
+@keyframes thinkingDots {
+  0% { opacity: 0.2; }
+  20% { opacity: 1; }
+  100% { opacity: 0.2; }
+}
+
+.animate-thinking-dots {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 1px;
+}
+
+.animate-thinking-dots span {
+  animation: thinkingDots 1.4s ease-in-out infinite;
+}
+
+.animate-thinking-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.animate-thinking-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
 /* Typing indicator */
 .typing-indicator {
   display: flex;
