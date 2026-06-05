@@ -34,6 +34,7 @@ export async function GET() {
         name: metadata.name || entry.name,
         repoUrl: metadata.repoUrl || null,
         type: metadata.type || 'blank',
+        codeMode: metadata.codeMode || 'full',
         createdAt: metadata.createdAt || stat.birthtime?.toISOString() || stat.mtime.toISOString(),
         lastOpened: lastOpened || null,
         isGitRepo: fs.existsSync(path.join(wsPath, '.git'))

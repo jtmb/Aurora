@@ -9,7 +9,7 @@ import { getWorkspaceDir, ensureWorkspacesDir } from '../../../../lib/workspace-
 export async function POST(request) {
   try {
     const body = await request.json().catch(() => ({}));
-    const { name, repoUrl, type = 'blank' } = body;
+    const { name, repoUrl, type = 'blank', codeMode = 'full' } = body;
     
     if (!name || !name.trim()) {
       return NextResponse.json({ error: { message: 'Workspace name is required' } }, { status: 400 });
@@ -56,6 +56,7 @@ export async function POST(request) {
       name: name.trim(),
       repoUrl: repoUrl || null,
       type: type || 'blank',
+      codeMode: codeMode || 'full',
       createdAt,
       lastOpened: createdAt
     };

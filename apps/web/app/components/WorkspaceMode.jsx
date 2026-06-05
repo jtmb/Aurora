@@ -23,7 +23,9 @@ export default function WorkspaceMode({}) {
   const [treeSearch, setTreeSearch] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [showCloner, setShowCloner] = useState(false);
+  const [creationStep, setCreationStep] = useState(null); // null | 'select' | 'form'
+  const [creationMode, setCreationMode] = useState('full'); // 'full' | 'vibe'
+  const [codeMode, setCodeMode] = useState('full'); // active workspace's mode
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneName, setCloneName] = useState('');
   const [cloneLoading, setCloneLoading] = useState(false);
@@ -116,6 +118,7 @@ export default function WorkspaceMode({}) {
     setTerminalCommand('');
     setWorkspaceChatId(null);
     setWorkspaceMessages(null);
+    setCodeMode(ws.codeMode || 'full');
 
     try {
       const res = await fetch(`/api/workspace/${ws.id}/tree`);
@@ -292,13 +295,13 @@ export default function WorkspaceMode({}) {
       const res = await fetch('/api/workspace/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: cloneName.trim(), repoUrl: cloneUrl.trim(), type: 'git' })
+        body: JSON.stringify({ name: cloneName.trim(), repoUrl: cloneUrl.trim(), type: 'git', codeMode: creationMode })
       });
       const data = await res.json();
       if (data.error) {
         setError(data.error.message);
       } else {
-        setShowCloner(false);
+        setCreationStep(null);
         setCloneUrl('');
         setCloneName('');
         await loadWorkspaces();
@@ -322,14 +325,14 @@ export default function WorkspaceMode({}) {
       const res = await fetch('/api/workspace/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: createName.trim(), type: 'blank' })
+        body: JSON.stringify({ name: createName.trim(), type: 'blank', codeMode: creationMode })
       });
       const data = await res.json();
       if (data.error) {
         setError(data.error.message);
       } else {
         setCreateName('');
-        setShowCloner(false);
+        setCreationStep(null);
         await loadWorkspaces();
         openWorkspace(data);
       }
@@ -356,6 +359,34 @@ export default function WorkspaceMode({}) {
     }
   };
 
+  const handleToggleMode = async () => {
+    if (!activeWorkspace) return;
+    const newMode = codeMode === 'vibe' ? 'full' : 'vibe';
+    try {
+      await fetch(`/api/workspace/${activeWorkspace.id}/mode`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ codeMode: newMode })
+      });
+      setCodeMode(newMode);
+      // When switching to full mode, reload the file tree and preview info
+      if (newMode === 'full') {
+        try {
+          const treeRes = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+          const treeData = await treeRes.json();
+          if (!treeData.error) setFileTree(treeData.tree || []);
+        } catch {}
+        try {
+          const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+          const previewData = await previewRes.json();
+          if (!previewData.error) setPreviewInfo(previewData);
+        } catch {}
+      }
+    } catch (err) {
+      console.error('Toggle mode error:', err);
+    }
+  };
+
   // No workspace selected — show workspace picker
   if (!activeWorkspace) {
     return (
@@ -368,26 +399,90 @@ export default function WorkspaceMode({}) {
               </svg>
             </div>
             <h2 className="text-xl font-semibold text-white mb-2">Workspace</h2>
-            <p className="text-sm text-zinc-500">Clone a repository or create a blank workspace to get started</p>
+            <p className="text-sm text-zinc-500">Create a new workspace or open an existing one</p>
           </div>
 
           {/* Workspace actions */}
-          <div className="flex gap-3 mb-8 justify-center">
-            <button
-              onClick={() => setShowCloner(true)}
-              className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-colors flex items-center gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-              </svg>
-              Clone Repository
-            </button>
-          </div>
+          {creationStep === null && (
+            <div className="flex gap-3 mb-8 justify-center">
+              <button
+                onClick={() => setCreationStep('select')}
+                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-colors flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4v16m8-8H4" />
+                </svg>
+                Create Workspace
+              </button>
+            </div>
+          )}
 
-          {/* Clone modal */}
-          {showCloner && (
+          {/* Mode Selection Screen */}
+          {creationStep === 'select' && (
             <div className="bg-zinc-900 border border-zinc-700/50 rounded-2xl p-5 mb-6">
-              <h3 className="text-sm font-semibold text-white mb-4">Clone a Repository</h3>
+              <div className="flex items-center gap-2 mb-4">
+                <button
+                  onClick={() => setCreationStep(null)}
+                  className="text-zinc-500 hover:text-zinc-300 transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+                <h3 className="text-sm font-semibold text-white">Choose your workflow</h3>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                {/* Vibe Code */}
+                <button
+                  onClick={() => { setCreationMode('vibe'); setCreationStep('form'); }}
+                  className="group relative bg-zinc-800/60 border border-zinc-700/40 hover:border-purple-500/40 rounded-xl p-4 text-left transition-all hover:bg-zinc-800"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-purple-500/10 flex items-center justify-center mb-3 group-hover:bg-purple-500/20 transition-colors">
+                    <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                    </svg>
+                  </div>
+                  <h4 className="text-sm font-semibold text-white mb-1">Vibe Code</h4>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">Chat with AI to build your app. See results instantly without writing code.</p>
+                </button>
+
+                {/* Full Workspace */}
+                <button
+                  onClick={() => { setCreationMode('full'); setCreationStep('form'); }}
+                  className="group relative bg-zinc-800/60 border border-zinc-700/40 hover:border-indigo-500/40 rounded-xl p-4 text-left transition-all hover:bg-zinc-800"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-indigo-500/10 flex items-center justify-center mb-3 group-hover:bg-indigo-500/20 transition-colors">
+                    <svg className="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                    </svg>
+                  </div>
+                  <h4 className="text-sm font-semibold text-white mb-1">Full Workspace</h4>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">File tree, code editor, terminal, and AI chat. Full control over your project.</p>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Clone/Create Form */}
+          {creationStep === 'form' && (
+            <div className="bg-zinc-900 border border-zinc-700/50 rounded-2xl p-5 mb-6">
+              <div className="flex items-center gap-2 mb-4">
+                <button
+                  onClick={() => setCreationStep('select')}
+                  className="text-zinc-500 hover:text-zinc-300 transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+                <h3 className="text-sm font-semibold text-white">
+                  {creationMode === 'vibe' ? 'Create Vibe Code Workspace' : 'Create Full Workspace'}
+                </h3>
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-zinc-400 bg-zinc-800">
+                  {creationMode === 'vibe' ? 'Vibe Code' : 'Full Workspace'}
+                </span>
+              </div>
               <form onSubmit={handleCloneRepo} className="space-y-3">
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-400 mb-1">Repository URL</label>
@@ -396,7 +491,6 @@ export default function WorkspaceMode({}) {
                     value={cloneUrl}
                     onChange={(e) => {
                       setCloneUrl(e.target.value);
-                      // Auto-extract name from URL
                       if (!cloneName) {
                         const parts = e.target.value.replace(/\.git$/, '').split('/');
                         const last = parts[parts.length - 1];
@@ -430,7 +524,7 @@ export default function WorkspaceMode({}) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setShowCloner(false)}
+                    onClick={() => setCreationStep(null)}
                     className="px-4 py-2.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
                   >
                     Cancel
@@ -487,7 +581,17 @@ export default function WorkspaceMode({}) {
                       </div>
                       <div className="min-w-0">
                         <p className="text-sm text-zinc-200 font-medium truncate">{ws.name}</p>
-                        <p className="text-[11px] text-zinc-500 truncate">{ws.repoUrl || 'Blank workspace'}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-[11px] text-zinc-500 truncate">{ws.repoUrl || 'Blank workspace'}</p>
+                          {(ws.codeMode === 'vibe') && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10 flex items-center gap-1 flex-shrink-0">
+                              <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                              </svg>
+                              Vibe
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </button>
                     <button
@@ -509,15 +613,14 @@ export default function WorkspaceMode({}) {
     );
   }
 
-  // Full IDE layout
+  // IDE layout — Vibe Code or Full Workspace
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      {/* Top Row: FileTree + Editor/Preview + AgentPanel */}
-      <div className="flex-1 flex min-h-0">
-        {/* File Tree — border-r + border-t on inner edge */}
-        <div className="flex-shrink-0 relative border-r border-t border-zinc-800/40" style={{ width: leftWidth }}>
+      {codeMode === 'vibe' ? (
+        /* ===== VIBE CODE LAYOUT ===== */
+        <div className="flex-1 flex flex-col min-h-0">
           {/* Workspace header */}
-          <div className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800/40">
+          <div className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800/40 flex-shrink-0">
             <button
               onClick={() => setActiveWorkspace(null)}
               className="flex items-center gap-2 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
@@ -528,27 +631,31 @@ export default function WorkspaceMode({}) {
               <span className="font-medium truncate">{activeWorkspace.name}</span>
             </button>
             <div className="flex items-center gap-0.5">
-              {/* Preview toggle */}
-              {previewInfo && previewInfo.type !== 'none' && (
-                <button
-                  onClick={() => setShowPreview(!showPreview)}
-                  className={`p-1 rounded transition-colors ${showPreview ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
-                  title={showPreview ? 'Show code editor' : `Preview ${previewInfo.framework || 'app'}`}
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                  </svg>
-                </button>
-              )}
-              {/* Terminal toggle */}
+              {/* Preview toggle — always visible in vibe mode */}
               <button
-                onClick={() => setShowTerminal(!showTerminal)}
-                className={`p-1 rounded transition-colors ${showTerminal ? 'text-green-400 bg-green-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
-                title={showTerminal ? 'Hide terminal' : 'Show terminal'}
+                onClick={async () => {
+                  if (showPreview) {
+                    setShowPreview(false);
+                    return;
+                  }
+                  // Detect/re-detect preview info, then show if valid
+                  try {
+                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+                    const previewData = await previewRes.json();
+                    if (!previewData.error) {
+                      setPreviewInfo(previewData);
+                      if (previewData.type && previewData.type !== 'none') {
+                        setShowPreview(true);
+                      }
+                    }
+                  } catch {}
+                }}
+                className={`p-1 rounded transition-colors ${showPreview ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
+                title={showPreview ? 'Hide preview' : 'Preview app'}
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                 </svg>
               </button>
               <button
@@ -562,37 +669,12 @@ export default function WorkspaceMode({}) {
               </button>
             </div>
           </div>
-          <FileTree
-            tree={fileTree}
-            onFileClick={handleFileClick}
-            activeFile={activeFile}
-            searchQuery={treeSearch}
-            onSearchChange={setTreeSearch}
-          />
-          {/* Left resize sash — absolute overlay, VS Code style */}
-          <div
-            className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
-            style={{ right: 0, width: '6px', transform: 'translateX(50%)' }}
-            onMouseDown={(e) => startDrag('left', e, leftWidth)}
-          >
-            <div className="w-px h-full mx-auto bg-transparent group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
-          </div>
-        </div>
 
-        {/* Editor + Agent */}
-        <div className="flex-1 flex min-w-0">
-          {/* Editor Panel */}
-          <div className="flex-1 flex flex-col min-w-0 border-t border-zinc-800/40">
-            {!showPreview && (
-              <FileTabs
-                openFiles={openFiles}
-                activeFile={activeFile}
-                onTabClick={handleTabClick}
-                onTabClose={handleTabClose}
-              />
-            )}
-            <div className="flex-1 min-h-0 relative">
-              <div className={showPreview && previewInfo ? 'absolute inset-0' : 'hidden'}>
+          {/* Preview + Agent */}
+          <div className="flex-1 flex flex-col min-h-0">
+            {/* Preview panel */}
+            {showPreview && previewInfo && previewInfo.type !== 'none' && (
+              <div className="flex-shrink-0" style={{ height: '55%' }}>
                 <PreviewPanel
                   workspaceId={activeWorkspace.id}
                   previewInfo={previewInfo}
@@ -603,76 +685,235 @@ export default function WorkspaceMode({}) {
                   }}
                 />
               </div>
-              <div className={!showPreview || !previewInfo ? 'absolute inset-0' : 'hidden'}>
-                <MonacoEditor
-                  content={activeFile ? fileContents[activeFile] : null}
-                  language={activeFile ? openFiles.find(f => f.path === activeFile)?.language : null}
-                  filePath={activeFile}
-                  onContentChange={handleContentChange}
-                  readOnly={false}
-                />
+            )}
+            {/* Agent panel — full width */}
+            <div className={`flex-1 min-h-0 ${!showPreview ? 'border-t border-zinc-800/40' : ''}`}>
+              <AgentPanel
+                workspaceId={activeWorkspace.id}
+                workspaceChatId={workspaceChatId}
+                initialMessages={workspaceMessages}
+                activeFilePath={null}
+                onFileEdit={handleFileEdit}
+                onReadFile={async (path) => {
+                  if (!activeWorkspace) return null;
+                  const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path })
+                  });
+                  return res.json();
+                }}
+                currentFileContent={null}
+                onOpenPreview={async () => {
+                  // Detect/re-detect preview info, then show if valid
+                  try {
+                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+                    const previewData = await previewRes.json();
+                    if (!previewData.error) {
+                      setPreviewInfo(previewData);
+                      if (previewData.type && previewData.type !== 'none') {
+                        setShowPreview(true);
+                      }
+                    }
+                  } catch {}
+                }}
+                onToggleMode={handleToggleMode}
+                codeMode={codeMode}
+              />
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* ===== FULL WORKSPACE LAYOUT ===== */
+        <div className="flex-1 flex min-h-0">
+          {/* File Tree — border-r + border-t on inner edge */}
+          <div className="flex-shrink-0 relative border-r border-t border-zinc-800/40" style={{ width: leftWidth }}>
+            {/* Workspace header */}
+            <div className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800/40">
+              <button
+                onClick={() => setActiveWorkspace(null)}
+                className="flex items-center gap-2 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+                <span className="font-medium truncate">{activeWorkspace.name}</span>
+              </button>
+              <div className="flex items-center gap-0.5">
+                {/* Preview toggle — always visible, auto-detects on click */}
+              <button
+                onClick={async () => {
+                  if (showPreview) {
+                    setShowPreview(false);
+                    return;
+                  }
+                  // Detect/re-detect preview info
+                  try {
+                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+                    const previewData = await previewRes.json();
+                    if (!previewData.error) {
+                      setPreviewInfo(previewData);
+                      if (previewData.type && previewData.type !== 'none') {
+                        setShowPreview(true);
+                      }
+                    }
+                  } catch {}
+                }}
+                className={`p-1 rounded transition-colors ${showPreview ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
+                title={showPreview ? 'Show code editor' : `Preview ${previewInfo?.framework || 'app'}`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+              </button>
+                {/* Terminal toggle */}
+                <button
+                  onClick={() => setShowTerminal(!showTerminal)}
+                  className={`p-1 rounded transition-colors ${showTerminal ? 'text-green-400 bg-green-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
+                  title={showTerminal ? 'Hide terminal' : 'Show terminal'}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => loadWorkspaces().then(() => openWorkspace(activeWorkspace))}
+                  className="p-1 rounded text-zinc-500 hover:text-zinc-300 transition-colors"
+                  title="Refresh"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
               </div>
             </div>
-            {/* Git status bar */}
-            {activeWorkspace?.isGitRepo && (
-              <GitStatusBar workspaceId={activeWorkspace.id} />
-            )}
-
-            {/* Terminal (inside editor column — only spans middle pane) */}
-            {showTerminal && activeWorkspace && (
-              <div className="flex-shrink-0 relative" style={{ height: terminalHeight }}>
-                {/* Terminal resize sash — absolute overlay, VS Code style */}
-                <div
-                  className="absolute left-0 right-0 z-10 cursor-row-resize group flex items-center"
-                  style={{ top: 0, height: '6px', transform: 'translateY(-50%)' }}
-                  onMouseDown={(e) => startDrag('terminal', e, terminalHeight)}
-                >
-                  <div className="h-px w-full bg-transparent group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
-                </div>
-                <TerminalPanel
-                  workspaceId={activeWorkspace.id}
-                  initialCommand={terminalCommand || undefined}
-                  resizeKey={terminalHeight}
-                  onClose={() => {
-                    setShowTerminal(false);
-                    setTerminalCommand('');
-                  }}
-                />
-              </div>
-            )}
-          </div>
-
-          {/* Agent Panel — border-l + border-t on inner edge */}
-          <div className="flex-shrink-0 relative border-l border-t border-zinc-800/40" style={{ width: rightWidth }}>
-            {/* Right resize sash — absolute overlay, invisible until hovered */}
+            <FileTree
+              tree={fileTree}
+              onFileClick={handleFileClick}
+              activeFile={activeFile}
+              searchQuery={treeSearch}
+              onSearchChange={setTreeSearch}
+            />
+            {/* Left resize sash — absolute overlay, VS Code style */}
             <div
               className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
-              style={{ left: 0, width: '6px', transform: 'translateX(-50%)' }}
-              onMouseDown={(e) => startDrag('right', e, rightWidth)}
+              style={{ right: 0, width: '6px', transform: 'translateX(50%)' }}
+              onMouseDown={(e) => startDrag('left', e, leftWidth)}
             >
               <div className="w-px h-full mx-auto bg-transparent group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
             </div>
-            <AgentPanel
-              workspaceId={activeWorkspace.id}
-              workspaceChatId={workspaceChatId}
-              initialMessages={workspaceMessages}
-              activeFilePath={activeFile}
-              onFileEdit={handleFileEdit}
-              onReadFile={async (path) => {
-                if (!activeWorkspace) return null;
-                const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ path })
-                });
-                return res.json();
-              }}
-              currentFileContent={activeFile ? fileContents[activeFile] : null}
-              onOpenPreview={previewInfo && previewInfo.type !== 'none' ? () => setShowPreview(true) : undefined}
-            />
+          </div>
+
+          {/* Editor + Agent */}
+          <div className="flex-1 flex min-w-0">
+            {/* Editor Panel */}
+            <div className="flex-1 flex flex-col min-w-0 border-t border-zinc-800/40">
+              {!showPreview && (
+                <FileTabs
+                  openFiles={openFiles}
+                  activeFile={activeFile}
+                  onTabClick={handleTabClick}
+                  onTabClose={handleTabClose}
+                />
+              )}
+              <div className="flex-1 min-h-0 relative">
+                <div className={showPreview && previewInfo ? 'absolute inset-0' : 'hidden'}>
+                  <PreviewPanel
+                    workspaceId={activeWorkspace.id}
+                    previewInfo={previewInfo}
+                    onClose={() => setShowPreview(false)}
+                    onStartServer={(cmd) => {
+                      setTerminalCommand(cmd);
+                      setShowTerminal(true);
+                    }}
+                  />
+                </div>
+                <div className={!showPreview || !previewInfo ? 'absolute inset-0' : 'hidden'}>
+                  <MonacoEditor
+                    content={activeFile ? fileContents[activeFile] : null}
+                    language={activeFile ? openFiles.find(f => f.path === activeFile)?.language : null}
+                    filePath={activeFile}
+                    onContentChange={handleContentChange}
+                    readOnly={false}
+                  />
+                </div>
+              </div>
+              {/* Git status bar */}
+              {activeWorkspace?.isGitRepo && (
+                <GitStatusBar workspaceId={activeWorkspace.id} />
+              )}
+
+              {/* Terminal (inside editor column — only spans middle pane) */}
+              {showTerminal && activeWorkspace && (
+                <div className="flex-shrink-0 relative" style={{ height: terminalHeight }}>
+                  {/* Terminal resize sash — absolute overlay, VS Code style */}
+                  <div
+                    className="absolute left-0 right-0 z-10 cursor-row-resize group flex items-center"
+                    style={{ top: 0, height: '6px', transform: 'translateY(-50%)' }}
+                    onMouseDown={(e) => startDrag('terminal', e, terminalHeight)}
+                  >
+                    <div className="h-px w-full bg-transparent group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
+                  </div>
+                  <TerminalPanel
+                    workspaceId={activeWorkspace.id}
+                    initialCommand={terminalCommand || undefined}
+                    resizeKey={terminalHeight}
+                    onClose={() => {
+                      setShowTerminal(false);
+                      setTerminalCommand('');
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Agent Panel — border-l + border-t on inner edge */}
+            <div className="flex-shrink-0 relative border-l border-t border-zinc-800/40" style={{ width: rightWidth }}>
+              {/* Right resize sash — absolute overlay, invisible until hovered */}
+              <div
+                className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
+                style={{ left: 0, width: '6px', transform: 'translateX(-50%)' }}
+                onMouseDown={(e) => startDrag('right', e, rightWidth)}
+              >
+                <div className="w-px h-full mx-auto bg-transparent group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
+              </div>
+              <AgentPanel
+                workspaceId={activeWorkspace.id}
+                workspaceChatId={workspaceChatId}
+                initialMessages={workspaceMessages}
+                activeFilePath={activeFile}
+                onFileEdit={handleFileEdit}
+                onReadFile={async (path) => {
+                  if (!activeWorkspace) return null;
+                  const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path })
+                  });
+                  return res.json();
+                }}
+                currentFileContent={activeFile ? fileContents[activeFile] : null}
+                onOpenPreview={async () => {
+                  // Detect/re-detect preview info, then show
+                  try {
+                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+                    const previewData = await previewRes.json();
+                    if (!previewData.error) {
+                      setPreviewInfo(previewData);
+                      if (previewData.type && previewData.type !== 'none') {
+                        setShowPreview(true);
+                      }
+                    }
+                  } catch {}
+                }}
+                onToggleMode={handleToggleMode}
+                codeMode={codeMode}
+              />
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

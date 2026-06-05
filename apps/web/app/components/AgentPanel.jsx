@@ -14,7 +14,9 @@ export default function AgentPanel({
   onFileEdit,
   onReadFile,
   currentFileContent,
-  onOpenPreview
+  onOpenPreview,
+  onToggleMode,
+  codeMode
 }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -26,7 +28,7 @@ export default function AgentPanel({
   const turnCounterRef = useRef(0);
 
   // --- Copilot-style agent controls ---
-  const [agentMode, setAgentMode] = useState('chat');       // 'chat' | 'plan' | 'agent'
+  const [agentMode, setAgentMode] = useState('agent');       // 'plan' | 'agent'
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedProvider, setSelectedProvider] = useState('lmstudio');
   const [thinkingEffort, setThinkingEffort] = useState('medium'); // 'low' | 'medium' | 'high'
@@ -632,7 +634,7 @@ Content goes INSIDE the block body, NOT as a content="..." attribute.`;
     }
   };
 
-  const buildSystemPrompt = (wsId, activeFile, fileContent, mode = 'chat') => {
+  const buildSystemPrompt = (wsId, activeFile, fileContent, mode = 'agent') => {
     // Agent mode: functional instructions only
     if (mode === 'agent') {
       return `Workspace: /api/workspace/${wsId}. Use RELATIVE paths: "." is root, "src/file.ts" for nested.
@@ -687,7 +689,7 @@ Brief explanation of the goal and approach.
 Use 🟢🟡🔴 for complexity. NEVER use create_file or replace_string_in_file.`;
     }
 
-    // Chat mode
+    // Agent mode (default)
     let prompt = `Workspace: /api/workspace/${wsId}.
 
 TOOLS (use fenced code blocks):
@@ -697,8 +699,15 @@ TOOLS (use fenced code blocks):
 \`\`\`
 \`\`\`grep_search query="pattern"
 \`\`\`
-
-Chat mode — do NOT create or edit files. Only use read tools when needed.`;
+\`\`\`create_file filePath="filename.ext"
+COMPLETE FILE CONTENT GOES HERE
+\`\`\`
+\`\`\`replace_string_in_file filePath="filename.ext"
+===FIND===
+exact text to replace
+===REPLACE===
+new text
+\`\`\``;
 
     if (activeFile) prompt += `\n\nActive file in editor: "${activeFile}"`;
     if (fileContent) {
@@ -1090,6 +1099,23 @@ Chat mode — do NOT create or edit files. Only use read tools when needed.`;
           </div>
         </div>
         <div className="flex items-center gap-1">
+          {onToggleMode && (
+            <button
+              onClick={onToggleMode}
+              className={`p-1 rounded transition-colors ${codeMode === 'vibe' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-500 hover:text-purple-400'}`}
+              title={codeMode === 'vibe' ? 'Switch to Full Workspace' : 'Switch to Vibe Code'}
+            >
+              {codeMode === 'vibe' ? (
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                </svg>
+              ) : (
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                </svg>
+              )}
+            </button>
+          )}
           {messages.length > 0 && (
             <button
               onClick={() => setMessages([])}
@@ -1345,7 +1371,6 @@ Chat mode — do NOT create or edit files. Only use read tools when needed.`;
         {/* Mode pills: Chat | Plan | Agent */}
         <div className="flex items-center gap-0.5 bg-zinc-800/40 rounded-lg p-0.5">
           {[
-            { id: 'chat', icon: '💬', label: 'Chat' },
             { id: 'plan', icon: '📋', label: 'Plan' },
             { id: 'agent', icon: '🤖', label: 'Agent' },
           ].map(mode => (
@@ -1359,8 +1384,7 @@ Chat mode — do NOT create or edit files. Only use read tools when needed.`;
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
               title={
-                mode.id === 'chat' ? 'Conversational — no file changes'
-                : mode.id === 'plan' ? 'Plan only — no file changes'
+                mode.id === 'plan' ? 'Plan only — no file changes'
                 : 'Agent mode — can read and edit files'
               }
             >
@@ -1401,9 +1425,8 @@ Chat mode — do NOT create or edit files. Only use read tools when needed.`;
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={
-              agentMode === 'agent' ? 'Ask agent to build, edit, or fix...'
-              : agentMode === 'plan' ? 'Ask for a plan...'
-              : 'Ask about your codebase...'
+              agentMode === 'plan' ? 'Ask for a plan...'
+              : 'Ask agent to build, edit, or fix...'
             }
             disabled={isStreaming}
             className="flex-1 bg-zinc-800 border border-zinc-700/40 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 transition-all disabled:opacity-50"
