@@ -7,7 +7,9 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 export default function AgentPanel({ 
-  workspaceId, 
+  workspaceId,
+  workspaceChatId,
+  initialMessages,
   activeFilePath, 
   onFileEdit,
   onReadFile,
@@ -127,6 +129,19 @@ export default function AgentPanel({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [modelDropdownOpen]);
+
+  // Load persisted messages when workspace chat changes
+  useEffect(() => {
+    if (initialMessages && initialMessages.length > 0) {
+      setMessages(initialMessages.map(m => ({
+        ...m,
+        id: m.id || `restored_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        content: m.content || ''
+      })));
+    } else if (initialMessages && initialMessages.length === 0) {
+      setMessages([]);
+    }
+  }, [workspaceChatId, initialMessages]);
 
   const fetchModels = async () => {
     try {
@@ -274,6 +289,12 @@ export default function AgentPanel({
         } catch {}
       }
     }
+    // Persist completed assistant message
+    if (content) {
+      const currentModel = selectedModel || localStorage.getItem('aurora_last_model') || '';
+      const currentProvider = selectedProvider || localStorage.getItem('aurora_last_provider') || '';
+      saveMessageToChat('assistant', content, currentModel, currentProvider, assistantId, new Date().toISOString());
+    }
     return { content, thinking, assistantId };
   };
 
@@ -328,6 +349,20 @@ export default function AgentPanel({
     }
   };
 
+  // Save a message to the workspace's chat via the API
+  const saveMessageToChat = async (role, content, model, provider, msgId, timestamp) => {
+    if (!workspaceChatId) return;
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) return;
+      await fetch(`/api/chats/${workspaceChatId}/messages`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: msgId, role, content, model: model || '', provider: provider || '', timestamp: timestamp || new Date().toISOString() })
+      });
+    } catch {}
+  };
+
   // AGENTIC LOOP: send message, parse tools, execute, feed results back to LLM, repeat
   const sendMessage = async (e) => {
     e?.preventDefault();
@@ -345,6 +380,9 @@ export default function AgentPanel({
       timestamp: new Date().toISOString(), turnId
     };
     setMessages(prev => [...prev, userMsg]);
+
+    // Persist user message
+    saveMessageToChat('user', userContent, selectedModel, selectedProvider, userMsg.id, userMsg.timestamp);
 
     const systemPrompt = buildSystemPrompt(workspaceId, activeFilePath, currentFileContent, agentMode);
 
@@ -595,13 +633,11 @@ Content goes INSIDE the block body, NOT as a content="..." attribute.`;
   };
 
   const buildSystemPrompt = (wsId, activeFile, fileContent, mode = 'chat') => {
-    // Agent mode: extremely forceful prompt that DEMANDS tool calls
+    // Agent mode: functional instructions only
     if (mode === 'agent') {
-      return `YOU ARE AN AUTONOMOUS CODING AGENT. YOU MUST USE TOOLS. NEVER describe what you'll do — DO IT.
+      return `Workspace: /api/workspace/${wsId}. Use RELATIVE paths: "." is root, "src/file.ts" for nested.
 
-You have a workspace at /api/workspace/${wsId}. Use RELATIVE paths for all tools: "." is root, "src/file.ts" for nested.
-
-TOOL CALL FORMAT — You MUST use EXACTLY this syntax for EVERY action:
+TOOL CALL FORMAT — Use EXACTLY this syntax for EVERY action:
 \`\`\`create_file filePath="filename.ext"
 COMPLETE FILE CONTENT GOES HERE
 \`\`\`
@@ -622,15 +658,15 @@ new text
 \`\`\`grep_search query="search pattern"
 \`\`\`
 
-CRITICAL: First step is ALWAYS ${'`'}list_dir path="."${'`'} to see what exists.
-CRITICAL: create_file puts content INSIDE the block body, never as content="..." attribute.
-CRITICAL: Call ONE tool per response. Nothing outside the fenced block.
-CRITICAL: When done, respond "Task complete." with no tool block.`;
+- First step: ${'`'}list_dir path="."${'`'} to see what exists.
+- create_file puts content INSIDE the block body, never as content="..." attribute.
+- Call ONE tool per response. Nothing outside the fenced block.
+- When done, respond "Task complete." with no tool block.`;
     }
 
     // Plan mode
     if (mode === 'plan') {
-      return `You are an expert code planner. Explore the workspace then produce a structured plan.
+      return `Workspace: /api/workspace/${wsId}.
 
 TOOLS (use fenced code blocks to call them):
 \`\`\`read_file filePath="filename.ext"
@@ -648,13 +684,11 @@ Brief explanation of the goal and approach.
 - [ ] Task description — *depends on Task #*
 - [ ] Another task
 
-Use 🟢🟡🔴 for complexity. NEVER use create_file or replace_string_in_file.
-
-Workspace ID: ${wsId}`;
+Use 🟢🟡🔴 for complexity. NEVER use create_file or replace_string_in_file.`;
     }
 
     // Chat mode
-    let prompt = `You are Aurora Agent — a helpful coding assistant. You can read code to answer questions.
+    let prompt = `Workspace: /api/workspace/${wsId}.
 
 TOOLS (use fenced code blocks):
 \`\`\`read_file filePath="filename.ext"
@@ -664,8 +698,7 @@ TOOLS (use fenced code blocks):
 \`\`\`grep_search query="pattern"
 \`\`\`
 
-You are in CHAT MODE — do NOT create or edit files. Answer questions conversationally. Only use read tools when needed.
-Workspace ID: ${wsId}`;
+Chat mode — do NOT create or edit files. Only use read tools when needed.`;
 
     if (activeFile) prompt += `\n\nActive file in editor: "${activeFile}"`;
     if (fileContent) {

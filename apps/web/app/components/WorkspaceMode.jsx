@@ -32,6 +32,8 @@ export default function WorkspaceMode({}) {
   const [showPreview, setShowPreview] = useState(false);
   const [showTerminal, setShowTerminal] = useState(false);
   const [terminalCommand, setTerminalCommand] = useState('');
+  const [workspaceChatId, setWorkspaceChatId] = useState(null);
+  const [workspaceMessages, setWorkspaceMessages] = useState(null);
 
   // === Resizable pane state ===
   const MIN_LEFT = 200;     // minimum file tree width
@@ -112,6 +114,8 @@ export default function WorkspaceMode({}) {
     setPreviewInfo(null);
     setShowTerminal(false);
     setTerminalCommand('');
+    setWorkspaceChatId(null);
+    setWorkspaceMessages(null);
 
     try {
       const res = await fetch(`/api/workspace/${ws.id}/tree`);
@@ -135,6 +139,54 @@ export default function WorkspaceMode({}) {
         setPreviewInfo(previewData);
       }
     } catch {}
+
+    // Load or create workspace chat
+    await loadWorkspaceChat(ws);
+  };
+
+  // Load or create a chat for the given workspace, then load its messages
+  const loadWorkspaceChat = async (ws) => {
+    const token = localStorage.getItem('auth_token');
+    if (!token) return;
+
+    try {
+      // Check localStorage for existing workspace→chat mapping
+      const wsChats = JSON.parse(localStorage.getItem('aurora_ws_chats') || '{}');
+      let chatId = wsChats[ws.id];
+
+      // If we have a chatId, verify it still exists and load messages
+      if (chatId) {
+        const chatRes = await fetch(`/api/chats/${chatId}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (chatRes.ok) {
+          const chatData = await chatRes.json();
+          setWorkspaceChatId(chatId);
+          setWorkspaceMessages(chatData.messages || []);
+          return;
+        }
+        // Chat was deleted — remove stale mapping and create new
+        delete wsChats[ws.id];
+        localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
+      }
+
+      // Create a new chat for this workspace
+      const createRes = await fetch('/api/chats', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: `Workspace: ${ws.name}` })
+      });
+      if (createRes.ok) {
+        const createData = await createRes.json();
+        chatId = createData.id;
+        wsChats[ws.id] = chatId;
+        localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
+        setWorkspaceChatId(chatId);
+        setWorkspaceMessages([]);
+      }
+    } catch (err) {
+      console.error('Load workspace chat error:', err);
+    }
   };
 
   const handleFileClick = async (node) => {
@@ -462,9 +514,8 @@ export default function WorkspaceMode({}) {
     <div className="flex-1 flex flex-col min-h-0">
       {/* Top Row: FileTree + Editor/Preview + AgentPanel */}
       <div className="flex-1 flex min-h-0">
-        {/* Resize handle: left edge of file tree (only allow expanding from min) */}
-        {/* File Tree */}
-        <div className="flex-shrink-0 relative" style={{ width: leftWidth }}>
+        {/* File Tree — border-r + border-t on inner edge */}
+        <div className="flex-shrink-0 relative border-r border-t border-zinc-800/40" style={{ width: leftWidth }}>
           {/* Workspace header */}
           <div className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800/40">
             <button
@@ -524,14 +575,14 @@ export default function WorkspaceMode({}) {
             style={{ right: 0, width: '6px', transform: 'translateX(50%)' }}
             onMouseDown={(e) => startDrag('left', e, leftWidth)}
           >
-            <div className="w-px h-full mx-auto bg-zinc-700 group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
+            <div className="w-px h-full mx-auto bg-transparent group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
           </div>
         </div>
 
         {/* Editor + Agent */}
         <div className="flex-1 flex min-w-0">
           {/* Editor Panel */}
-          <div className="flex-1 flex flex-col min-w-0">
+          <div className="flex-1 flex flex-col min-w-0 border-t border-zinc-800/40">
             {!showPreview && (
               <FileTabs
                 openFiles={openFiles}
@@ -576,7 +627,7 @@ export default function WorkspaceMode({}) {
                   style={{ top: 0, height: '6px', transform: 'translateY(-50%)' }}
                   onMouseDown={(e) => startDrag('terminal', e, terminalHeight)}
                 >
-                  <div className="h-px w-full bg-zinc-700 group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
+                  <div className="h-px w-full bg-transparent group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
                 </div>
                 <TerminalPanel
                   workspaceId={activeWorkspace.id}
@@ -591,18 +642,20 @@ export default function WorkspaceMode({}) {
             )}
           </div>
 
-          {/* Agent Panel */}
-          <div className="flex-shrink-0 relative" style={{ width: rightWidth }}>
-            {/* Right resize sash — absolute overlay, VS Code style */}
+          {/* Agent Panel — border-l + border-t on inner edge */}
+          <div className="flex-shrink-0 relative border-l border-t border-zinc-800/40" style={{ width: rightWidth }}>
+            {/* Right resize sash — absolute overlay, invisible until hovered */}
             <div
               className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
               style={{ left: 0, width: '6px', transform: 'translateX(-50%)' }}
               onMouseDown={(e) => startDrag('right', e, rightWidth)}
             >
-              <div className="w-px h-full mx-auto bg-zinc-700 group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
+              <div className="w-px h-full mx-auto bg-transparent group-hover:bg-indigo-500 group-active:bg-indigo-500 transition-colors" />
             </div>
             <AgentPanel
               workspaceId={activeWorkspace.id}
+              workspaceChatId={workspaceChatId}
+              initialMessages={workspaceMessages}
               activeFilePath={activeFile}
               onFileEdit={handleFileEdit}
               onReadFile={async (path) => {
