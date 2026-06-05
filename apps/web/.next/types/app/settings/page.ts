@@ -1,4 +1,4 @@
-// File: /home/brajam/repos/local_ai_test/apps/web/app/settings/page.js
+// File: /home/brajam/repos/Aurora/apps/web/app/settings/page.js
 import * as entry from '../../../../app/settings/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

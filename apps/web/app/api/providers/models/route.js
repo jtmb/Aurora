@@ -30,8 +30,9 @@ const extractKeys = async (request) => {
     anthropic: request.headers.get('x-anthropic-key') || process.env.ANTHROPIC_API_KEY || '',
     ollamaBase: request.headers.get('x-ollama-base') || process.env.OLLAMA_API_BASE || 'http://localhost:11434',
     lmStudioUrl: request.headers.get('x-lmstudio-url') || '',
-    lmStudioHost: process.env.LM_STUDIO_HOST || '',
-    lmStudioPort: process.env.LM_STUDIO_PORT || '',
+    lmStudioHost: request.headers.get('x-lmstudio-host') || process.env.LM_STUDIO_HOST || '',
+    lmStudioPort: request.headers.get('x-lmstudio-port') || process.env.LM_STUDIO_PORT || '',
+    lmStudioApiKey: request.headers.get('x-lmstudio-api-key') || process.env.LM_STUDIO_API_KEY || '',
     deepseek: request.headers.get('x-deepseek-key') || process.env.DEEPSEEK_API_KEY || '',
   };
 
@@ -137,12 +138,19 @@ const fetchDeepSeekModels = async (apiKey) => {
 /**
  * Fetch models from LM Studio
  */
-const fetchLmStudioModels = async (url) => {
+const fetchLmStudioModels = async (url, apiKey) => {
   if (!url) return [];
   try {
     // Normalize: strip trailing /v1 if present, then call /v1/models
     const base = url.replace(/\/+$/, '').replace(/\/v1$/, '');
-    const response = await fetch(`${base}/v1/models`, { signal: AbortSignal.timeout(8000) });
+    const fetchHeaders = {};
+    if (apiKey) {
+      fetchHeaders['Authorization'] = `Bearer ${apiKey}`;
+    }
+    const response = await fetch(`${base}/v1/models`, {
+      headers: fetchHeaders,
+      signal: AbortSignal.timeout(8000)
+    });
     if (!response.ok) return [];
     const data = await response.json();
     const models = data.data || (Array.isArray(data) ? data : []);
@@ -170,7 +178,7 @@ export async function GET(request) {
       fetchAnthropicModels(keys.anthropic),
       fetchDeepSeekModels(keys.deepseek),
       fetchOllamaModels(ollamaBase),
-      fetchLmStudioModels(lmStudioUrl)
+      fetchLmStudioModels(lmStudioUrl, keys.lmStudioApiKey)
     ]);
 
     const allModels = [

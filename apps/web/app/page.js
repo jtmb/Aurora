@@ -175,13 +175,23 @@ export default function Home() {
       const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
       const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
       const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
-      const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      let lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      const lmStudioHost = localStorage.getItem('LM_STUDIO_HOST');
+      const lmStudioPort = localStorage.getItem('LM_STUDIO_PORT');
       const lmStudioApiKey = localStorage.getItem('LM_STUDIO_API_KEY');
+      
+      // Construct LM Studio URL from host+port if URL isn't directly stored
+      if (!lmStudioUrl && lmStudioHost && lmStudioPort) {
+        lmStudioUrl = `http://${lmStudioHost}:${lmStudioPort}/v1`;
+      }
+      
       if (openaiKey) headers['x-openai-key'] = openaiKey;
       if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
       if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
       if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
       if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+      if (lmStudioHost) headers['x-lmstudio-host'] = lmStudioHost;
+      if (lmStudioPort) headers['x-lmstudio-port'] = lmStudioPort;
       if (lmStudioApiKey) headers['x-lmstudio-api-key'] = lmStudioApiKey;
 
       const res = await fetch('/api/personality/generate', {
@@ -335,14 +345,23 @@ export default function Home() {
       const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
       const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
       const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
-      const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      let lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      const lmStudioHost = localStorage.getItem('LM_STUDIO_HOST');
+      const lmStudioPort = localStorage.getItem('LM_STUDIO_PORT');
       const lmStudioApiKeyB = localStorage.getItem('LM_STUDIO_API_KEY');
+      
+      // Construct LM Studio URL from host+port if URL isn't directly stored
+      if (!lmStudioUrl && lmStudioHost && lmStudioPort) {
+        lmStudioUrl = `http://${lmStudioHost}:${lmStudioPort}/v1`;
+      }
       
       if (openaiKey) headers['x-openai-key'] = openaiKey;
       if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
       if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
       if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
       if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+      if (lmStudioHost) headers['x-lmstudio-host'] = lmStudioHost;
+      if (lmStudioPort) headers['x-lmstudio-port'] = lmStudioPort;
       if (lmStudioApiKeyB) headers['x-lmstudio-api-key'] = lmStudioApiKeyB;
 
       // Try the models API with a 10-second timeout (prevents hung Ollama from freezing UI)
@@ -441,13 +460,23 @@ export default function Home() {
         const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
         const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
         const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
-        const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+        let lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+        const lmStudioHost = localStorage.getItem('LM_STUDIO_HOST');
+        const lmStudioPort = localStorage.getItem('LM_STUDIO_PORT');
         const lmStudioApiKeyC = localStorage.getItem('LM_STUDIO_API_KEY');
+        
+        // Construct LM Studio URL from host+port if URL isn't directly stored
+        if (!lmStudioUrl && lmStudioHost && lmStudioPort) {
+          lmStudioUrl = `http://${lmStudioHost}:${lmStudioPort}/v1`;
+        }
+        
         if (openaiKey) headers['x-openai-key'] = openaiKey;
         if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
         if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
         if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
         if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+        if (lmStudioHost) headers['x-lmstudio-host'] = lmStudioHost;
+        if (lmStudioPort) headers['x-lmstudio-port'] = lmStudioPort;
         if (lmStudioApiKeyC) headers['x-lmstudio-api-key'] = lmStudioApiKeyC;
         try {
           const res = await fetch('/api/providers/models', { headers });
@@ -829,14 +858,23 @@ export default function Home() {
       const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
       const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
       const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
-      const lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      let lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+      const lmStudioHost = localStorage.getItem('LM_STUDIO_HOST');
+      const lmStudioPort = localStorage.getItem('LM_STUDIO_PORT');
       const lmStudioApiKeyD = localStorage.getItem('LM_STUDIO_API_KEY');
+      
+      // Construct LM Studio URL from host+port if URL isn't directly stored
+      if (!lmStudioUrl && lmStudioHost && lmStudioPort) {
+        lmStudioUrl = `http://${lmStudioHost}:${lmStudioPort}/v1`;
+      }
       
       if (openaiKey) headers['x-openai-key'] = openaiKey;
       if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
       if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
       if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
       if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+      if (lmStudioHost) headers['x-lmstudio-host'] = lmStudioHost;
+      if (lmStudioPort) headers['x-lmstudio-port'] = lmStudioPort;
       if (lmStudioApiKeyD) headers['x-lmstudio-api-key'] = lmStudioApiKeyD;
       
       // Create abort controller for stop functionality
