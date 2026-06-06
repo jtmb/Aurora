@@ -586,6 +586,33 @@ export async function runAgentJob(jobId) {
       const toolCalls = parseToolCalls(rawContent);
 
       if (toolCalls.length === 0) {
+        // ════════════════════════════════════════════════════════════════
+        // CLARIFICATION PAUSE — detect when the model asks a question
+        // and pause the job so the user can answer.
+        // ════════════════════════════════════════════════════════════════
+        if (agentMode === 'agent' && !planCompleted && fileManifest.length === 0) {
+          const questionPatterns = [
+            /\?/,                                    // Contains question mark
+            /^(before i|i need to|let me|first|should i|do you want|would you like)/i,
+            /^(which|what|how|where|who|when|can you|could you|please clarify)/i,
+            /(not sure|don't know|unclear|ambiguous|need more|more info|context)/i,
+            /^(do you|are you|is this|is that)/i,
+          ];
+          const isQuestion = questionPatterns.some(p => p.test(rawContent.trim()));
+
+          if (isQuestion) {
+            console.log(`[agent-runner] Job ${jobId}: Detected clarifying question, pausing.`);
+            job.status = 'awaiting_input';
+            job.pendingQuestion = rawContent.trim().slice(0, 1000);
+            job.planTodos = planTodos;
+            job.conversation = conversation;
+            job.iteration = iter;
+            job.fileManifest = fileManifest;
+            saveJob(job);
+            return;
+          }
+        }
+
         // Plan mode: parse plan from response
         if (agentMode === 'plan') {
           const { todos, summary } = parsePlanTodos(rawContent);
@@ -1007,6 +1034,46 @@ async function runBuildVerification(workspaceId, fileManifest, planTodos, conver
 export function startAgentJob({ workspaceId, chatId, userContent, model, provider, thinkingEffort, agentMode, systemPrompt, apiKeys }) {
   runMigrations();
   const db = getDb();
+
+  // ── Resume awaiting_input job if present ──
+  const awaitingJob = db.prepare(
+    "SELECT * FROM agent_jobs WHERE workspace_id = ? AND status = 'awaiting_input' ORDER BY updated_at DESC LIMIT 1"
+  ).get(workspaceId);
+
+  if (awaitingJob) {
+    console.log(`[agent-runner] Resuming paused job ${awaitingJob.id} with user response`);
+    const job = awaitingJob;
+    const conversation = JSON.parse(job.conversation || '[]');
+    const planTodos = JSON.parse(job.plan_todos || '[]');
+    const fileManifest = JSON.parse(job.file_manifest || '[]');
+
+    // Append user's answer to the conversation
+    conversation.push({ role: 'user', content: userContent });
+    // Add gentle nudge to continue
+    conversation.push({
+      role: 'user',
+      content: 'Thank you for the clarification. Continue with the task using a tool call. DO NOT ask more questions — ACT NOW.'
+    });
+
+    // Save the user message to the chat (caller may have already saved it — this is idempotent via message ID)
+    const userMsgId = `agent_user_${Date.now()}`;
+    saveMessageToChat(chatId, 'user', userContent, model, provider, userMsgId, new Date().toISOString());
+
+    // Update job to running
+    db.prepare(`
+      UPDATE agent_jobs 
+      SET status = 'running', conversation = ?, iteration = ?, pending_question = NULL, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(JSON.stringify(conversation), job.iteration || 0, awaitingJob.id);
+
+    // Run asynchronously
+    runAgentJob(awaitingJob.id).catch(err => {
+      console.error(`[agent-runner] Unhandled error in resumed job ${awaitingJob.id}:`, err);
+    });
+
+    return awaitingJob.id;
+  }
+
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
   // Cancel any existing running jobs for this workspace
@@ -1072,7 +1139,7 @@ export function cancelWorkspaceJobs(workspaceId) {
   runMigrations();
   const db = getDb();
   const info = db.prepare(
-    "UPDATE agent_jobs SET status = 'cancelled', updated_at = datetime('now') WHERE workspace_id = ? AND status IN ('running', 'interrupted')"
+    "UPDATE agent_jobs SET status = 'cancelled', updated_at = datetime('now') WHERE workspace_id = ? AND status IN ('running', 'interrupted', 'awaiting_input')"
   ).run(workspaceId);
   return info.changes;
 }
@@ -1085,7 +1152,7 @@ export function getJobStatus(workspaceId) {
   runMigrations();
   const db = getDb();
   const job = db.prepare(
-    "SELECT * FROM agent_jobs WHERE workspace_id = ? AND status IN ('running', 'interrupted') ORDER BY created_at DESC LIMIT 1"
+    "SELECT * FROM agent_jobs WHERE workspace_id = ? AND status IN ('running', 'interrupted', 'awaiting_input') ORDER BY created_at DESC LIMIT 1"
   ).get(workspaceId);
 
   if (!job) return null;
@@ -1103,6 +1170,7 @@ export function getJobStatus(workspaceId) {
     planSummary: job.plan_summary || '',
     iteration: job.iteration,
     errorMessage: job.error_message || '',
+    pendingQuestion: job.pending_question || '',
     createdAt: job.created_at,
     updatedAt: job.updated_at,
   };

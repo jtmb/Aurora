@@ -27,11 +27,15 @@ export default function AgentPanel({
   const [isThinking, setIsThinking] = useState(false);
   const scrollRef = useRef(null);
   const abortRef = useRef(null);
+  const streamAbortRef = useRef(null);    // abort controller for SSE streams (Chat mode)
+  const messagesRef = useRef([]);          // latest messages for async access
   const thinkingContainerRef = useRef(null);
   const turnCounterRef = useRef(0);
 
   // --- Copilot-style agent controls ---
-  const [agentMode, setAgentMode] = useState('plan');       // 'plan' | 'agent'
+  const [agentMode, setAgentMode] = useState('chat');       // 'chat' | 'plan' | 'agent'
+  const agentModeRef = useRef('chat');                       // synchronous mirror for sendMessage
+  useEffect(() => { agentModeRef.current = agentMode; }, [agentMode]);
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedProvider, setSelectedProvider] = useState('lmstudio');
   const [thinkingEffort, setThinkingEffort] = useState('high'); // 'low' | 'medium' | 'high'
@@ -43,6 +47,7 @@ export default function AgentPanel({
   const [workspaceAgentsMd, setWorkspaceAgentsMd] = useState(''); // AGENTS.md content for system prompt injection
   const planTodosRef = useRef(planTodos); // stays in sync for async loop access
   useEffect(() => { planTodosRef.current = planTodos; }, [planTodos]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   // Auto-resize textarea as user types
   const textareaRef = useRef(null);
   useEffect(() => {
@@ -338,6 +343,29 @@ export default function AgentPanel({
             if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
             return;
           }
+          // ── Handle awaiting_input (clarification pause) ──
+          if (statusData.status === 'awaiting_input') {
+            setIsStreaming(false);
+            setIsThinking(false);
+            // Don't clear activeJobId — we need it to cancel/resume
+            setActiveJobId(statusData.jobId);
+            if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+            // Show the question as an assistant message if not already shown
+            if (statusData.pendingQuestion) {
+              const qId = `clarify_${statusData.jobId}`;
+              setMessages(prev => {
+                if (prev.some(m => m.id === qId)) return prev;
+                return [...prev, {
+                  id: qId,
+                  role: 'assistant',
+                  content: statusData.pendingQuestion,
+                  isClarification: true,
+                  timestamp: new Date().toISOString()
+                }];
+              });
+            }
+            return;
+          }
           // Update todos from job status
           if (statusData.planTodos && statusData.planTodos.length > 0) {
             setPlanTodos(statusData.planTodos);
@@ -361,7 +389,7 @@ export default function AgentPanel({
     };
   }, [isStreaming, workspaceChatId, workspaceId]);
 
-  // ── On mount: reconnect to running/interrupted jobs ──
+  // ── On mount: reconnect to running/interrupted/awaiting jobs ──
   useEffect(() => {
     if (!workspaceId || !workspaceChatId) return;
     let cancelled = false;
@@ -371,6 +399,25 @@ export default function AgentPanel({
         if (!res.ok || cancelled) return;
         const data = await res.json();
         if (data.active) {
+          if (data.status === 'awaiting_input') {
+            // Show the pending question without starting polling
+            console.log('[AgentPanel] Reconnecting to paused job:', data.jobId);
+            setActiveJobId(data.jobId);
+            if (data.pendingQuestion) {
+              const qId = `clarify_${data.jobId}`;
+              setMessages(prev => {
+                if (prev.some(m => m.id === qId)) return prev;
+                return [...prev, {
+                  id: qId,
+                  role: 'assistant',
+                  content: data.pendingQuestion,
+                  isClarification: true,
+                  timestamp: new Date().toISOString()
+                }];
+              });
+            }
+            return;
+          }
           console.log('[AgentPanel] Reconnecting to active job:', data.jobId);
           setActiveJobId(data.jobId);
           setIsStreaming(true);
@@ -791,7 +838,13 @@ export default function AgentPanel({
 
   // Stop generation
   const handleStop = async () => {
-    // Cancel server-side agent job
+    // Abort any in-flight SSE stream (Chat mode)
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+      streamAbortRef.current = null;
+    }
+
+    // Cancel server-side agent job (Plan/Agent mode)
     if (activeJobId && workspaceId) {
       try {
         const token = localStorage.getItem('auth_token');
@@ -808,6 +861,8 @@ export default function AgentPanel({
     setIsStreaming(false);
     setIsThinking(false);
     setActiveJobId(null);
+    // Remove any clarification messages
+    setMessages(prev => prev.filter(m => !m.isClarification));
     if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
   };
 
@@ -1050,11 +1105,11 @@ export default function AgentPanel({
       : selectedProvider;
     saveMessageToChat('user', userContent, selectedModel, msgProvider, userMsg.id, userMsg.timestamp);
 
-    const effectiveMode = isPlanExecution ? 'agent' : agentMode;
+    const effectiveMode = isPlanExecution ? 'agent' : agentModeRef.current;
     let systemPrompt = buildSystemPrompt(workspaceId, activeFilePath, currentFileContent, effectiveMode);
 
     // Inject plan into system prompt so the model ALWAYS knows what remains.
-    if ((isPlanExecution || agentMode === 'agent') && planTodosRef.current.length > 0) {
+    if ((isPlanExecution || agentModeRef.current === 'agent') && planTodosRef.current.length > 0) {
       const todos = planTodosRef.current;
       const doneCount = todos.filter(t => t.done).length;
       const pending = todos.filter(t => !t.done);
@@ -1074,7 +1129,174 @@ export default function AgentPanel({
       systemPrompt = systemPrompt + planBlock;
     }
 
-    // ── Start the server-side agent job ──
+    // ── Chat mode: Direct SSE streaming (no server-side agent loop) ──
+    if (effectiveMode === 'chat') {
+      try {
+        const chatMessages = messagesRef.current.concat([userMsg]).map(m => ({
+          role: m.role === 'error' ? 'assistant' : m.role,
+          content: m.content
+        }));
+
+        // Prepend system prompt if present
+        if (systemPrompt) {
+          chatMessages.unshift({ role: 'system', content: systemPrompt });
+        }
+
+        // Build headers with API keys from localStorage
+        const headers = { 'Content-Type': 'application/json' };
+        const token = localStorage.getItem('auth_token');
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const openaiKey = localStorage.getItem('OPENAI_API_KEY');
+        const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY');
+        const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
+        const ollamaBase = localStorage.getItem('OLLAMA_API_BASE');
+        let lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
+        const lmStudioHost = localStorage.getItem('LM_STUDIO_HOST');
+        const lmStudioPort = localStorage.getItem('LM_STUDIO_PORT');
+        const lmStudioApiKeyD = localStorage.getItem('LM_STUDIO_API_KEY');
+        if (!lmStudioUrl && lmStudioHost && lmStudioPort) {
+          lmStudioUrl = `http://${lmStudioHost}:${lmStudioPort}/v1`;
+        }
+        if (openaiKey) headers['x-openai-key'] = openaiKey;
+        if (anthropicKey) headers['x-anthropic-key'] = anthropicKey;
+        if (deepseekKey) headers['x-deepseek-key'] = deepseekKey;
+        if (ollamaBase) headers['x-ollama-base'] = ollamaBase;
+        if (lmStudioUrl) headers['x-lmstudio-url'] = lmStudioUrl;
+        if (lmStudioHost) headers['x-lmstudio-host'] = lmStudioHost;
+        if (lmStudioPort) headers['x-lmstudio-port'] = lmStudioPort;
+        if (lmStudioApiKeyD) headers['x-lmstudio-api-key'] = lmStudioApiKeyD;
+
+        // Create abort controller for stop
+        const controller = new AbortController();
+        streamAbortRef.current = controller;
+
+        const temp = thinkingEffort === 'high' ? 0.1 : thinkingEffort === 'low' ? 0.5 : 0.3;
+        const extraParams = {};
+        if (msgProvider === 'deepseek' && thinkingEffort === 'high') {
+          extraParams.reasoning_effort = thinkingEffort;
+          extraParams.thinking_type = 'enabled';
+        } else if (msgProvider !== 'deepseek' && thinkingEffort === 'high') {
+          extraParams.extended_thinking = true;
+        }
+
+        const bodyObj = {
+          model: selectedModel,
+          messages: chatMessages,
+          provider: msgProvider,
+          stream: true,
+          max_tokens: null,
+          ...extraParams,
+        };
+        if (!(msgProvider === 'deepseek' && thinkingEffort === 'high')) {
+          bodyObj.temperature = temp;
+          bodyObj.top_p = 1;
+        }
+
+        const res = await fetch('/api/v1/chat/completions', {
+          method: 'POST',
+          headers,
+          signal: controller.signal,
+          body: JSON.stringify(bodyObj)
+        });
+
+        if (!res.ok) {
+          const errorData = await res.json().catch(() => ({}));
+          throw new Error(errorData.error?.message || `Failed to get response from ${selectedModel}`);
+        }
+
+        // Read SSE stream for real-time thinking + content
+        const assistantId = `agent_asst_${Date.now()}`;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let streamBuffer = '';
+        let streamedContent = '';
+        let streamedThinking = '';
+        let messageCreated = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          streamBuffer += decoder.decode(value, { stream: true });
+
+          const lines = streamBuffer.split('\n');
+          streamBuffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const jsonStr = line.slice(6).trim();
+            if (jsonStr === '[DONE]') continue;
+
+            try {
+              const data = JSON.parse(jsonStr);
+              const delta = data.choices?.[0]?.delta;
+              if (!delta) continue;
+
+              const think = delta.thinking || delta.reasoning_content || delta.reasoning || '';
+              if (think) streamedThinking += think;
+
+              const contentChunk = delta.content || '';
+              if (contentChunk) streamedContent += contentChunk;
+
+              if (!messageCreated) {
+                messageCreated = true;
+                setMessages(prev => [...prev, {
+                  id: assistantId,
+                  role: 'assistant',
+                  content: streamedContent,
+                  thinking: streamedThinking || undefined,
+                  timestamp: new Date().toISOString(),
+                  model: data.model || selectedModel,
+                  provider: msgProvider,
+                  turnId
+                }]);
+              } else {
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantId
+                    ? { ...m, content: streamedContent, thinking: streamedThinking || m.thinking }
+                    : m
+                ));
+              }
+            } catch {}
+          }
+        }
+
+        // Final content save
+        const finalContent = streamedContent;
+        const finalThinking = streamedThinking;
+        setMessages(prev => prev.map(m =>
+          m.id === assistantId
+            ? { ...m, content: finalContent, thinking: finalThinking || undefined }
+            : m
+        ));
+
+        // Persist assistant message to chat
+        if (finalContent) {
+          saveMessageToChat('assistant', finalContent, selectedModel, msgProvider, assistantId, new Date().toISOString());
+        }
+
+        setIsStreaming(false);
+        setIsThinking(false);
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          setIsStreaming(false);
+          setIsThinking(false);
+          return;
+        }
+        setIsStreaming(false);
+        setIsThinking(false);
+        setMessages(prev => [...prev, {
+          id: `agent_err_${Date.now()}`,
+          role: 'assistant',
+          content: `Error: ${err.message}`,
+          isError: true,
+          timestamp: new Date().toISOString(),
+          turnId
+        }]);
+      }
+      return;
+    }
+
+    // ── Start the server-side agent job (Plan/Agent modes) ──
     try {
       const token = localStorage.getItem('auth_token');
       // Collect API keys from localStorage so the server-side runner can use them
@@ -1509,6 +1731,45 @@ export default function AgentPanel({
       }
 
       return base;
+    }
+
+    // Chat mode — conversational assistant with workspace awareness
+    if (mode === 'chat') {
+      // ── Build past learnings block from corpus entries ──
+      let chatLearnings = '';
+      const chatUnresolved = corpusEntries.filter(e => !e.resolved);
+      const chatResolved = corpusEntries.filter(e => e.resolved && e.resolution);
+      if (chatUnresolved.length > 0) {
+        const recent = chatUnresolved.slice(-3);
+        chatLearnings = '⚠️  PAST LEARNINGS (avoid repeating these):\n';
+        for (const e of recent) chatLearnings += `- ${e.problem.slice(0, 150)}\n`;
+        chatLearnings += '\n';
+      }
+      if (chatResolved.length > 0) {
+        chatLearnings += '✅ KNOWN FIXES:\n';
+        for (const e of chatResolved.slice(-3)) chatLearnings += `- ${e.problem.slice(0, 100)} → ${e.resolution.slice(0, 150)}\n`;
+        chatLearnings += '\n';
+      }
+
+      // ── Build relevant skills block ──
+      let chatSkills = '';
+      if (skills.length > 0) {
+        chatSkills = '📚 AVAILABLE SKILLS:\n';
+        for (const s of skills.slice(0, 5)) chatSkills += `- ${s.name}: ${(s.description || '').slice(0, 100)}\n`;
+        chatSkills += '\n';
+      }
+
+      return `${workspaceAgentsMd ? '⚠️  AGENTS.md RULES:\n\n' + workspaceAgentsMd + '\n\n---\n\n' : ''}${chatLearnings}${chatSkills}You are a helpful AI assistant chatting with a developer in their workspace. The workspace is at /api/workspace/${wsId}.
+
+You are in CHAT MODE — this is a free conversation. You can:
+- **Ask clarifying questions** about what the user wants to build.
+- **Discuss approaches, tradeoffs, and architecture**.
+- **Explain code, concepts, and best practices**.
+- **Suggest next steps** — but do NOT write files or execute actions unless the user explicitly asks you to switch to Agent mode.
+
+When the user is ready to build, tell them to switch to **Agent mode** (for autonomous execution) or **Plan mode** (to generate a structured plan first).
+
+Be concise but thorough. Ask questions when the user's request is ambiguous — it's better to clarify NOW than build the wrong thing.`;
     }
 
     // Plan mode — Copilot-style: explore workspace, then produce a concrete file-level plan
@@ -2842,6 +3103,7 @@ TESTING WORKFLOW — After creating/modifying project files:
         {/* Mode pills: Chat | Plan | Agent */}
         <div className="flex items-center gap-0.5 bg-zinc-800/40 rounded-lg p-0.5">
           {[
+            { id: 'chat', icon: '💬', label: 'Chat' },
             { id: 'plan', icon: '📋', label: 'Plan' },
             { id: 'agent', icon: '🤖', label: 'Agent' },
           ].map(mode => (
@@ -2855,7 +3117,8 @@ TESTING WORKFLOW — After creating/modifying project files:
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
               title={
-                mode.id === 'plan' ? 'Plan only — no file changes'
+                mode.id === 'chat' ? 'Chat mode — free conversation, ask questions'
+                : mode.id === 'plan' ? 'Plan only — no file changes'
                 : 'Agent mode — can read and edit files'
               }
             >
@@ -2902,7 +3165,9 @@ TESTING WORKFLOW — After creating/modifying project files:
               }
             }}
             placeholder={
-              agentMode === 'plan' ? 'Ask for a plan... (Shift+Enter for newline)'
+              activeJobId && messages.some(m => m.isClarification) ? 'Answer the question... (Shift+Enter for newline)'
+              : agentMode === 'chat' ? 'Ask anything... (Shift+Enter for newline)'
+              : agentMode === 'plan' ? 'Ask for a plan... (Shift+Enter for newline)'
               : 'Ask agent to build, edit, or fix... (Shift+Enter for newline)'
             }
             disabled={isStreaming}

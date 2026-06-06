@@ -240,6 +240,12 @@ export function runMigrations() {
   } catch {
     // Column already exists — safe to ignore
   }
+  try {
+    db.exec(`ALTER TABLE agent_jobs ADD COLUMN pending_question TEXT DEFAULT ''`);
+    console.log('[SQLite] Added pending_question column to agent_jobs (migration)');
+  } catch {
+    // Column already exists — safe to ignore
+  }
 
   if (created.length > 0) {
     console.log(`[SQLite] Migration complete — ${created.length} new table(s): ${created.join(', ')}`);
