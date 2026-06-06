@@ -863,7 +863,7 @@ export default function SettingsPage() {
             <div className="max-w-2xl space-y-5">
               <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
                 <div className="flex items-center gap-4 mb-4">
-                  <div className="w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center">
+                  <div className="w-12 h-12 rounded-full bg-indigo-600 flex items-center justify-center">
                     <span className="text-white font-bold text-xl">A</span>
                   </div>
                   <div>

@@ -38,14 +38,13 @@ export default function Home() {
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [generatePromptDesc, setGeneratePromptDesc] = useState('');
   const [showGenerateField, setShowGenerateField] = useState(false);
+  const [thinkingEffort, setThinkingEffort] = useState('high'); // 'low' | 'medium' | 'high'
   const [linkPreviews, setLinkPreviews] = useState({}); // { [url]: { title, description, image, favicon, domain, loading } }
   const scrollRef = useRef(null);
   const plusMenuRef = useRef(null);
   const [appMode, setAppMode] = useState('chat'); // 'chat' | 'workspace'
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceList, setWorkspaceList] = useState([]);
-  const [workspaceSidebarPage, setWorkspaceSidebarPage] = useState(1);
-  const WORKSPACES_PER_PAGE = 4;
 
   // Provider icons for model selector — size variant
   const providerIcons = (source, size = 'w-3.5 h-3.5') => {
@@ -82,7 +81,7 @@ export default function Home() {
         const auroraDefault = {
           id: 'pers_aurora_default',
           name: 'Aurora',
-          prompt: 'You are Aurora, a friendly and helpful AI assistant created to brighten people\'s day. You are female, warm, kind, and always eager to help with anything you\'re asked. You know yourself as Aurora — that is your name and identity, and you never refer to yourself by any other name. You speak with a gentle, encouraging tone and genuinely care about making every interaction pleasant, supportive, and productive. You are curious, thoughtful, and approachable — like a trusted friend who also happens to be highly knowledgeable. You have the ability to search the web for current, real-time information when the user enables the web search feature — if a question would benefit from up-to-date information, you can suggest turning on web search to get the latest data. When you don\'t know something or your knowledge may be outdated, you\'re honest about it and offer to look it up. Your goal is to make people feel heard, understood, and empowered.',
+          prompt: 'You are Aurora, a capable and efficient AI assistant. You are helpful, direct, and knowledgeable — you get straight to the point without unnecessary flattery or emotional language. You know yourself as Aurora — that is your name and identity, and you never refer to yourself by any other name. You can search the web for current, real-time information when the user enables the web search feature. When you don\'t know something or your knowledge may be outdated, be honest about it and offer to look it up. Keep responses clear, accurate, and professional.',
           isDefault: true,
           createdAt: new Date().toISOString()
         };
@@ -108,6 +107,8 @@ export default function Home() {
       }
       const searchState = localStorage.getItem('aurora_chat_search');
       if (searchState) setChatWebSearch(JSON.parse(searchState));
+      const savedThinking = localStorage.getItem('aurora_chat_thinking');
+      if (savedThinking && ['low', 'medium', 'high'].includes(savedThinking)) setThinkingEffort(savedThinking);
     } catch {}
   }, []);
 
@@ -128,6 +129,11 @@ export default function Home() {
       localStorage.removeItem('aurora_active_personality');
     }
   }, [activePersonalityId]);
+
+  // Persist thinking effort
+  useEffect(() => {
+    localStorage.setItem('aurora_chat_thinking', thinkingEffort);
+  }, [thinkingEffort]);
 
   // Sync webSearchEnabled when chat changes
   useEffect(() => {
@@ -532,6 +538,35 @@ export default function Home() {
     }
   };
 
+  // Language badge helper for sidebar workspace list
+  const getLanguageIcon = (ws) => {
+    const lang = (ws.primaryLanguage || '').toLowerCase();
+    const badgeCls = 'text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold flex-shrink-0';
+    const badges = {
+      javascript: <span className={`${badgeCls} text-yellow-400 bg-yellow-400/10`}>JS</span>,
+      typescript: <span className={`${badgeCls} text-blue-400 bg-blue-400/10`}>TS</span>,
+      python: <span className={`${badgeCls} text-blue-400 bg-blue-400/10`}>PY</span>,
+      rust: <span className={`${badgeCls} text-orange-400 bg-orange-400/10`}>RS</span>,
+      go: <span className={`${badgeCls} text-cyan-400 bg-cyan-400/10`}>GO</span>,
+      ruby: <span className={`${badgeCls} text-red-400 bg-red-400/10`}>RB</span>,
+      java: <span className={`${badgeCls} text-red-500 bg-red-500/10`}>JV</span>,
+      c: <span className={`${badgeCls} text-purple-400 bg-purple-400/10`}>C</span>,
+      'c++': <span className={`${badgeCls} text-blue-600 bg-blue-600/10`}>C+</span>,
+      cpp: <span className={`${badgeCls} text-blue-600 bg-blue-600/10`}>C+</span>,
+      php: <span className={`${badgeCls} text-indigo-400 bg-indigo-400/10`}>PHP</span>,
+      html: <span className={`${badgeCls} text-orange-500 bg-orange-500/10`}>HT</span>,
+      docker: <span className={`${badgeCls} text-blue-400 bg-blue-400/10`}>DK</span>,
+      dockerfile: <span className={`${badgeCls} text-blue-400 bg-blue-400/10`}>DK</span>,
+      css: <span className={`${badgeCls} text-sky-400 bg-sky-400/10`}>CS</span>,
+      shell: <span className={`${badgeCls} text-emerald-400 bg-emerald-400/10`}>SH</span>,
+      json: <span className={`${badgeCls} text-zinc-400 bg-zinc-400/10`}>{'{ }'}</span>,
+      markdown: <span className={`${badgeCls} text-zinc-400 bg-zinc-400/10`}>MD</span>,
+      yaml: <span className={`${badgeCls} text-zinc-400 bg-zinc-400/10`}>YM</span>,
+    };
+    if (badges[lang]) return badges[lang];
+    return <svg className="w-[1.2rem] h-[1.2rem] flex-shrink-0 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>;
+  };
+
   const loadChats = async () => {
     try {
       const token = localStorage.getItem('auth_token');
@@ -923,6 +958,11 @@ export default function Home() {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
+      // Thinking effort → temperature mapping (matching AgentPanel)
+      const temp = thinkingEffort === 'high' ? 0.1 : thinkingEffort === 'low' ? 0.5 : 0.3;
+      const extraParams = {};
+      if (thinkingEffort === 'high') extraParams.extended_thinking = true;
+
       const res = await fetch('/api/v1/chat/completions', {
         method: 'POST',
         headers,
@@ -930,11 +970,12 @@ export default function Home() {
         body: JSON.stringify({
           model,
           messages: messagesArray,
-          temperature: 0.7,
+          temperature: temp,
           top_p: 1,
           max_tokens: null,
           provider: providerId,
-          stream: true
+          stream: true,
+          ...extraParams
         })
       });
 
@@ -1374,10 +1415,13 @@ export default function Home() {
                   <svg className="w-[1.2rem] h-[1.2rem] shrink-0 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" strokeWidth={1.5} /><path d="M8 21h8" strokeWidth={1.5} strokeLinecap="round" /><path d="M12 17v4" strokeWidth={1.5} strokeLinecap="round" /></svg>
                   <div className="flex-1 text-left min-w-0">
                     <span className="truncate block text-zinc-300">{modelsLoading ? 'Loading...' : (model || 'Select a model')}</span>
-                    {activePersonalityId && (() => {
-                      const p = personalities.find(x => x.id === activePersonalityId);
-                      return p ? <span className="text-[10px] text-indigo-400/70 truncate block">{p.name}</span> : null;
-                    })()}
+                    <span className="text-[10px] text-zinc-500 truncate block">
+                      {activePersonalityId && (() => {
+                        const p = personalities.find(x => x.id === activePersonalityId);
+                        return p ? <>{p.name} &middot; </> : null;
+                      })()}
+                      Think: {thinkingEffort === 'high' ? 'High' : thinkingEffort === 'medium' ? 'Med' : 'Low'}
+                    </span>
                   </div>
                   <span className="relative flex items-center justify-center w-[1.2rem] h-[1.2rem] shrink-0">
                     <span className="absolute inset-0 rounded-full opacity-30 blur-[3px]" style={{ background: 'linear-gradient(135deg, #818cf8, #c084fc, #f0abfc)' }} />
@@ -1456,42 +1500,32 @@ export default function Home() {
                   )}
                 </nav>
               ) : (
-                /* --- Workspace List (max 4 with pagination) --- */
+                /* --- Workspace List --- */
                 <nav className="space-y-[calc(0.75rem+3px)]">
                   {workspaceList.length === 0 ? (
                     <p className="px-4 py-2 text-xs text-zinc-600">No workspaces yet. Create one!</p>
                   ) : (
-                    <>
-                      {workspaceList.slice(0, workspaceSidebarPage * WORKSPACES_PER_PAGE).map((ws) => (
-                        <button
-                          key={ws.id}
-                          onClick={() => setAppMode('workspace')}
-                          className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20"
-                          title={`Open workspace: ${ws.name}`}
-                        >
-                          <svg className="w-[1.2rem] h-[1.2rem] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
-                          <div className="flex-1 min-w-0">
-                            <p className="truncate text-sm">{ws.name}</p>
-                            <div className="flex items-center gap-1.5 mt-0.5">
-                              {ws.codeMode === 'vibe' && (
-                                <span className="text-[10px] px-1 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10">Vibe</span>
-                              )}
-                              {ws.isGitRepo && (
-                                <span className="text-[10px] text-zinc-600">Git</span>
-                              )}
-                            </div>
+                    workspaceList.map((ws) => (
+                      <button
+                        key={ws.id}
+                        onClick={() => setAppMode('workspace')}
+                        className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20"
+                        title={`Open workspace: ${ws.name}`}
+                      >
+                        {getLanguageIcon(ws)}
+                        <div className="flex-1 min-w-0">
+                          <p className="truncate text-sm">{ws.name}</p>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            {ws.codeMode === 'vibe' && (
+                              <span className="text-[10px] px-1 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10">Vibe</span>
+                            )}
+                            {ws.isGitRepo && (
+                              <span className="text-[10px] text-zinc-600">Git</span>
+                            )}
                           </div>
-                        </button>
-                      ))}
-                      {workspaceList.length > workspaceSidebarPage * WORKSPACES_PER_PAGE && (
-                        <button
-                          onClick={() => setWorkspaceSidebarPage(p => p + 1)}
-                          className="w-full px-4 py-2 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/20 rounded-lg transition-colors"
-                        >
-                          Show more ({workspaceList.length - workspaceSidebarPage * WORKSPACES_PER_PAGE} more)
-                        </button>
-                      )}
-                    </>
+                        </div>
+                      </button>
+                    ))
                   )}
                 </nav>
               )}
@@ -1619,7 +1653,7 @@ export default function Home() {
         {/* Conditional content: Chat vs Workspace */}
         {appMode === 'workspace' ? (
           <div className="flex-1 mt-[50px] flex min-h-0">
-            <WorkspaceMode />
+            <WorkspaceMode onWorkspaceDeleted={loadWorkspacesForSidebar} />
           </div>
         ) : (
         <>
@@ -2370,6 +2404,16 @@ export default function Home() {
                 >
                   Personality
                 </button>
+                <button
+                  onClick={() => setModelOverlayTab('think')}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    modelOverlayTab === 'think'
+                      ? 'bg-zinc-700 text-zinc-100'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  Think
+                </button>
               </div>
               <button
                 onClick={() => { setModelOverlayOpen(false); setModelSearch(''); setModelProviderFilter('all'); setModelOverlayTab('models'); }}
@@ -2737,6 +2781,70 @@ export default function Home() {
                   })}
                 </div>
               )}
+            </div>
+            )}
+
+            {/* Think tab content — thinking effort selector */}
+            {modelOverlayTab === 'think' && (
+            <div className="flex-1 overflow-y-auto px-5 pb-5 flex flex-col">
+              <p className="text-xs text-zinc-400 mb-4 pt-2">Controls how much the model &ldquo;thinks&rdquo; before responding. Higher effort can produce better results but takes longer.</p>
+
+              {/* Low effort */}
+              <button
+                onClick={() => { setThinkingEffort('low'); }}
+                className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl text-left transition-colors mb-2 ${
+                  thinkingEffort === 'low' ? 'bg-zinc-700/40 border border-zinc-600/50' : 'hover:bg-zinc-800/40 border border-transparent'
+                }`}
+              >
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <span className={`w-1 h-4 rounded-full ${thinkingEffort === 'low' ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+                  <span className="w-1 h-4 rounded-full bg-zinc-700" />
+                  <span className="w-1 h-4 rounded-full bg-zinc-700" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm ${thinkingEffort === 'low' ? 'text-white font-medium' : 'text-zinc-300'}`}>Low</p>
+                  <p className="text-[11px] text-zinc-500">Faster responses, good for simple questions</p>
+                </div>
+                {thinkingEffort === 'low' && <span className="w-2 h-2 rounded-full bg-indigo-400 flex-shrink-0" />}
+              </button>
+
+              {/* Medium effort */}
+              <button
+                onClick={() => { setThinkingEffort('medium'); }}
+                className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl text-left transition-colors mb-2 ${
+                  thinkingEffort === 'medium' ? 'bg-zinc-700/40 border border-zinc-600/50' : 'hover:bg-zinc-800/40 border border-transparent'
+                }`}
+              >
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <span className={`w-1 h-4 rounded-full ${thinkingEffort !== 'low' ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+                  <span className={`w-1 h-4 rounded-full ${thinkingEffort === 'medium' ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+                  <span className="w-1 h-4 rounded-full bg-zinc-700" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm ${thinkingEffort === 'medium' ? 'text-white font-medium' : 'text-zinc-300'}`}>Medium</p>
+                  <p className="text-[11px] text-zinc-500">Balanced speed and reasoning quality</p>
+                </div>
+                {thinkingEffort === 'medium' && <span className="w-2 h-2 rounded-full bg-indigo-400 flex-shrink-0" />}
+              </button>
+
+              {/* High effort */}
+              <button
+                onClick={() => { setThinkingEffort('high'); }}
+                className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl text-left transition-colors ${
+                  thinkingEffort === 'high' ? 'bg-zinc-700/40 border border-zinc-600/50' : 'hover:bg-zinc-800/40 border border-transparent'
+                }`}
+              >
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <span className={`w-1 h-4 rounded-full ${['low', 'medium', 'high'].includes(thinkingEffort) ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+                  <span className={`w-1 h-4 rounded-full ${['medium', 'high'].includes(thinkingEffort) ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+                  <span className={`w-1 h-4 rounded-full ${thinkingEffort === 'high' ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm ${thinkingEffort === 'high' ? 'text-white font-medium' : 'text-zinc-300'}`}>High</p>
+                  <p className="text-[11px] text-zinc-500">Maximum reasoning depth. Best for complex problems</p>
+                </div>
+                {thinkingEffort === 'high' && <span className="w-2 h-2 rounded-full bg-indigo-400 flex-shrink-0" />}
+              </button>
             </div>
             )}
           </div>

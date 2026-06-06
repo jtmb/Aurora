@@ -13,10 +13,11 @@ import PreviewPanel from './PreviewPanel';
 // xterm.js uses browser APIs, must be client-only
 const TerminalPanel = dynamic(() => import('./TerminalPanel'), { ssr: false });
 
-export default function WorkspaceMode({}) {
+export default function WorkspaceMode({ onWorkspaceDeleted }) {
   const [workspaces, setWorkspaces] = useState([]);
   const [workspacePage, setWorkspacePage] = useState(1);
-  const WORKSPACES_PER_PAGE = 4;
+  const [rowsPerPage, setRowsPerPage] = useState(4);
+  const [viewMode, setViewMode] = useState('list'); // 'list' | 'grid'
   const [activeWorkspace, setActiveWorkspace] = useState(null);
   const [fileTree, setFileTree] = useState([]);
   const [openFiles, setOpenFiles] = useState([]);
@@ -383,9 +384,51 @@ export default function WorkspaceMode({}) {
         setFileTree([]);
       }
       await loadWorkspaces();
+      onWorkspaceDeleted?.();
     } catch (err) {
       setError('Failed to delete workspace');
     }
+  };
+
+  // Map workspace language to an SVG icon
+  const getLanguageIcon = (ws, size = 'small') => {
+    const lang = (ws.primaryLanguage || '').toLowerCase();
+    const badgeCls = size === 'large' ? 'text-[11px] px-2 py-0.5' : 'text-[10px] px-1.5 py-0.5';
+    const badges = {
+      javascript: <span className={`${badgeCls} rounded font-mono font-semibold text-yellow-400 bg-yellow-400/10`}>JS</span>,
+      typescript: <span className={`${badgeCls} rounded font-mono font-semibold text-blue-400 bg-blue-400/10`}>TS</span>,
+      python: <span className={`${badgeCls} rounded font-mono font-semibold text-blue-400 bg-blue-400/10`}>PY</span>,
+      rust: <span className={`${badgeCls} rounded font-mono font-semibold text-orange-400 bg-orange-400/10`}>RS</span>,
+      go: <span className={`${badgeCls} rounded font-mono font-semibold text-cyan-400 bg-cyan-400/10`}>GO</span>,
+      ruby: <span className={`${badgeCls} rounded font-mono font-semibold text-red-400 bg-red-400/10`}>RB</span>,
+      java: <span className={`${badgeCls} rounded font-mono font-semibold text-red-500 bg-red-500/10`}>JV</span>,
+      c: <span className={`${badgeCls} rounded font-mono font-semibold text-purple-400 bg-purple-400/10`}>C</span>,
+      'c++': <span className={`${badgeCls} rounded font-mono font-semibold text-blue-600 bg-blue-600/10`}>C+</span>,
+      cpp: <span className={`${badgeCls} rounded font-mono font-semibold text-blue-600 bg-blue-600/10`}>C+</span>,
+      php: <span className={`${badgeCls} rounded font-mono font-semibold text-indigo-400 bg-indigo-400/10`}>PHP</span>,
+      html: <span className={`${badgeCls} rounded font-mono font-semibold text-orange-500 bg-orange-500/10`}>HT</span>,
+      docker: <span className={`${badgeCls} rounded font-mono font-semibold text-blue-400 bg-blue-400/10`}>DK</span>,
+      dockerfile: <span className={`${badgeCls} rounded font-mono font-semibold text-blue-400 bg-blue-400/10`}>DK</span>,
+      css: <span className={`${badgeCls} rounded font-mono font-semibold text-sky-400 bg-sky-400/10`}>CS</span>,
+      shell: <span className={`${badgeCls} rounded font-mono font-semibold text-emerald-400 bg-emerald-400/10`}>SH</span>,
+      json: <span className={`${badgeCls} rounded font-mono font-semibold text-zinc-400 bg-zinc-400/10`}>{'{ }'}</span>,
+      markdown: <span className={`${badgeCls} rounded font-mono font-semibold text-zinc-400 bg-zinc-400/10`}>MD</span>,
+      yaml: <span className={`${badgeCls} rounded font-mono font-semibold text-zinc-400 bg-zinc-400/10`}>YM</span>,
+    };
+    if (badges[lang]) return badges[lang];
+    if (ws.isGitRepo) {
+      return <svg className={`${size === 'large' ? 'w-5 h-5' : 'w-4 h-4'} text-zinc-400`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z" /></svg>;
+    }
+    return <svg className={`${size === 'large' ? 'w-5 h-5' : 'w-4 h-4'} text-zinc-500`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>;
+  };
+
+  const getWorkspaceSubtitle = (ws) => {
+    if (ws.repoUrl) return ws.repoUrl;
+    if (ws.primaryLanguage) {
+      const name = ws.primaryLanguage.charAt(0).toUpperCase() + ws.primaryLanguage.slice(1);
+      return `${name} Project`;
+    }
+    return 'Blank workspace';
   };
 
   const handleToggleMode = async () => {
@@ -584,37 +627,74 @@ export default function WorkspaceMode({}) {
           )}
 
           {/* Existing workspaces */}
-          {workspaces.length > 0 && (
+          {workspaces.length > 0 && (() => {
+            const totalPages = Math.ceil(workspaces.length / rowsPerPage);
+            return (
             <div>
-              <p className="text-xs font-medium text-zinc-500 mb-3 uppercase tracking-wider">Recent Workspaces</p>
-              <div className="space-y-1">
-                {workspaces.slice(0, workspacePage * WORKSPACES_PER_PAGE).map((ws) => (
-                  <div
-                    key={ws.id}
-                    className="flex items-center gap-3 px-4 py-3 rounded-xl bg-zinc-900/60 border border-zinc-800/40 hover:border-zinc-700/40 transition-colors group"
+              {/* Header row: label + view toggle + rows-per-page */}
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Recent Workspaces</p>
+                <div className="flex items-center gap-2">
+                  {/* Rows per page selector */}
+                  <select
+                    value={rowsPerPage}
+                    onChange={(e) => { setRowsPerPage(Number(e.target.value)); setWorkspacePage(1); }}
+                    className="bg-zinc-800 border border-zinc-700/50 rounded-lg px-2 py-1 text-[10px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 cursor-pointer"
                   >
+                    {[4, 8, 12, 16].map(n => (
+                      <option key={n} value={n}>{n} / page</option>
+                    ))}
+                  </select>
+                  {/* List / Grid toggle */}
+                  <div className="flex bg-zinc-800 border border-zinc-700/50 rounded-lg overflow-hidden">
                     <button
-                      onClick={() => openWorkspace(ws)}
-                      className="flex-1 flex items-center gap-3 text-left min-w-0"
+                      onClick={() => setViewMode('list')}
+                      className={`p-1.5 transition-colors ${viewMode === 'list' ? 'bg-zinc-700 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'}`}
+                      title="List view"
                     >
-                      <div className="w-8 h-8 rounded-lg bg-zinc-800 flex items-center justify-center flex-shrink-0">
-                        {ws.isGitRepo ? (
-                          <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z" />
-                          </svg>
-                        ) : (
-                          <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                          </svg>
-                        )}
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => setViewMode('grid')}
+                      className={`p-1.5 transition-colors ${viewMode === 'grid' ? 'bg-zinc-700 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'}`}
+                      title="Grid view"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className={viewMode === 'grid' ? 'grid grid-cols-2 gap-2' : 'space-y-1'}>
+                {workspaces.slice((workspacePage - 1) * rowsPerPage, workspacePage * rowsPerPage).map((ws) => (
+                  viewMode === 'grid' ? (
+                    <div
+                      key={ws.id}
+                      onClick={() => openWorkspace(ws)}
+                      className="relative flex flex-col items-center gap-2 p-4 rounded-xl bg-zinc-900/60 border border-zinc-800/40 hover:border-zinc-700/40 transition-colors group text-center cursor-pointer"
+                    >
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeleteWorkspace(ws.id); }}
+                        className="absolute top-1.5 right-1.5 p-1 rounded-lg text-zinc-700 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-950/20 transition-all"
+                        title="Delete workspace"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                      <div className="w-10 h-10 rounded-xl bg-zinc-800 flex items-center justify-center flex-shrink-0">
+                        {getLanguageIcon(ws, 'large')}
                       </div>
-                      <div className="min-w-0">
-                        <p className="text-sm text-zinc-200 font-medium truncate">{ws.name}</p>
-                        <div className="flex items-center gap-2">
-                          <p className="text-[11px] text-zinc-500 truncate">{ws.repoUrl || 'Blank workspace'}</p>
+                      <div className="min-w-0 w-full">
+                        <p className="text-xs text-zinc-200 font-medium truncate">{ws.name}</p>
+                        <div className="flex items-center justify-center gap-1.5 mt-0.5">
+                          <p className="text-[10px] text-zinc-500 truncate">{getWorkspaceSubtitle(ws)}</p>
                           {(ws.codeMode === 'vibe') && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10 flex items-center gap-1 flex-shrink-0">
-                              <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <span className="text-[9px] px-1 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10 flex items-center gap-0.5 flex-shrink-0">
+                              <svg className="w-2 h-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
                               </svg>
                               Vibe
@@ -622,29 +702,89 @@ export default function WorkspaceMode({}) {
                           )}
                         </div>
                       </div>
-                    </button>
-                    <button
-                      onClick={() => handleDeleteWorkspace(ws.id)}
-                      className="p-1.5 rounded-lg text-zinc-700 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-950/20 transition-all"
-                      title="Delete workspace"
+                    </div>
+                  ) : (
+                    <div
+                      key={ws.id}
+                      className="flex items-center gap-3 px-4 py-3 rounded-xl bg-zinc-900/60 border border-zinc-800/40 hover:border-zinc-700/40 transition-colors group"
                     >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
-                  </div>
+                      <button
+                        onClick={() => openWorkspace(ws)}
+                        className="flex-1 flex items-center gap-3 text-left min-w-0"
+                      >
+                        <div className="w-8 h-8 rounded-lg bg-zinc-800 flex items-center justify-center flex-shrink-0">
+                          {getLanguageIcon(ws)}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm text-zinc-200 font-medium truncate">{ws.name}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-[11px] text-zinc-500 truncate">{getWorkspaceSubtitle(ws)}</p>
+                            {(ws.codeMode === 'vibe') && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10 flex items-center gap-1 flex-shrink-0">
+                                <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                                </svg>
+                                Vibe
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => handleDeleteWorkspace(ws.id)}
+                        className="p-1.5 rounded-lg text-zinc-700 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-950/20 transition-all"
+                        title="Delete workspace"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  )
                 ))}
-                {workspaces.length > workspacePage * WORKSPACES_PER_PAGE && (
-                  <button
-                    onClick={() => setWorkspacePage(p => p + 1)}
-                    className="w-full px-4 py-2 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/20 rounded-lg transition-colors"
-                  >
-                    Show more ({workspaces.length - workspacePage * WORKSPACES_PER_PAGE} more)
-                  </button>
-                )}
               </div>
+              {totalPages > 1 && (
+                <div className="flex items-center justify-center gap-1 pt-2">
+                  {/* Prev arrow */}
+                  <button
+                    onClick={() => setWorkspacePage(p => Math.max(1, p - 1))}
+                    disabled={workspacePage === 1}
+                    className="w-7 h-7 rounded-md flex items-center justify-center text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Previous page"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                    </svg>
+                  </button>
+                  {/* Numbered page buttons */}
+                  {Array.from({ length: totalPages }, (_, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setWorkspacePage(i + 1)}
+                      className={`w-7 h-7 rounded-md text-xs font-medium transition-colors ${
+                        workspacePage === i + 1
+                          ? 'bg-indigo-600 text-white'
+                          : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800'
+                      }`}
+                    >
+                      {i + 1}
+                    </button>
+                  ))}
+                  {/* Next arrow */}
+                  <button
+                    onClick={() => setWorkspacePage(p => Math.min(totalPages, p + 1))}
+                    disabled={workspacePage === totalPages}
+                    className="w-7 h-7 rounded-md flex items-center justify-center text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Next page"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                </div>
+              )}
             </div>
-          )}
+          )})()}
         </div>
       </div>
     );

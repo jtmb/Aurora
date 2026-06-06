@@ -3062,8 +3062,8 @@ TESTING WORKFLOW — After creating/modifying project files:
       {/* Header with model picker */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/40">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-5 h-5 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center flex-shrink-0">
-            <span className="text-[10px] text-white font-bold">A</span>
+          <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center flex-shrink-0">
+            <span className="text-white font-bold text-xs">A</span>
           </div>
           {/* Model picker dropdown */}
           <div className="relative" ref={modelDropdownRef}>
