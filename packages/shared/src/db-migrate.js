@@ -121,6 +121,40 @@ const SCHEMA = {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_lmm_user ON local_model_mappings(user_id);
+  `,
+
+  provider_settings: `
+    CREATE TABLE IF NOT EXISTS provider_settings (
+      user_id TEXT PRIMARY KEY,
+      settings_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `,
+
+  agent_jobs: `
+    CREATE TABLE IF NOT EXISTS agent_jobs (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      model TEXT DEFAULT '',
+      provider TEXT DEFAULT '',
+      thinking_effort TEXT DEFAULT 'high',
+      agent_mode TEXT DEFAULT 'agent',
+      user_request TEXT DEFAULT '',
+      plan_todos TEXT DEFAULT '[]',
+      plan_summary TEXT DEFAULT '',
+      iteration INTEGER DEFAULT 0,
+      conversation TEXT DEFAULT '[]',
+      file_manifest TEXT DEFAULT '[]',
+      api_keys TEXT DEFAULT '{}',
+      error_message TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_jobs_workspace ON agent_jobs(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_jobs(status);
   `
 };
 
@@ -161,6 +195,20 @@ export function runMigrations() {
     // Already exists — safe to ignore
   }
 
+  // Migrate usage_records: add cache hit columns (new in 2026-06)
+  try {
+    db.exec(`ALTER TABLE usage_records ADD COLUMN prompt_cache_hit_tokens INTEGER DEFAULT 0`);
+    console.log('[SQLite] Added prompt_cache_hit_tokens column to usage_records (migration)');
+  } catch {
+    // Column already exists — safe to ignore
+  }
+  try {
+    db.exec(`ALTER TABLE usage_records ADD COLUMN prompt_cache_miss_tokens INTEGER DEFAULT 0`);
+    console.log('[SQLite] Added prompt_cache_miss_tokens column to usage_records (migration)');
+  } catch {
+    // Column already exists — safe to ignore
+  }
+
   // Seed default local model mapping for any users who don't have one
   db.prepare(`
     INSERT OR IGNORE INTO local_model_mappings (user_id, local_model_pattern, ref_provider, ref_model)
@@ -170,6 +218,28 @@ export function runMigrations() {
       SELECT 1 FROM local_model_mappings lmm WHERE lmm.user_id = u.id AND lmm.local_model_pattern = '*'
     )
   `).run();
+
+  // Auto-restart: mark running jobs as 'interrupted' so they can be resumed
+  // The actual restart happens lazily when the workspace is loaded
+  try {
+    const runningJobs = db.prepare(
+      "SELECT id, workspace_id FROM agent_jobs WHERE status = 'running'"
+    ).all();
+    if (runningJobs.length > 0) {
+      console.log(`[SQLite] Found ${runningJobs.length} interrupted agent job(s) — marking for restart`);
+      db.prepare(
+        "UPDATE agent_jobs SET status = 'interrupted', updated_at = datetime('now') WHERE status = 'running'"
+      ).run();
+    }
+  } catch {
+    // agent_jobs table might not exist yet — safe to ignore
+  }
+  try {
+    db.exec(`ALTER TABLE agent_jobs ADD COLUMN api_keys TEXT DEFAULT '{}'`);
+    console.log('[SQLite] Added api_keys column to agent_jobs (migration)');
+  } catch {
+    // Column already exists — safe to ignore
+  }
 
   if (created.length > 0) {
     console.log(`[SQLite] Migration complete — ${created.length} new table(s): ${created.join(', ')}`);

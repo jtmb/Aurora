@@ -26,8 +26,14 @@ const DEFAULT_PRICING = {
     'claude-3-haiku':     { input: 0.25,  output: 1.25  },
   },
   deepseek: {
-    'deepseek-chat':    { input: 0.14, output: 0.28 },
-    'deepseek-coder':   { input: 0.14, output: 0.28 },
+    'deepseek-v4-flash':   { input: 0.14,  output: 0.28 },
+    'deepseek-v4-pro':     { input: 0.435, output: 0.87 },
+    // Legacy aliases (deprecated 2026/07/24) — map to v4-flash pricing
+    'deepseek-chat':       { input: 0.14,  output: 0.28 },
+    'deepseek-reasoner':   { input: 0.14,  output: 0.28 },
+    'deepseek-coder':      { input: 0.14,  output: 0.28 },
+    // Wildcard fallback for any new DeepSeek model
+    '*':                    { input: 0.14,  output: 0.28 },
   },
   ollama: {
     // Local models — free

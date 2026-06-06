@@ -27,10 +27,10 @@ const getUserId = (request) => {
 const extractKeys = async (request) => {
   const headerKeys = {
     lmStudioUrl: request.headers.get('x-lmstudio-url') || '',
-    lmStudioHost: request.headers.get('x-lmstudio-host') || process.env.LM_STUDIO_HOST || '',
-    lmStudioPort: request.headers.get('x-lmstudio-port') || process.env.LM_STUDIO_PORT || '',
-    lmStudioApiKey: request.headers.get('x-lmstudio-api-key') || process.env.LM_STUDIO_API_KEY || '',
-    deepseek: request.headers.get('x-deepseek-key') || process.env.DEEPSEEK_API_KEY || '',
+    lmStudioHost: request.headers.get('x-lmstudio-host') || '',
+    lmStudioPort: request.headers.get('x-lmstudio-port') || '',
+    lmStudioApiKey: request.headers.get('x-lmstudio-api-key') || '',
+    deepseek: request.headers.get('x-deepseek-key') || '',
   };
 
   // If authenticated, merge user-scoped keys (they take priority)

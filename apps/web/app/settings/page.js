@@ -2,16 +2,107 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+
+const DEFAULT_SETTINGS = {
+  openai: '',
+  anthropic: '',
+  deepseek: '',
+  ollamaBase: 'http://localhost:11434',
+  lmStudioHost: 'localhost',
+  lmStudioPort: '1234',
+  lmStudioUrl: '',
+  lmStudioMaxModels: '3',
+  lmStudioApiKey: '',
+  lmStudioApiKeyEnabled: false,
+  providerEnabled: { openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false },
+  removedProviders: [],
+};
 
 export default function SettingsPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState('providers');
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
-  // Load settings from localStorage
-  const loadSettings = () => {
+  // ---- State (must be before any function that references these) ----
+  const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS, ollamaBase: 'http://localhost:11434' });
+  const [providerEnabled, setProviderEnabled] = useState({ openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false });
+  const [showApiKey, setShowApiKey] = useState({ openai: false, anthropic: false, deepseek: false });
+  const [lmStudioApiKeyEnabled, setLmStudioApiKeyEnabled] = useState(false);
+  const [testStatus, setTestStatus] = useState({});
+  const [addProviderOpen, setAddProviderOpen] = useState(false);
+  const [removedProviders, setRemovedProviders] = useState(new Set());
+  const [hydrated, setHydrated] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [user, setUser] = useState(null);
+
+  // Password reset state
+  const [passwordCurrent, setPasswordCurrent] = useState('');
+  const [passwordNew, setPasswordNew] = useState('');
+  const [passwordConfirm, setPasswordConfirm] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordSuccess, setPasswordSuccess] = useState('');
+  const [passwordLoading, setPasswordLoading] = useState(false);
+
+  // ---- Utility functions (can reference state vars above) ----
+
+  // Load settings from server DB, fall back to localStorage
+  const loadSettingsFromDb = useCallback(async (token) => {
+    try {
+      const res = await fetch('/api/auth/provider-settings', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.settings) return data.settings;
+    } catch {}
+    return null;
+  }, []);
+
+  // Save settings to server DB
+  const saveSettingsToDb = useCallback(async (token, settingsData) => {
+    try {
+      await fetch('/api/auth/provider-settings', {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ settings: settingsData }),
+      });
+    } catch {}
+  }, []);
+
+  // Build a settings snapshot from current state
+  const buildSettingsSnapshot = useCallback(() => {
+    return {
+      ...settings,
+      lmStudioApiKeyEnabled,
+      providerEnabled,
+      removedProviders: [...removedProviders],
+    };
+  }, [settings, lmStudioApiKeyEnabled, providerEnabled, removedProviders]);
+
+  // Load settings from localStorage (fallback cache)
+  const loadProviderEnabledFromCache = () => {
+    try {
+      const stored = localStorage.getItem('PROVIDER_ENABLED');
+      if (stored) return JSON.parse(stored);
+    } catch {}
+    return { openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false };
+  };
+
+  const loadRemovedFromCache = () => {
+    try {
+      const stored = localStorage.getItem('PROVIDER_REMOVED');
+      if (stored) return JSON.parse(stored);
+    } catch {}
+    return [];
+  };
+
+  const loadSettingsFromCache = () => {
     try {
       return {
         openai: localStorage.getItem('OPENAI_API_KEY') || '',
@@ -23,52 +114,32 @@ export default function SettingsPage() {
         lmStudioUrl: localStorage.getItem('LM_STUDIO_URL') || '',
         lmStudioMaxModels: localStorage.getItem('LM_STUDIO_MAX_MODELS') || '3',
         lmStudioApiKey: localStorage.getItem('LM_STUDIO_API_KEY') || '',
+        lmStudioApiKeyEnabled: localStorage.getItem('LM_STUDIO_API_KEY_ENABLED') === 'true',
+        providerEnabled: loadProviderEnabledFromCache(),
+        removedProviders: loadRemovedFromCache(),
       };
     } catch {
-      return {
-        openai: '', anthropic: '', deepseek: '', ollamaBase: 'http://localhost:11434',
-        lmStudioHost: 'localhost', lmStudioPort: '1234', lmStudioUrl: '', lmStudioMaxModels: '3',
-        lmStudioApiKey: '',
-      };
+      return { ...DEFAULT_SETTINGS, providerEnabled: { ...DEFAULT_SETTINGS.providerEnabled }, removedProviders: [], lmStudioApiKeyEnabled: false };
     }
   };
 
-  const loadProviderEnabled = () => {
+  // Write settings to localStorage (sync cache)
+  const writeSettingsToCache = (s) => {
     try {
-      const stored = localStorage.getItem('PROVIDER_ENABLED');
-      if (stored) return JSON.parse(stored);
+      if (s.openai) localStorage.setItem('OPENAI_API_KEY', s.openai); else localStorage.removeItem('OPENAI_API_KEY');
+      if (s.anthropic) localStorage.setItem('ANTHROPIC_API_KEY', s.anthropic); else localStorage.removeItem('ANTHROPIC_API_KEY');
+      if (s.deepseek) localStorage.setItem('DEEPSEEK_API_KEY', s.deepseek); else localStorage.removeItem('DEEPSEEK_API_KEY');
+      if (s.ollamaBase) localStorage.setItem('OLLAMA_API_BASE', s.ollamaBase);
+      localStorage.setItem('LM_STUDIO_HOST', s.lmStudioHost || 'localhost');
+      localStorage.setItem('LM_STUDIO_PORT', s.lmStudioPort || '1234');
+      if (s.lmStudioUrl) localStorage.setItem('LM_STUDIO_URL', s.lmStudioUrl); else localStorage.removeItem('LM_STUDIO_URL');
+      localStorage.setItem('LM_STUDIO_MAX_MODELS', s.lmStudioMaxModels || '3');
+      if (s.lmStudioApiKey) localStorage.setItem('LM_STUDIO_API_KEY', s.lmStudioApiKey); else localStorage.removeItem('LM_STUDIO_API_KEY');
+      localStorage.setItem('LM_STUDIO_API_KEY_ENABLED', String(s.lmStudioApiKeyEnabled ?? false));
+      localStorage.setItem('PROVIDER_ENABLED', JSON.stringify(s.providerEnabled || {}));
+      localStorage.setItem('PROVIDER_REMOVED', JSON.stringify(s.removedProviders || []));
     } catch {}
-    // Default: enable providers that have keys, disable others
-    const s = loadSettings();
-    return {
-      openai: !!s.openai,
-      anthropic: !!s.anthropic,
-      deepseek: !!s.deepseek,
-      ollama: true,  // Ollama is always free/local — enabled by default
-      lmstudio: !!s.lmStudioUrl || !!s.lmStudioHost,
-    };
   };
-
-  const loadLmStudioApiKeyEnabled = () => {
-    try {
-      return localStorage.getItem('LM_STUDIO_API_KEY_ENABLED') === 'true';
-    } catch { return false; }
-  };
-
-  const [settings, setSettings] = useState(loadSettings);
-  const [providerEnabled, setProviderEnabled] = useState({
-    openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false
-  });
-  const [showApiKey, setShowApiKey] = useState({ openai: false, anthropic: false, deepseek: false });
-  const [lmStudioApiKeyEnabled, setLmStudioApiKeyEnabled] = useState(false); // toggle for LM Studio auth
-  const [testStatus, setTestStatus] = useState({});
-  const [addProviderOpen, setAddProviderOpen] = useState(false);
-  // Start empty for SSR — hydrated from localStorage in useEffect below
-  const [removedProviders, setRemovedProviders] = useState(new Set());
-  const [hydrated, setHydrated] = useState(false); // prevents flash of wrong cards before localStorage loads
-  const [isLoading, setIsLoading] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [user, setUser] = useState(null);
 
   // Billing state
   const [billingPeriod, setBillingPeriod] = useState('30d');
@@ -76,43 +147,82 @@ export default function SettingsPage() {
   const [dailyUsage, setDailyUsage] = useState(null);
   const [pricingData, setPricingData] = useState(null);
   const [billingLoading, setBillingLoading] = useState(false);
+  const [balanceData, setBalanceData] = useState(null);
 
-  const getDefaultRemoved = () => {
-    const s = loadSettings();
+  const getDefaultRemoved = (loadedSettings) => {
     const unconfigured = new Set();
-    if (!s.openai) unconfigured.add('openai');
-    if (!s.anthropic) unconfigured.add('anthropic');
-    if (!s.deepseek) unconfigured.add('deepseek');
-    if (!s.lmStudioUrl && !s.lmStudioApiKey) unconfigured.add('lmstudio');
+    if (!loadedSettings.openai) unconfigured.add('openai');
+    if (!loadedSettings.anthropic) unconfigured.add('anthropic');
+    if (!loadedSettings.deepseek) unconfigured.add('deepseek');
+    if (!loadedSettings.lmStudioUrl && !loadedSettings.lmStudioApiKey) unconfigured.add('lmstudio');
     return unconfigured;
   };
 
-  // Hydrate from localStorage on mount (client only — avoids SSR mismatch)
+  // Hydrate from server DB on mount, fall back to localStorage cache
   useEffect(() => {
-    setProviderEnabled(loadProviderEnabled());
-    setLmStudioApiKeyEnabled(loadLmStudioApiKeyEnabled());
-    // Hydrate removed providers from localStorage
-    try {
-      const stored = localStorage.getItem('PROVIDER_REMOVED');
-      if (stored) {
-        setRemovedProviders(new Set(JSON.parse(stored)));
-      } else {
-        setRemovedProviders(getDefaultRemoved());
+    let cancelled = false;
+    const hydrate = async () => {
+      const token = localStorage.getItem('auth_token');
+
+      // Try to load user info
+      if (token) {
+        try {
+          const payload = JSON.parse(atob(token.split('.')[1]));
+          if (!cancelled) setUser({ id: payload.userId, email: payload.email });
+        } catch {}
       }
-    } catch { /* keep empty set */ }
-    // Check auth
-    const token = localStorage.getItem('auth_token');
-    if (token) {
-      try {
-        const payload = JSON.parse(atob(token.split('.')[1]));
-        setUser({ id: payload.userId, email: payload.email });
-        if (!localStorage.getItem('LM_STUDIO_URL') && !localStorage.getItem('OPENAI_API_KEY') && !localStorage.getItem('ANTHROPIC_API_KEY') && !localStorage.getItem('DEEPSEEK_API_KEY') && !localStorage.getItem('OLLAMA_API_BASE')) {
-          loadKeysFromServer();
-        }
-      } catch {}
-    }
-    setHydrated(true);
-  }, []);
+
+      // Try DB first
+      const dbSettings = token ? await loadSettingsFromDb(token) : null;
+
+      if (dbSettings && !cancelled) {
+        // DB is the source of truth
+        setSettings({
+          openai: dbSettings.openai || '',
+          anthropic: dbSettings.anthropic || '',
+          deepseek: dbSettings.deepseek || '',
+          ollamaBase: dbSettings.ollamaBase || 'http://localhost:11434',
+          lmStudioHost: dbSettings.lmStudioHost || 'localhost',
+          lmStudioPort: dbSettings.lmStudioPort || '1234',
+          lmStudioUrl: dbSettings.lmStudioUrl || '',
+          lmStudioMaxModels: dbSettings.lmStudioMaxModels || '3',
+          lmStudioApiKey: dbSettings.lmStudioApiKey || '',
+        });
+        setProviderEnabled(dbSettings.providerEnabled || { openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false });
+        setLmStudioApiKeyEnabled(dbSettings.lmStudioApiKeyEnabled ?? false);
+        setRemovedProviders(new Set(dbSettings.removedProviders || []));
+
+        // Also sync to localStorage cache
+        writeSettingsToCache(dbSettings);
+      } else if (!cancelled) {
+        // Fall back to localStorage cache
+        const cached = loadSettingsFromCache();
+        setSettings({
+          openai: cached.openai || '',
+          anthropic: cached.anthropic || '',
+          deepseek: cached.deepseek || '',
+          ollamaBase: cached.ollamaBase || 'http://localhost:11434',
+          lmStudioHost: cached.lmStudioHost || 'localhost',
+          lmStudioPort: cached.lmStudioPort || '1234',
+          lmStudioUrl: cached.lmStudioUrl || '',
+          lmStudioMaxModels: cached.lmStudioMaxModels || '3',
+          lmStudioApiKey: cached.lmStudioApiKey || '',
+        });
+        setProviderEnabled(cached.providerEnabled || { openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false });
+        setLmStudioApiKeyEnabled(cached.lmStudioApiKeyEnabled ?? false);
+        // Compute removed from cached settings (missing keys = removed)
+        const computedRemoved = cached.removedProviders?.length > 0
+          ? new Set(cached.removedProviders)
+          : getDefaultRemoved(cached);
+        setRemovedProviders(computedRemoved);
+      }
+
+      if (!cancelled) setHydrated(true);
+    };
+
+    hydrate();
+    return () => { cancelled = true; };
+  }, [loadSettingsFromDb]);
 
   const handleSignOut = () => {
     localStorage.removeItem('auth_token');
@@ -121,7 +231,62 @@ export default function SettingsPage() {
     router.push('/');
   };
 
-  // Save provider keys to server (skips disabled providers)
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    setPasswordError('');
+    setPasswordSuccess('');
+
+    if (!passwordCurrent || !passwordNew || !passwordConfirm) {
+      setPasswordError('All fields are required');
+      return;
+    }
+    if (passwordNew.length < 8) {
+      setPasswordError('New password must be at least 8 characters');
+      return;
+    }
+    if (passwordNew !== passwordConfirm) {
+      setPasswordError('New passwords do not match');
+      return;
+    }
+
+    const token = localStorage.getItem('auth_token');
+    if (!token) {
+      setPasswordError('Not authenticated');
+      return;
+    }
+
+    setPasswordLoading(true);
+    try {
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          currentPassword: passwordCurrent,
+          newPassword: passwordNew,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setPasswordSuccess('Password updated successfully');
+        setPasswordCurrent('');
+        setPasswordNew('');
+        setPasswordConfirm('');
+      } else {
+        setPasswordError(data.error?.message || 'Failed to update password');
+      }
+    } catch {
+      setPasswordError('Network error — please try again');
+    } finally {
+      setPasswordLoading(false);
+    }
+  };
+
+  // Save provider keys to server keys table (for chat completions route compatibility)
+  // Also deletes keys for providers that are disabled or have empty config
   const syncKeysToServer = async () => {
     const token = localStorage.getItem('auth_token');
     if (!token) return;
@@ -133,49 +298,26 @@ export default function SettingsPage() {
       { id: 'LM_STUDIO', key: `http://${settings.lmStudioHost || 'localhost'}:${settings.lmStudioPort || '1234'}/v1`, name: 'LM Studio URL', providerKey: 'lmstudio' },
     ];
     for (const p of providers) {
-      if (!p.key) continue;
-      if (!providerEnabled[p.providerKey]) continue;
-      try {
-        await fetch('/api/auth/keys', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider: p.id, name: p.name, key: p.key })
-        });
-      } catch { /* Server sync is best-effort; localStorage is canonical */ }
+      const shouldHave = p.key && p.key !== 'http://localhost:1234/v1' && providerEnabled[p.providerKey];
+      if (shouldHave) {
+        // Create or update the key
+        try {
+          await fetch('/api/auth/keys', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: p.id, name: p.name, key: p.key })
+          });
+        } catch {}
+      } else {
+        // Delete keys for unconfigured or disabled providers
+        try {
+          await fetch(`/api/auth/keys?provider=${encodeURIComponent(p.id)}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${token}` },
+          });
+        } catch {}
+      }
     }
-  };
-
-  // Load provider keys from server (SQLite) and hydrate localStorage
-  const loadKeysFromServer = async () => {
-    const token = localStorage.getItem('auth_token');
-    if (!token) return;
-    try {
-      const res = await fetch('/api/auth/keys', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      const keys = data.keys || [];
-      let didRestore = false;
-      for (const k of keys) {
-        if (k.rawKey) {
-          const storageKey = k.provider === 'OLLAMA' ? 'OLLAMA_API_BASE'
-            : k.provider === 'LM_STUDIO' ? 'LM_STUDIO_URL'
-            : k.provider === 'DEEPSEEK' ? 'DEEPSEEK_API_KEY'
-            : `${k.provider.toUpperCase()}_API_KEY`;
-          // Only fill missing keys — localStorage is the source of truth
-          if (!localStorage.getItem(storageKey)) {
-            localStorage.setItem(storageKey, k.rawKey);
-            didRestore = true;
-          }
-        }
-      }
-      // If we restored keys, refresh which providers are visible
-      if (didRestore) {
-        setRemovedProviders(getDefaultRemoved());
-        setProviderEnabled(loadProviderEnabled());
-      }
-    } catch { /* Server unavailable — rely on localStorage */ }
   };
 
   // Fetch billing data (usage + pricing)
@@ -195,9 +337,10 @@ export default function SettingsPage() {
         startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
       }
 
-      const [usageRes, pricingRes] = await Promise.all([
+      const [usageRes, pricingRes, balanceRes] = await Promise.all([
         fetch(`/api/usage?startDate=${startDate || ''}&granularity=daily`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/providers/pricing', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/api/providers/balance', { headers: { Authorization: `Bearer ${token}` } }),
       ]);
 
       if (usageRes.ok) {
@@ -206,6 +349,7 @@ export default function SettingsPage() {
         setDailyUsage(data.daily || []);
       }
       if (pricingRes.ok) setPricingData(await pricingRes.json());
+      if (balanceRes.ok) setBalanceData(await balanceRes.json());
     } catch (err) {
       console.error('[Billing] Fetch error:', err.message);
     } finally {
@@ -222,19 +366,23 @@ export default function SettingsPage() {
     e?.preventDefault();
     setIsLoading(true);
     try {
-      if (settings.openai) localStorage.setItem('OPENAI_API_KEY', settings.openai);
-      if (settings.anthropic) localStorage.setItem('ANTHROPIC_API_KEY', settings.anthropic);
-      if (settings.deepseek) localStorage.setItem('DEEPSEEK_API_KEY', settings.deepseek);
-      localStorage.setItem('OLLAMA_API_BASE', settings.ollamaBase);
-      localStorage.setItem('LM_STUDIO_HOST', settings.lmStudioHost || 'localhost');
-      localStorage.setItem('LM_STUDIO_PORT', settings.lmStudioPort || '1234');
-      localStorage.setItem('LM_STUDIO_URL', `http://${settings.lmStudioHost || 'localhost'}:${settings.lmStudioPort || '1234'}/v1`);
-      localStorage.setItem('LM_STUDIO_MAX_MODELS', settings.lmStudioMaxModels || '3');
-      if (settings.lmStudioApiKey) localStorage.setItem('LM_STUDIO_API_KEY', settings.lmStudioApiKey);
-      else localStorage.removeItem('LM_STUDIO_API_KEY');
-      localStorage.setItem('LM_STUDIO_API_KEY_ENABLED', String(lmStudioApiKeyEnabled));
-      // Save provider enable/disable state
-      localStorage.setItem('PROVIDER_ENABLED', JSON.stringify(providerEnabled));
+      // Save to localStorage as cache
+      writeSettingsToCache({
+        ...settings,
+        lmStudioApiKeyEnabled,
+        providerEnabled,
+        removedProviders: [...removedProviders],
+      });
+
+      // Save to server DB (source of truth)
+      const token = localStorage.getItem('auth_token');
+      if (token) {
+        await saveSettingsToDb(token, buildSettingsSnapshot());
+      }
+
+      // Sync API keys to the keys table for chat completions
+      await syncKeysToServer();
+
       // Providers that now have keys should be un-removed
       setRemovedProviders(prev => {
         const next = new Set(prev);
@@ -242,11 +390,8 @@ export default function SettingsPage() {
         if (settings.anthropic) next.delete('anthropic');
         if (settings.deepseek) next.delete('deepseek');
         if (settings.lmStudioApiKey || (settings.lmStudioHost !== 'localhost' || settings.lmStudioPort !== '1234')) next.delete('lmstudio');
-        localStorage.setItem('PROVIDER_REMOVED', JSON.stringify([...next]));
         return next;
       });
-      // Sync to server so keys survive cache clears
-      await syncKeysToServer();
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (error) {
@@ -257,11 +402,7 @@ export default function SettingsPage() {
   };
 
   const toggleProvider = (key) => {
-    setProviderEnabled(prev => {
-      const next = { ...prev, [key]: !prev[key] };
-      localStorage.setItem('PROVIDER_ENABLED', JSON.stringify(next));
-      return next;
-    });
+    setProviderEnabled(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
   const testProviderKey = async (providerId) => {
@@ -286,8 +427,20 @@ export default function SettingsPage() {
     }
   };
 
-  // Delete a provider's configuration (clears keys from localStorage and settings state)
-  const deleteProvider = (providerId) => {
+  // Delete a provider's configuration (clears keys and removes from DB)
+  const deleteProvider = async (providerId) => {
+    // Compute final state synchronously
+    const nextSettings = { ...settings };
+    const nextProviderEnabled = { ...providerEnabled, [providerId]: false };
+    const nextRemoved = new Set(removedProviders);
+    nextRemoved.add(providerId);
+
+    if (providerId === 'openai') nextSettings.openai = '';
+    else if (providerId === 'anthropic') nextSettings.anthropic = '';
+    else if (providerId === 'deepseek') nextSettings.deepseek = '';
+    else if (providerId === 'ollama') nextSettings.ollamaBase = 'http://localhost:11434';
+    else if (providerId === 'lmstudio') { nextSettings.lmStudioUrl = ''; nextSettings.lmStudioHost = 'localhost'; nextSettings.lmStudioPort = '1234'; nextSettings.lmStudioApiKey = ''; }
+
     const storageKeys = {
       openai: ['OPENAI_API_KEY'],
       anthropic: ['ANTHROPIC_API_KEY'],
@@ -295,41 +448,55 @@ export default function SettingsPage() {
       ollama: ['OLLAMA_API_BASE'],
       lmstudio: ['LM_STUDIO_URL', 'LM_STUDIO_HOST', 'LM_STUDIO_PORT', 'LM_STUDIO_API_KEY'],
     };
-    const keys = storageKeys[providerId] || [];
-    keys.forEach(k => localStorage.removeItem(k));
+    // Clean localStorage cache
+    (storageKeys[providerId] || []).forEach(k => localStorage.removeItem(k));
 
-    // Disable the provider
-    setProviderEnabled(prev => {
-      const next = { ...prev, [providerId]: false };
-      localStorage.setItem('PROVIDER_ENABLED', JSON.stringify(next));
-      return next;
-    });
-
-    // Clear settings state
-    setSettings(prev => {
-      const next = { ...prev };
-      if (providerId === 'openai') next.openai = '';
-      else if (providerId === 'anthropic') next.anthropic = '';
-      else if (providerId === 'deepseek') next.deepseek = '';
-      else if (providerId === 'ollama') next.ollamaBase = 'http://localhost:11434';
-      else if (providerId === 'lmstudio') { next.lmStudioUrl = ''; next.lmStudioHost = 'localhost'; next.lmStudioPort = '1234'; next.lmStudioApiKey = ''; }
-      return next;
-    });
-
-    // Clear test status for this provider
+    // Update all state
+    setSettings(nextSettings);
+    setProviderEnabled(nextProviderEnabled);
+    setRemovedProviders(nextRemoved);
     setTestStatus(prev => {
       const next = { ...prev };
       delete next[providerId];
       return next;
     });
 
-    // Mark as removed so the card disappears from view
-    setRemovedProviders(prev => {
-      const next = new Set(prev);
-      next.add(providerId);
-      localStorage.setItem('PROVIDER_REMOVED', JSON.stringify([...next]));
-      return next;
-    });
+    // Persist to server DB
+    const token = localStorage.getItem('auth_token');
+    if (token) {
+      const providerMap = {
+        openai: 'OPENAI', anthropic: 'ANTHROPIC', deepseek: 'DEEPSEEK',
+        ollama: 'OLLAMA', lmstudio: 'LM_STUDIO',
+      };
+      const dbProvider = providerMap[providerId];
+      if (dbProvider) {
+        try {
+          await fetch(`/api/auth/keys?provider=${encodeURIComponent(dbProvider)}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+          });
+        } catch {}
+      }
+      // Save updated provider settings to DB
+      const snapshot = {
+        openai: nextSettings.openai,
+        anthropic: nextSettings.anthropic,
+        deepseek: nextSettings.deepseek,
+        ollamaBase: nextSettings.ollamaBase,
+        lmStudioHost: nextSettings.lmStudioHost,
+        lmStudioPort: nextSettings.lmStudioPort,
+        lmStudioUrl: nextSettings.lmStudioUrl,
+        lmStudioMaxModels: nextSettings.lmStudioMaxModels,
+        lmStudioApiKey: nextSettings.lmStudioApiKey,
+        lmStudioApiKeyEnabled,
+        providerEnabled: nextProviderEnabled,
+        removedProviders: [...nextRemoved],
+      };
+      try {
+        await saveSettingsToDb(token, snapshot);
+        writeSettingsToCache(snapshot);
+      } catch {}
+    }
   };
 
   const tabs = [
@@ -643,10 +810,8 @@ export default function SettingsPage() {
                       onClick={() => {
                         setLmStudioApiKeyEnabled(prev => {
                           const next = !prev;
-                          localStorage.setItem('LM_STUDIO_API_KEY_ENABLED', String(next));
                           if (!next) {
                             setSettings(s => ({ ...s, lmStudioApiKey: '' }));
-                            localStorage.removeItem('LM_STUDIO_API_KEY');
                           }
                           return next;
                         });
@@ -817,6 +982,7 @@ export default function SettingsPage() {
               usageData={usageData}
               dailyUsage={dailyUsage}
               pricingData={pricingData}
+              balanceData={balanceData}
               loading={billingLoading}
             />
           )}
@@ -845,6 +1011,56 @@ export default function SettingsPage() {
                     </a>
                   </div>
                 )}
+              </div>
+
+              <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
+                <h3 className="text-base font-medium text-white mb-2">Reset Password</h3>
+                <p className="text-sm text-zinc-500 mb-4">Change your account password.</p>
+                <form onSubmit={handleChangePassword} className="space-y-3 max-w-sm">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">Current Password</label>
+                    <input
+                      type="password"
+                      value={passwordCurrent}
+                      onChange={(e) => { setPasswordCurrent(e.target.value); setPasswordError(''); setPasswordSuccess(''); }}
+                      placeholder="Enter current password"
+                      className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">New Password</label>
+                    <input
+                      type="password"
+                      value={passwordNew}
+                      onChange={(e) => { setPasswordNew(e.target.value); setPasswordError(''); setPasswordSuccess(''); }}
+                      placeholder="At least 8 characters"
+                      className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-1">Confirm New Password</label>
+                    <input
+                      type="password"
+                      value={passwordConfirm}
+                      onChange={(e) => { setPasswordConfirm(e.target.value); setPasswordError(''); setPasswordSuccess(''); }}
+                      placeholder="Re-enter new password"
+                      className="w-full bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                    />
+                  </div>
+                  {passwordError && (
+                    <p className="text-sm text-red-400">{passwordError}</p>
+                  )}
+                  {passwordSuccess && (
+                    <p className="text-sm text-emerald-400">{passwordSuccess}</p>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={passwordLoading}
+                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {passwordLoading ? 'Updating...' : 'Update Password'}
+                  </button>
+                </form>
               </div>
 
               <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-6">
@@ -1130,7 +1346,7 @@ function UsageGraph({ dailyUsage, fmtTokens }) {
 }
 
 // Billing tab component — shows usage, cost breakdowns, and savings
-function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData, loading }) {
+function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData, balanceData, loading }) {
   const periods = [
     { id: 'today', label: 'Today' },
     { id: '7d', label: '7 Days' },
@@ -1149,16 +1365,27 @@ function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData
     }
   }
 
-  // Helper: get pricing for a provider+model combination (exact first, then wildcard)
+  // Helper: get pricing for a provider+model combination (exact first, then wildcard, then cross-provider)
   const getPricing = (provider, model) => {
+    // Exact match
     const exact = pricingLookup[`${provider}/${model}`];
-    if (exact) return exact;
+    if (exact && exact.input > 0) return exact;
+    // Wildcard match for same provider
     const wildcard = pricingLookup[`${provider}/*`];
+    if (wildcard && wildcard.input > 0) return wildcard;
+    // Cross-provider fallback: if the model name suggests a different provider, try that
+    if (model.startsWith('deepseek-') && provider !== 'deepseek') {
+      const crossExact = pricingLookup[`deepseek/${model}`];
+      if (crossExact && crossExact.input > 0) return crossExact;
+      const crossWildcard = pricingLookup[`deepseek/*`];
+      if (crossWildcard && crossWildcard.input > 0) return crossWildcard;
+    }
+    // Return existing wildcard even if input=0 (for ollama/lmstudio free local models)
     if (wildcard) return wildcard;
     return { input: 0, output: 0 };
   };
 
-  // Compute costs from usage data
+  // Compute costs from usage data (with DeepSeek cache hit discount: hit tokens = 10% of input price)
   const computeCosts = () => {
     if (!usageData?.byProvider) return { providerBreakdown: [], totalCost: 0, cloudSavings: 0 };
     const breakdown = [];
@@ -1170,7 +1397,19 @@ function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData
 
       for (const [model, modelData] of Object.entries(data.byModel)) {
         const prices = getPricing(provider, model);
-        const cost = ((modelData.promptTokens * prices.input) + (modelData.completionTokens * prices.output)) / 1_000_000;
+        const cacheHitTokens = modelData.promptCacheHitTokens || 0;
+        const cacheMissTokens = modelData.promptCacheMissTokens || 0;
+        // If cache fields are populated, split prompt tokens; otherwise treat all as miss tokens
+        const hasCacheData = (cacheHitTokens + cacheMissTokens) > 0;
+        const effectiveMiss = hasCacheData ? cacheMissTokens : modelData.promptTokens;
+        const effectiveHit = hasCacheData ? cacheHitTokens : 0;
+        // Cache hits cost 10% of input price
+        const cacheHitPrice = prices.input * 0.1;
+        const cost = (
+          (effectiveMiss * prices.input) +
+          (effectiveHit * cacheHitPrice) +
+          (modelData.completionTokens * prices.output)
+        ) / 1_000_000;
         providerCost += cost;
         models.push({
           model,
@@ -1181,6 +1420,9 @@ function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData
           inputPrice: prices.input,
           outputPrice: prices.output,
           cost,
+          cacheHitTokens: effectiveHit,
+          cacheMissTokens: effectiveMiss,
+          cacheSavings: effectiveHit > 0 ? (effectiveHit * prices.input * 0.9) / 1_000_000 : 0,
         });
       }
 
@@ -1254,6 +1496,50 @@ function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData
         ))}
       </div>
 
+      {/* Balance Cards */}
+      {balanceData?.providers?.deepseek && (
+        <div className="bg-gradient-to-r from-emerald-950/30 to-indigo-950/20 border border-zinc-800/40 rounded-xl p-5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-indigo-600/30 flex items-center justify-center">
+                <svg className="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeWidth={1.5} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-xs text-zinc-400">DeepSeek Balance</p>
+                {balanceData.providers.deepseek.available ? (
+                  <p className="text-lg font-semibold text-emerald-400">
+                    ${balanceData.providers.deepseek.totalAvailable.toFixed(2)}
+                    <span className="text-xs text-zinc-500 font-normal ml-1">
+                      {balanceData.providers.deepseek.currency}
+                    </span>
+                  </p>
+                ) : balanceData.providers.deepseek.reason === 'no_key' ? (
+                  <p className="text-sm text-zinc-500">Add API key in Providers</p>
+                ) : (
+                  <p className="text-sm text-amber-400">Balance unavailable</p>
+                )}
+              </div>
+            </div>
+            {balanceData.providers.deepseek.available && balanceData.providers.deepseek.grantedBalance > 0 && (
+              <div className="text-right">
+                <p className="text-[10px] text-zinc-500">Granted</p>
+                <p className="text-xs text-zinc-400">${balanceData.providers.deepseek.grantedBalance.toFixed(2)}</p>
+              </div>
+            )}
+          </div>
+          {balanceData.providers.deepseek.available && (
+            <div className="mt-2 pt-2 border-t border-zinc-800/40 flex gap-3 text-[10px] text-zinc-600">
+              <span>Topped-up: ${balanceData.providers.deepseek.toppedUpBalance.toFixed(2)}</span>
+              {balanceData.providers.deepseek.grantedBalance > 0 && (
+                <span>Granted: ${balanceData.providers.deepseek.grantedBalance.toFixed(2)}</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-zinc-900/50 border border-zinc-800/40 rounded-xl p-5">
@@ -1286,6 +1572,26 @@ function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData
         </div>
       )}
 
+      {/* Savings Highlight */}
+      {localProviders.length > 0 && (
+        <div className="bg-green-950/20 border border-green-800/30 rounded-xl p-5">
+          <div className="flex items-start gap-3">
+            <div className="w-8 h-8 rounded-lg bg-green-600/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+              <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <div>
+              <h4 className="text-sm font-medium text-green-400">Local Model Savings</h4>
+              <p className="text-xs text-green-600/80 mt-1">
+                You processed {fmtTokens(localTokens)} tokens via local models ({localProviders.map(p => p.provider).join(', ')}),
+                saving an estimated {fmtCost(estimatedSavings)} compared to running the same workload through a cloud provider.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Provider Breakdown */}
       {providerBreakdown.length > 0 ? (
         <div className="space-y-4">
@@ -1308,10 +1614,16 @@ function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData
                       <span className="text-zinc-300 truncate block">{m.model}</span>
                       <span className="text-xs text-zinc-500">
                         {fmtTokens(m.promptTokens)} in · {fmtTokens(m.completionTokens)} out · {m.requestCount} req
+                        {m.cacheHitTokens > 0 && (
+                          <span className="text-emerald-600"> · {fmtTokens(m.cacheHitTokens)} cached (10% cost)</span>
+                        )}
                       </span>
                     </div>
                     <div className="text-right ml-4">
                       <span className="text-zinc-200 font-mono text-xs">{fmtCost(m.cost)}</span>
+                      {m.cacheSavings > 0 && (
+                        <span className="block text-[10px] text-emerald-600">-{fmtCost(m.cacheSavings)}</span>
+                      )}
                       {(m.inputPrice > 0 || m.outputPrice > 0) && (
                         <span className="block text-[10px] text-zinc-600">
                           ${m.inputPrice}/M in · ${m.outputPrice}/M out
@@ -1350,25 +1662,7 @@ function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData
         </div>
       )}
 
-      {/* Savings Highlight */}
-      {localProviders.length > 0 && (
-        <div className="bg-green-950/20 border border-green-800/30 rounded-xl p-5">
-          <div className="flex items-start gap-3">
-            <div className="w-8 h-8 rounded-lg bg-green-600/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-              <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </div>
-            <div>
-              <h4 className="text-sm font-medium text-green-400">Local Model Savings</h4>
-              <p className="text-xs text-green-600/80 mt-1">
-                You processed {fmtTokens(localTokens)} tokens via local models ({localProviders.map(p => p.provider).join(', ')}),
-                saving an estimated {fmtCost(estimatedSavings)} compared to running the same workload through a cloud provider.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
+
     </div>
   );
 }

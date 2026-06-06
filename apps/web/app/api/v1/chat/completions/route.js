@@ -59,10 +59,10 @@ const loadUserKeysFromStorage = async (userId) => {
 const extractKeysFromHeaders = async (request) => {
   const headerKeys = {
     lmStudioUrl: request.headers.get('x-lmstudio-url') || '',
-    lmStudioHost: request.headers.get('x-lmstudio-host') || process.env.LM_STUDIO_HOST || '',
-    lmStudioPort: request.headers.get('x-lmstudio-port') || process.env.LM_STUDIO_PORT || '',
-    lmStudioApiKey: request.headers.get('x-lmstudio-api-key') || process.env.LM_STUDIO_API_KEY || '',
-    deepseek: request.headers.get('x-deepseek-key') || process.env.DEEPSEEK_API_KEY || '',
+    lmStudioHost: request.headers.get('x-lmstudio-host') || '',
+    lmStudioPort: request.headers.get('x-lmstudio-port') || '',
+    lmStudioApiKey: request.headers.get('x-lmstudio-api-key') || '',
+    deepseek: request.headers.get('x-deepseek-key') || '',
   };
 
   // If user is authenticated, merge user-scoped keys (they take priority)
@@ -111,6 +111,8 @@ const getProviders = (keys) => {
  */
 const normalizeToOpenAIFormat = (data, providerId, modelName) => {
   // DeepSeek / LM Studio — already OpenAI-compatible
+  // Preserve cache hit tokens when present (DeepSeek disk cache)
+  const usage = data.usage || {};
   return {
     id: data.id || `chatcmpl-${Date.now()}`,
     object: 'chat.completion',
@@ -121,10 +123,12 @@ const normalizeToOpenAIFormat = (data, providerId, modelName) => {
       message: { role: 'assistant', content: data.message?.content || '' },
       finish_reason: 'stop'
     }],
-    usage: data.usage || {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0
+    usage: {
+      prompt_tokens: usage.prompt_tokens || 0,
+      completion_tokens: usage.completion_tokens || 0,
+      total_tokens: usage.total_tokens || 0,
+      prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens || 0,
+      prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens || 0,
     },
     system_fingerprint: 'fp_aurora'
   };
@@ -147,9 +151,22 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens,
 
     case 'deepseek':
       // DeepSeek uses OpenAI-compatible API
+      // Thinking mode uses { "thinking": {"type": "enabled"} } + reasoning_effort (NOT extended_thinking)
+      // In thinking mode temperature/top_p are ignored by DeepSeek
       url = `${provider.baseUrl}/chat/completions`;
       headers['Authorization'] = `Bearer ${provider.apiKey}`;
-      body = { model, messages, temperature, max_tokens: maxTokens, stream, ...extraParams };
+      body = {
+        model,
+        messages,
+        max_tokens: maxTokens,
+        stream,
+        ...extraParams,
+        // Only add temperature/top_p if NOT in thinking mode
+        ...(extraParams.thinking || extraParams.reasoning_effort
+          ? {}
+          : { temperature }
+        ),
+      };
       break;
 
     default:
@@ -183,13 +200,21 @@ export async function POST(request) {
     const keys = await extractKeysFromHeaders(request);
     const providers = getProviders(keys);
 
-    // Select provider: requested > openai/anthropic (if keyed) > ollama (fallback)
+    // Select provider: explicit request > model-name match > first available
     let selectedProvider = null;
 
     if (requestedProvider) {
       selectedProvider = providers.find(p => p.id === requestedProvider);
+      if (!selectedProvider) {
+        // User explicitly asked for a provider that has no API key configured.
+        // Do NOT silently fall back to another provider — that would route to the wrong model.
+        return NextResponse.json(
+          { error: { message: `Provider "${requestedProvider}" is not configured. Add an API key for it in Settings, or select a different model.`, type: 'configuration_error' } },
+          { status: 400 }
+        );
+      }
     }
-    
+
     if (!selectedProvider) {
       // Prefer provider that matches the model name
       if (model.startsWith('deepseek-') && keys.deepseek) {
@@ -198,7 +223,7 @@ export async function POST(request) {
     }
 
     if (!selectedProvider) {
-      // Pick first available provider (LM Studio doesn't require API key for local)
+      // Pick first available provider
       selectedProvider = providers[0];
     }
 
@@ -212,8 +237,12 @@ export async function POST(request) {
     // Build and send the provider request
     const streamMode = body.stream === true;
     const extraParams = {};
+    // Anthropic-format thinking (LM Studio / Anthropic)
     if (body.extended_thinking) extraParams.extended_thinking = true;
     if (body.thinking) extraParams.thinking = body.thinking;
+    // OpenAI-format thinking (DeepSeek): reasoning_effort + thinking: { type: "enabled" }
+    if (body.reasoning_effort) extraParams.reasoning_effort = body.reasoning_effort;
+    if (body.thinking_type === 'enabled') extraParams.thinking = { type: 'enabled' };
     const { url, body: providerBody, headers } = buildProviderRequest(
       selectedProvider, model, messages, temperature, body.max_tokens, streamMode, extraParams
     );
@@ -251,6 +280,9 @@ export async function POST(request) {
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
 
+      // Capture the final usage payload from the last SSE data chunk (with finish_reason: "stop")
+      let finalUsage = null;
+
       const stream = new ReadableStream({
         async start(controller) {
           let buffer = '';
@@ -268,10 +300,18 @@ export async function POST(request) {
               }
               const chunk = decoder.decode(value, { stream: true });
               buffer += chunk;
-              // Relay SSE events as-is
+              // Relay SSE events as-is; capture usage from the last data chunk (finish_reason: stop)
               const lines = buffer.split('\n');
               buffer = lines.pop() || '';
               for (const line of lines) {
+                if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                  try {
+                    const parsed = JSON.parse(line.slice(6));
+                    if (parsed.usage) {
+                      finalUsage = parsed.usage;
+                    }
+                  } catch {}
+                }
                 controller.enqueue(encoder.encode(line + '\n'));
               }
             }
@@ -282,16 +322,65 @@ export async function POST(request) {
         }
       });
 
-      // Track usage — fire and forget for streaming too
+      // Track streaming usage — insert placeholder, then update when usage arrives
       const userId = getUserId(request);
       if (userId) {
         try {
           runMigrations();
           const db = getDb();
-          db.prepare(`
-            INSERT INTO usage_records (user_id, provider, model, prompt_tokens, completion_tokens, total_tokens)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `).run(userId, selectedProvider.id, model, 0, 0, 0);
+          const result = db.prepare(`
+            INSERT INTO usage_records (user_id, provider, model, prompt_tokens, completion_tokens, total_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(userId, selectedProvider.id, model, 0, 0, 0, 0, 0);
+
+          // After stream completes, update with actual usage (including cache tokens)
+          const usageRecordId = result.lastInsertRowid;
+          const updateUsage = () => {
+            try {
+              if (finalUsage) {
+                db.prepare(`
+                  UPDATE usage_records
+                  SET prompt_tokens = ?, completion_tokens = ?, total_tokens = ?,
+                      prompt_cache_hit_tokens = ?, prompt_cache_miss_tokens = ?
+                  WHERE rowid = ?
+                `).run(
+                  finalUsage.prompt_tokens || 0,
+                  finalUsage.completion_tokens || 0,
+                  finalUsage.total_tokens || 0,
+                  finalUsage.prompt_cache_hit_tokens || 0,
+                  finalUsage.prompt_cache_miss_tokens || 0,
+                  usageRecordId
+                );
+              }
+            } catch (err) {
+              console.error('[Aurora] Failed to update stream usage:', err.message);
+            }
+          };
+
+          // Schedule update after stream finishes (won't block response)
+          const scheduledStream = new ReadableStream({
+            async start(controller) {
+              const reader = stream.getReader();
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  updateUsage();
+                  controller.close();
+                  break;
+                }
+                controller.enqueue(value);
+              }
+            }
+          });
+
+          return new Response(scheduledStream, {
+            headers: {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+              'X-Provider': selectedProvider.id
+            }
+          });
         } catch (err) {
           console.error('[Aurora] Failed to track usage:', err.message);
         }
@@ -319,15 +408,17 @@ export async function POST(request) {
         runMigrations();
         const db = getDb();
         db.prepare(`
-          INSERT INTO usage_records (user_id, provider, model, prompt_tokens, completion_tokens, total_tokens)
-          VALUES (?, ?, ?, ?, ?, ?)
+          INSERT INTO usage_records (user_id, provider, model, prompt_tokens, completion_tokens, total_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           userId,
           selectedProvider.id,
           model,
           normalized.usage?.prompt_tokens || 0,
           normalized.usage?.completion_tokens || 0,
-          normalized.usage?.total_tokens || 0
+          normalized.usage?.total_tokens || 0,
+          normalized.usage?.prompt_cache_hit_tokens || 0,
+          normalized.usage?.prompt_cache_miss_tokens || 0
         );
       } catch (err) {
         console.error('[Aurora] Failed to track usage:', err.message);

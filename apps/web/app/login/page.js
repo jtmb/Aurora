@@ -72,10 +72,26 @@ export default function LoginPage() {
     <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         {/* Logo & Tagline */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-indigo-600 mb-4">
-            <span className="text-white font-bold text-2xl">A</span>
-          </div>
+        <div className="text-center mb-4 inline-flex items-center gap-3">
+          <svg className="w-12 h-12" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+            <defs>
+              <linearGradient id="aurora-login-1" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#818cf8" />
+                <stop offset="100%" stopColor="#c084fc" />
+              </linearGradient>
+              <linearGradient id="aurora-login-2" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#a78bfa" />
+                <stop offset="100%" stopColor="#e879f9" />
+              </linearGradient>
+              <linearGradient id="aurora-login-3" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#c4b5fd" />
+                <stop offset="100%" stopColor="#f0abfc" />
+              </linearGradient>
+            </defs>
+            <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-login-1)" strokeWidth="1.5" opacity="0.9" />
+            <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-login-2)" strokeWidth="1.5" opacity="0.7" />
+            <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-login-3)" strokeWidth="1.5" opacity="0.5" />
+          </svg>
           <h1 className="text-2xl font-bold text-white tracking-tight">Aurora</h1>
           <p className="text-sm text-zinc-500 mt-1">Multi-model LLM API Gateway</p>
         </div>
@@ -197,7 +213,7 @@ export default function LoginPage() {
         <p className="text-center text-xs text-zinc-600 mt-6">
           {mode === 'signin' ? (
             <>
-              Don&apos;t have an account?{' '}
+              Don't have an account?{' '}
               <button onClick={() => switchMode('register')} className="text-indigo-400 hover:text-indigo-300 transition-colors">
                 Create one
               </button>

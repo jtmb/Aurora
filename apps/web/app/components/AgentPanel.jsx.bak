@@ -3,8 +3,6 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -43,14 +41,6 @@ export default function AgentPanel({
   const [workspaceAgentsMd, setWorkspaceAgentsMd] = useState(''); // AGENTS.md content for system prompt injection
   const planTodosRef = useRef(planTodos); // stays in sync for async loop access
   useEffect(() => { planTodosRef.current = planTodos; }, [planTodos]);
-  // Auto-resize textarea as user types
-  const textareaRef = useRef(null);
-  useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
-  }, [input]);
   const [planSummary, setPlanSummary] = useState('');
   const [planMessageId, setPlanMessageId] = useState(null); // id of the assistant message that contains the plan
   const modelDropdownRef = useRef(null);
@@ -65,25 +55,9 @@ export default function AgentPanel({
   const [showLearningsPanel, setShowLearningsPanel] = useState(false);
   const sessionErrorHashes = useRef(new Set()); // dedupe tool_error captures per session
 
-  // Count reasoning "steps" from thinking text (Copilot-style: "Finished with X steps")
-  const countSteps = (thinking) => {
-    if (!thinking) return 0;
-    const text = thinking.trim();
-    const paragraphs = text.split(/\n\s*\n/).filter(Boolean);
-    const stepLines = text.split('\n').filter(line => {
-      const trimmed = line.trim();
-      return /^\d+[\.\)]\s/.test(trimmed) || /^[-*•]\s/.test(trimmed) || /^(Step|Phase|Task)\s*\d/i.test(trimmed);
-    });
-    if (stepLines.length >= 2) return stepLines.length;
-    return paragraphs.length || 1;
-  };
-
-  // Dynamic thinking label based on content (Copilot-style)
+  // Dynamic thinking label based on content (mirrors page.js pattern)
   const getThinkingLabel = (thinking, streaming) => {
-    if (!streaming) {
-      const steps = countSteps(thinking);
-      return `Finished with ${steps} step${steps !== 1 ? 's' : ''}`;
-    }
+    if (!streaming) return 'Done';
     const t = (thinking || '').toLowerCase();
     if (/\b(?:analyz|break\s*down|examin|inspect|dissect|scrutiniz)\b/i.test(t)) return 'Analyzing';
     if (/\b(?:reason|think|logic|deduc|infer|conclude|ponder)\b/i.test(t)) return 'Reasoning';
@@ -790,25 +764,11 @@ export default function AgentPanel({
   };
 
   // Stop generation
-  const handleStop = async () => {
-    // Cancel server-side agent job
-    if (activeJobId && workspaceId) {
-      try {
-        const token = localStorage.getItem('auth_token');
-        await fetch(`/api/workspace/${workspaceId}/agent/run`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-      } catch (err) {
-        console.error('[AgentPanel] Failed to cancel job:', err.message);
-      }
+  const handleStop = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
     }
-
-    // Stop streaming state (polling useEffect will clean up interval)
-    setIsStreaming(false);
-    setIsThinking(false);
-    setActiveJobId(null);
-    if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
   };
 
   // Save a message to the workspace's chat via the API
@@ -1015,7 +975,7 @@ export default function AgentPanel({
     ].join('\n');
   };
 
-  // SERVER-DRIVEN AGENT: sends job to server-side runner, polls for updates
+  // AGENTIC LOOP: send message, parse tools, execute, feed results back to LLM, repeat
   const sendMessage = async (e) => {
     e?.preventDefault();
     if (!input.trim() || isStreaming) return;
@@ -1050,10 +1010,11 @@ export default function AgentPanel({
       : selectedProvider;
     saveMessageToChat('user', userContent, selectedModel, msgProvider, userMsg.id, userMsg.timestamp);
 
-    const effectiveMode = isPlanExecution ? 'agent' : agentMode;
-    let systemPrompt = buildSystemPrompt(workspaceId, activeFilePath, currentFileContent, effectiveMode);
+    let systemPrompt = buildSystemPrompt(workspaceId, activeFilePath, currentFileContent,
+      isPlanExecution ? 'agent' : agentMode);
 
     // Inject plan into system prompt so the model ALWAYS knows what remains.
+    // Flat task list format (Copilot-style) — no phases, just ordered tasks.
     if ((isPlanExecution || agentMode === 'agent') && planTodosRef.current.length > 0) {
       const todos = planTodosRef.current;
       const doneCount = todos.filter(t => t.done).length;
@@ -1070,60 +1031,1196 @@ export default function AgentPanel({
         planBlock += `You MUST complete THIS task before any other. Use a tool call NOW.\n`;
       }
       planBlock += `CRITICAL: Work on tasks IN ORDER. Do NOT skip or reorder.\n`;
+      planBlock += `After EVERY file write (create_file / replace_string_in_file), you MUST output a line like:\n`;
+      planBlock += `  [x] Task description from the plan\n`;
+      planBlock += `This marks progress. The system tracks [x] lines. Without them, progress shows 0.\n`;
       planBlock += `Do NOT stop until ALL tasks show [x]. If you think you're done but tasks remain, you are WRONG — keep going.\n`;
       systemPrompt = systemPrompt + planBlock;
     }
 
-    // ── Start the server-side agent job ──
-    try {
-      const token = localStorage.getItem('auth_token');
-      // Collect API keys from localStorage so the server-side runner can use them
-      const apiKeys = {
-        lmStudioUrl: localStorage.getItem('LM_STUDIO_URL') || '',
-        lmStudioHost: localStorage.getItem('LM_STUDIO_HOST') || '',
-        lmStudioPort: localStorage.getItem('LM_STUDIO_PORT') || '',
-        lmStudioApiKey: localStorage.getItem('LM_STUDIO_API_KEY') || '',
-        deepseekKey: localStorage.getItem('DEEPSEEK_API_KEY') || '',
-        openaiKey: localStorage.getItem('OPENAI_API_KEY') || '',
-        anthropicKey: localStorage.getItem('ANTHROPIC_API_KEY') || '',
-      };
-      const res = await fetch(`/api/workspace/${workspaceId}/agent/run`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          chatId: workspaceChatId,
-          userContent,
-          model: selectedModel,
-          provider: msgProvider,
-          thinkingEffort,
-          agentMode: effectiveMode,
-          systemPrompt,
-          apiKeys
-        })
-      });
+    // In agent mode, wrap the user message with FORCEFUL instructions
+    let effectiveUserContent = userContent;
+    let prefillMessages = [];
+    if (isPlanExecution || agentMode === 'agent') {
+      // ── FRAMEWORK DETECTION: if no framework specified, default to Next.js ──
+      const frameworkKeywords = /\b(next\.?js|nextjs|next\s*16|react|vue|angular|svelte|express|django|flask|fastapi|rails|laravel|static html|plain html|html only|vanilla js|python|go|rust|sveltekit|nuxt|remix|astro|gatsby|vite)\b/i;
+      const frameworkHint = frameworkKeywords.test(userContent) ? '' : '\n\nTECH STACK: Build this as a Next.js 16 + TypeScript + Tailwind CSS v3 project. Create files in the app/ directory (App Router). Do NOT use plain HTML.';
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error?.message || `Failed to start agent job (${res.status})`);
+      effectiveUserContent = `USER REQUEST: ${userContent}${frameworkHint}
+
+IMPORTANT: You are in AGENT MODE. DO NOT describe what you'll do.
+DO NOT ask questions. DO NOT explain your plan. ACT NOW.
+Use a TOOL CALL immediately. The workspace may be empty — create ALL needed files yourself.
+If you need to see what exists, use list_dir first.`;
+
+// On first turn in agent mode, add extra format guidance to the user message
+      if (messages.length === 0) {
+        effectiveUserContent = `USER REQUEST: ${userContent}${frameworkHint}
+
+IMPORTANT: You are in AGENT MODE. DO NOT describe what you'll do.
+DO NOT ask questions. DO NOT explain your plan. ACT NOW.
+Use a TOOL CALL immediately. The workspace may be empty — create ALL needed files yourself.
+If you need to see what exists, use list_dir first.
+
+EXAMPLE: The correct format for creating a file is:
+\`\`\`create_file filePath="src/index.html"
+<!DOCTYPE html><html>...</html>
+\`\`\`
+Content goes INSIDE the block body, NOT as a content="..." attribute.`;
       }
+    }
 
-      const data = await res.json();
-      setActiveJobId(data.jobId);
-      // Polling will start via the useEffect that watches isStreaming
-    } catch (err) {
-      setIsStreaming(false);
-      setIsThinking(false);
+    // When executing a plan, start with a fresh conversation.
+    // Old plan-mode messages contain restrictive rules ("NEVER use write/modify tools",
+    // "Only use read_file, list_dir, grep_search") that confuse the model in agent mode.
+    const contextMessages = isPlanExecution ? [] : messages.map(m => ({ role: m.role, content: m.content }));
+
+    // ── Agent mode: auto-generate plan before execution (Copilot-style Plan → Agent) ──
+    // Only when operating in pure Agent mode (not plan execution) and we don't have a plan yet.
+    if (!isPlanExecution && agentMode === 'agent' && planTodosRef.current.length === 0) {
+      setIsThinking(true);
+      // Show a plan-generation status message
+      const planGenId = `agent_plan_gen_${Date.now()}`;
       setMessages(prev => [...prev, {
-        id: `agent_err_${Date.now()}`,
+        id: planGenId,
         role: 'assistant',
-        content: `Error: ${err.message}`,
-        isError: true,
+        content: 'Generating implementation plan...',
+        isPlanGeneration: true,
         timestamp: new Date().toISOString(),
         turnId
       }]);
+      try {
+        // ── Framework detection for plan generation ──
+        const fwKeywords = /\b(next\.?js|nextjs|next\s*16|react|vue|angular|svelte|express|django|flask|fastapi|rails|laravel|static html|plain html|html only|vanilla js|python|go|rust|sveltekit|nuxt|remix|astro|gatsby|vite)\b/i;
+        const fwHint = fwKeywords.test(userContent) ? '' : ' DEFAULT STACK: Use Next.js 16 + TypeScript + Tailwind CSS v3 with app/ directory (App Router) unless specified otherwise. Plan files like package.json, tsconfig.json, app/layout.tsx, app/page.tsx, app/globals.css, tailwind.config.js, postcss.config.js.';
+        const planConv = [
+          { role: 'system', content: `You are a planning assistant. Given a user request, produce a structured implementation plan as a flat ordered checklist.${fwHint}
+
+Output format — ONLY this, nothing else:
+\`\`\`
+1. [ ] Task description (brief, actionable)
+2. [ ] Task description
+...
+\`\`\`
+
+RULES:
+- Each task must be a SINGLE concrete action (create file, install dep, add route, etc.)
+- Tasks must be in execution ORDER (dependencies first)
+- 5-15 tasks total
+- No multi-step tasks — one action per task
+- No "configure" or "set up" tasks — be specific about what files to create/modify
+- Include build/dev server task at the end
+- **⚠️ FILE CREATION**: All files MUST be created using the create_file tool. NEVER use shell commands (mkdir, touch, cat >, echo >). NEVER combine mkdir + touch in one task — split into separate create_file tasks. Each file is its own task.
+- NO text outside the code block. NO explanations.` },
+          { role: 'user', content: userContent.slice(0, 2000) }
+        ];
+        const { content: planContent } = await streamLLMCall(planConv, 'Planning', turnId);
+        const { todos, summary } = parsePlanTodos(planContent);
+        if (todos.length > 0) {
+          setPlanTodos(todos);
+          planTodosRef.current = todos;
+          setPlanSummary(summary);
+          setPlanMessageId(planGenId);
+          // Replace the loading message with the actual plan
+          setMessages(prev => prev.map(m =>
+            m.id === planGenId
+              ? { ...m, content: `**Implementation Plan**\n\n${todos.map((t, i) => `${i + 1}. [ ] ${t.text}`).join('\n')}`, isPlanCard: true }
+              : m
+          ));
+        } else {
+          // Plan generation failed — remove the dummy message and proceed anyway
+          setMessages(prev => prev.filter(m => m.id !== planGenId));
+        }
+      } catch {
+        setMessages(prev => prev.filter(m => m.id !== planGenId));
+      }
+    }
+
+    let conversation = [
+      { role: 'system', content: systemPrompt },
+      ...contextMessages,
+      ...prefillMessages,
+      { role: 'user', content: effectiveUserContent }
+    ];
+
+    const MAX_ITERATIONS = 50;
+    const originalRequest = userContent.slice(0, 500); // preserved across compactions
+    let checkpointTaken = false;
+    let compactedAt = -1; // track last compaction step to avoid compacting too frequently
+    let noToolStreak = 0; // break if model refuses tools 3x in a row with pending tasks
+    let planCompleted = false;   // plan mode finished — skip post-loop summary
+    let buildAttempted = false;   // track whether model has tried dev_server_start or build command
+    let buildVerificationRetries = 0; // avoid infinite injection loop
+    let barrenStreak = 0; // iterations without any file writes — break if too high
+    const fileManifest = []; // { path, action: 'created'|'modified', purpose }
+    const executionErrors = []; // recent error messages for compaction summary
+    const recentToolCalls = []; // [{ name, filePath }] for stuck detection
+    const recentToolResults = []; // [{ name, summary }] for repeated-result detection
+
+    try {
+      for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+        const label = iter > 0 ? `Step ${iter + 1}` : null;
+        const { content: rawContent, thinking, assistantId } = await streamLLMCall(conversation, label, turnId);
+        conversation.push({ role: 'assistant', content: rawContent });
+
+        // Parse tool calls from the response
+        // Extract natural-language purpose (text before first tool block) for compaction summary
+        const purposeMatch = rawContent.match(/^([\s\S]*?)```/);
+        const stepPurpose = purposeMatch ? purposeMatch[1].trim().slice(0, 100) : '';
+        const toolCalls = parseToolCalls(rawContent);
+        // Agent is done with tools — but check if plan has remaining tasks
+        if (toolCalls.length === 0) {
+          // Parse plan todos in plan mode when no tool calls (model is done exploring)
+          if (!isPlanExecution && agentMode === 'plan') {
+            const { todos, summary } = parsePlanTodos(rawContent);
+            if (todos.length > 0) {
+              setPlanTodos(todos);
+              planTodosRef.current = todos;
+              setPlanSummary(summary);
+              setPlanMessageId(assistantId);
+              // Mark message so renderer hides raw content
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId ? { ...m, isPlanResult: true } : m
+              ));
+
+              // Write PLAN.md to workspace (authoritative plan file, Copilot-style)
+              try {
+                const planMdContent = buildPlanMd(todos, summary, originalRequest);
+                await executeCreateFile(workspaceId, 'PLAN.md', planMdContent);
+              } catch (err) {
+                console.warn('[Agent] Failed to write PLAN.md:', err.message);
+              }
+
+              // Plan is complete — stop the loop.
+              // Execution will happen when the user clicks "Execute Plan".
+              planCompleted = true;
+              break;
+            }
+          }
+
+          // ── Existing no-tool handling ──
+          const stillPending = planTodosRef.current.filter(t => !t.done);
+          if (stillPending.length > 0) {
+            noToolStreak++;
+            if (noToolStreak >= 3) {
+              captureProblem('no_tool_streak',
+                'Model stopped producing tool calls 3x with pending tasks remaining',
+                `Pending: ${stillPending.map(t => t.text).join('; ')}`
+              );
+              // Run build verification if files were created before giving up
+              if (fileManifest.length > 0 && !buildAttempted) {
+                const bvResult = await runBuildVerification();
+                if (bvResult === 'built') break;
+              }
+              break;
+            }
+            const nextTask = stillPending[0];
+            const pendingList = stillPending.map(t => `- [ ] ${t.text}`).join('\n');
+            conversation.push({
+              role: 'user',
+              content: `You stopped but tasks remain. Your NEXT task is: ${nextTask.text}\n\nAll pending tasks:\n${pendingList}\n\nComplete the NEXT task NOW with a tool call. Do NOT respond without a tool call.`
+            });
+            continue; // Keep looping — don't break
+          }
+
+          // ── Programmatic build pipeline (also called from AbortError catch) ──
+          const runBuildVerification = async () => {
+            if (buildVerificationRetries >= 3) return false;
+            buildVerificationRetries++;
+            // Check for package.json — static projects just need a dev server
+            let hasPackageJson = false;
+            let allFiles = [];
+            try {
+              const treeRes = await fetch(`/api/workspace/${workspaceId}/tree?depth=3`);
+              const treeData = treeRes.ok ? await treeRes.json() : null;
+              allFiles = treeData?.tree ? flattenTree(treeData.tree) : [];
+              hasPackageJson = allFiles.some(f => (f.name || f) === 'package.json');
+            } catch {}
+            if (!hasPackageJson) {
+              buildAttempted = true;
+              try { const dr = await executeDevServerStart(workspaceId, null); if (dr?.running && onOpenPreview) onOpenPreview(); } catch {}
+              return 'built';
+            }
+            // ── Hallucination audit: verify every claimed created file exists on disk ──
+            const existingPaths = new Set(allFiles.map(f => f.path || f.name || ''));
+            const missingFiles = fileManifest
+              .filter(f => f.action === 'created')
+              .filter(f => !existingPaths.has(f.path))
+              .map(f => f.path);
+            if (missingFiles.length > 0) {
+              const mfList = missingFiles.join(', ');
+              captureProblem('tool_error',
+                `Hallucinated files: ${missingFiles.length} files in manifest do not exist on disk`,
+                `Missing: ${mfList}`
+              );
+              conversation.push({
+                role: 'user',
+                content: `⚠️ HALLUCINATION DETECTED: You claimed to create these files but they do NOT exist on disk:\n${missingFiles.map(f => `  - ${f}`).join('\n')}\n\nRe-create ALL missing files NOW with their full content. Then respond without tool calls to retry the build.`
+              });
+              buildAttempted = false;
+              return 'retry';
+            }
+            // ── Pre-build content audit: scan files for known bad patterns BEFORE running build ──
+            let preBuildAuditErrors = [];
+            try {
+              // Read package.json to detect tech stack
+              let pkg = {};
+              const allFilePaths = allFiles.map(f => f.path || f.name || '');
+              const pkgPath = allFilePaths.find(p => p === 'package.json' || p.endsWith('/package.json'));
+              if (pkgPath) {
+                try {
+                  const pkgRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filePath: pkgPath })
+                  });
+                  if (pkgRes.ok) {
+                    const pd = await pkgRes.json();
+                    try { pkg = JSON.parse(pd.content || '{}'); } catch {}
+                  }
+                } catch {}
+              }
+              const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+              const depNames = Object.keys(deps);
+              const hasTailwind3 = depNames.includes('tailwindcss') && (deps.tailwindcss || '').startsWith('^3');
+              const hasTailwindAny = depNames.includes('tailwindcss');
+
+              // Check 1: Tailwind v3 without postcss.config
+              if (hasTailwind3 || (hasTailwindAny && depNames.includes('postcss'))) {
+                const hasPostcssConfig = allFiles.some(f => {
+                  const n = (f.name || f.path || '').toLowerCase();
+                  return ['postcss.config.js','postcss.config.mjs','postcss.config.cjs'].includes(n);
+                });
+                if (!hasPostcssConfig) {
+                  preBuildAuditErrors.push('MISSING FILE: postcss.config.mjs — Tailwind v3 requires it with "tailwindcss" and "autoprefixer" as PostCSS plugins. Create it with: export default { plugins: { tailwindcss: {}, autoprefixer: {} } }');
+                }
+              }
+
+              // Check 2: globals.css or any .css file with v4 @import syntax when Tailwind v3 is installed
+              if (hasTailwind3) {
+                const cssFiles = allFiles.filter(f => (f.name || f.path || '').endsWith('.css'));
+                for (const cssFile of cssFiles.slice(0, 3)) {
+                  try {
+                    const fp = cssFile.path || cssFile.name;
+                    const cssRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ filePath: fp })
+                    });
+                    if (cssRes.ok) {
+                      const cd = await cssRes.json();
+                      const content = cd.content || '';
+                      if (/@import\s+["']tailwindcss["']/.test(content)) {
+                        preBuildAuditErrors.push(`WRONG SYNTAX in ${fp}: uses @import "tailwindcss" (Tailwind v4 syntax) but Tailwind v3 is installed. Replace with:\n@tailwind base;\n@tailwind components;\n@tailwind utilities;`);
+                      }
+                    }
+                  } catch {}
+                }
+              }
+
+              // Check 3: missing tailwind.config when tailwind v3 is used
+              if (hasTailwind3) {
+                const hasTailwindConfig = allFiles.some(f => {
+                  const n = (f.name || f.path || '').toLowerCase();
+                  return ['tailwind.config.js','tailwind.config.mjs','tailwind.config.ts'].includes(n);
+                });
+                if (!hasTailwindConfig) {
+                  preBuildAuditErrors.push('MISSING FILE: tailwind.config.js — Tailwind v3 requires it to scan source files for class names. Create it with content scanning "./app/**/*.{js,ts,jsx,tsx}"');
+                }
+              }
+
+              // Check 4: "next": "latest" or unpinned
+              if (deps.next === 'latest' || deps.next === '*') {
+                preBuildAuditErrors.push('BAD VERSION: "next": "latest" — pin to a specific version like "^15.0.3"');
+              }
+
+              // Check 4.5: Missing critical Next.js App Router files
+              // These are REQUIRED for the app to build — their absence will cause PageNotFoundError
+              if (depNames.includes('next')) {
+                const requiredFiles = ['app/page.tsx', 'app/page.jsx', 'src/app/page.tsx', 'src/app/page.jsx'];
+                const layoutFiles = ['app/layout.tsx', 'app/layout.jsx', 'src/app/layout.tsx', 'src/app/layout.jsx'];
+                const hasPage = requiredFiles.some(rf => allFiles.some(f => (f.path || f.name || '') === rf));
+                const hasLayout = layoutFiles.some(lf => allFiles.some(f => (f.path || f.name || '') === lf));
+                if (!hasPage) {
+                  preBuildAuditErrors.push('MISSING FILE: app/page.tsx — Next.js App Router requires a root page. Create app/page.tsx with a default export component.');
+                }
+                if (!hasLayout) {
+                  preBuildAuditErrors.push('MISSING FILE: app/layout.tsx — Next.js App Router requires a root layout. Create app/layout.tsx with default export wrapping children in <html> and <body>.');
+                }
+                // Also check for Pages Router files accidentally in app/ directory
+                const docFiles = allFiles.filter(f => {
+                  const n = (f.name || f.path || '').toLowerCase();
+                  return n === 'app/_document.tsx' || n === 'app/_document.jsx' || n === 'src/app/_document.tsx';
+                });
+                if (docFiles.length > 0) {
+                  preBuildAuditErrors.push(`WRONG FILE: ${docFiles[0].path || docFiles[0].name} — _document is a Pages Router concept. In App Router, use app/layout.tsx instead. DELETE this file.`);
+                }
+              }
+
+              // Check 5: missing 'use client' in files using client features
+              // ALWAYS scan — any Next.js project can have components needing 'use client'
+              const tsxFiles = allFiles.filter(f => {
+                const n = (f.name || f.path || '');
+                return n.endsWith('.tsx') || n.endsWith('.jsx');
+              });
+              for (const tsxFile of tsxFiles.slice(0, 10)) {
+                try {
+                  const fp = tsxFile.path || tsxFile.name;
+                  const tsxRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filePath: fp })
+                  });
+                  if (tsxRes.ok) {
+                    const cd = await tsxRes.json();
+                    const content = cd.content || '';
+                    const firstLine = content.trim().split('\n')[0] || '';
+                    const hasUseClient = /^["']use client["']/.test(firstLine);
+                    const usesClientFeatures = /\b(useState|useEffect|useRef|useCallback|useMemo|onClick\b|onChange\b|onSubmit\b|addEventListener|window\.|document\.|localStorage|sessionStorage|motion\.|AnimatePresence|framer-motion)\b/.test(content);
+                    if (usesClientFeatures && !hasUseClient) {
+                      preBuildAuditErrors.push(`MISSING DIRECTIVE: "${fp}" uses client features (hooks, event handlers, browser APIs, or framer-motion) but lacks "use client" at the top of the file`);
+                    }
+                  }
+                } catch {}
+              }
+            } catch (auditErr) { console.error('[pre-build-audit] Error:', auditErr); }
+
+            // If pre-build audit found violations, inject them as errors BEFORE build attempt
+            if (preBuildAuditErrors.length > 0) {
+              captureProblem('pre_build_audit',
+                `Pre-build audit found ${preBuildAuditErrors.length} violation(s)`,
+                preBuildAuditErrors.join('\n').slice(0, 500)
+              );
+              conversation.push({
+                role: 'user',
+                content: `⚠️ PRE-BUILD AUDIT found ${preBuildAuditErrors.length} problem(s) that WILL cause build or runtime failures. Fix ALL of these with tools, then respond without tool calls to retry:\n\n${preBuildAuditErrors.map((e, i) => `${i + 1}. ${e}`).join('\n\n')}`
+              });
+              buildAttempted = false;
+              return 'retry';
+            }
+
+            // ── Stop any running dev server first (we'll restart after build passes) ──
+            try {
+              const r = await fetch(`/api/workspace/${workspaceId}/dev-server`, { method: 'GET' });
+              if (r.ok) {
+                const ds = await r.json();
+                if (ds?.running) {
+                  try { await fetch(`/api/workspace/${workspaceId}/dev-server`, { method: 'DELETE' }); } catch {}
+                }
+              }
+            } catch {}
+            // ── Run npm install ──
+            let buildLog = '';
+            try {
+              const ir = await executeRunInTerminal(workspaceId, 'npm install --legacy-peer-deps');
+              if (!ir.success) buildLog += `[npm install] FAILED:\n${ir.stderr || ir.stdout || 'Unknown'}\n`;
+            } catch (err) { buildLog += `[npm install] Error: ${err.message}\n`; }
+            // ── Run build ──
+            if (!buildLog) {
+              try {
+                // Detect build command: check for next.config, vite.config, etc.
+                let buildCmd = 'npm run build';
+                try {
+                  const treeRes = await fetch(`/api/workspace/${workspaceId}/tree?depth=1`);
+                  const treeData = treeRes.ok ? await treeRes.json() : null;
+                  const files = treeData?.tree ? flattenTree(treeData.tree) : [];
+                  const fileNames = files.map(f => f.name || f);
+                  if (fileNames.some(n => n === 'next.config.js' || n === 'next.config.mjs' || n === 'next.config.ts')) {
+                    buildCmd = 'npx next build';
+                  } else if (fileNames.some(n => n === 'vite.config.js' || n === 'vite.config.ts')) {
+                    buildCmd = 'npx vite build';
+                  }
+                } catch {}
+                const br = await executeRunInTerminal(workspaceId, buildCmd);
+                if (!br.success) buildLog += `[${buildCmd}] FAILED:\n${(br.stderr || br.stdout || '').slice(0, 2000)}\n`;
+              } catch (err) { buildLog += `[build] Error: ${err.message}\n`; }
+            }
+            if (buildLog) {
+              captureProblem('build_failure',
+                `Build failed on attempt ${buildVerificationRetries}/3`,
+                buildLog.slice(0, 500)
+              );
+
+              // ── AUTO-FIX ENGINE: parse build errors & try to fix them programmatically ──
+              const autoFixes = [];
+              const autoFixErrors = [];
+
+              // Pattern 1: "Event handlers cannot be passed to Client Component props"
+              // Extract file path and add 'use client' directive
+              const evtHandlerMatch = buildLog.match(/Error: Event handlers cannot be passed to Client Component props[\s\S]*?\{onClick:/);
+              if (evtHandlerMatch) {
+                // The error references the parent component — find it in the tree
+                const errorContext = buildLog.slice(buildLog.indexOf('Event handlers'), buildLog.indexOf('Event handlers') + 2000);
+                // Look for import paths in the error: "Import trace for requested module:"
+                const importTrace = errorContext.match(/Import trace for requested module:[\s\S]*?\.\/(\S+)/);
+                const traceFiles = [...(errorContext.match(/\.\/(\S+\.(?:tsx|jsx))/g) || [])];
+                // Also parse "Export encountered an error on /page: /"
+                const pageMatch = errorContext.match(/Export encountered an error on (?:\/page:\s*)?\/?([\w\-.]+)/);
+                if (pageMatch || traceFiles.length > 0) {
+                  // The file that needs 'use client' is the first in the import trace
+                  // or the page file
+                  const candidateFiles = traceFiles.map(f => f.replace(/^\.\//, ''));
+                  if (pageMatch && pageMatch[1]) candidateFiles.push(`${pageMatch[1]}.tsx`);
+                  // Also check src/app patterns
+                  const srcMatches = [...(errorContext.match(/src\/\S+\.(?:tsx|jsx)/g) || [])];
+                  candidateFiles.push(...srcMatches);
+
+                  for (const cf of candidateFiles.slice(0, 5)) {
+                    try {
+                      // Try to read the file — if it exists and lacks 'use client', add it
+                      const readRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filePath: cf })
+                      });
+                      if (readRes.ok) {
+                        const fileData = await readRes.json();
+                        const fc = fileData.content || '';
+                        if (!/^["']use client["']/.test(fc.trim())) {
+                          const fixedContent = '"use client";\n' + fc;
+                          await fetch(`/api/workspace/${workspaceId}/write`, {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ path: cf, content: fixedContent })
+                          });
+                          autoFixes.push(`Added "use client" directive to ${cf}`);
+                        }
+                      }
+                    } catch (e) { autoFixErrors.push(`${cf}: ${e.message}`); }
+                  }
+                }
+                // If no trace files found, try the manifest files
+                if (autoFixes.length === 0) {
+                  const tsxFiles = fileManifest.filter(f => (f.path || '').endsWith('.tsx') || (f.path || '').endsWith('.jsx'));
+                  for (const mf of tsxFiles.slice(0, 5)) {
+                    try {
+                      const readRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filePath: mf.path })
+                      });
+                      if (readRes.ok) {
+                        const fileData = await readRes.json();
+                        const fc = fileData.content || '';
+                        const hasOnClick = /\bonClick\b/.test(fc);
+                        const hasUseClient = /^["']use client["']/.test(fc.trim());
+                        if (hasOnClick && !hasUseClient) {
+                          const fixedContent = '"use client";\n' + fc;
+                          await fetch(`/api/workspace/${workspaceId}/write`, {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ path: mf.path, content: fixedContent })
+                          });
+                          autoFixes.push(`Added "use client" directive to ${mf.path}`);
+                        }
+                      }
+                    } catch (e) { autoFixErrors.push(`${mf.path}: ${e.message}`); }
+                  }
+                }
+              }
+
+              // Pattern 2: "You're importing a component that needs useState" or similar
+              const needsHookMatch = buildLog.match(/You're importing a component that needs (useState|useEffect|useRef|useCallback|useMemo)/);
+              if (needsHookMatch && autoFixes.length === 0) {
+                // Similar to pattern 1 — add 'use client' to files with hooks
+                const tsxFiles = fileManifest.filter(f => (f.path || '').endsWith('.tsx') || (f.path || '').endsWith('.jsx'));
+                for (const mf of tsxFiles.slice(0, 5)) {
+                  try {
+                    const readRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ filePath: mf.path })
+                    });
+                    if (readRes.ok) {
+                      const fileData = await readRes.json();
+                      const fc = fileData.content || '';
+                      const usesHooks = /\b(useState|useEffect|useRef|useCallback|useMemo)\b/.test(fc);
+                      const hasUseClient = /^["']use client["']/.test(fc.trim());
+                      if (usesHooks && !hasUseClient) {
+                        const fixedContent = '"use client";\n' + fc;
+                        await fetch(`/api/workspace/${workspaceId}/write`, {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ path: mf.path, content: fixedContent })
+                        });
+                        autoFixes.push(`Added "use client" directive to ${mf.path} (needs hooks)`);
+                      }
+                    }
+                  } catch (e) { autoFixErrors.push(`${mf.path}: ${e.message}`); }
+                }
+              }
+
+              // Pattern 3: Tailwind v4 @import syntax when v3 is installed
+              const tailwindV4ImportMatch = buildLog.match(/@import\s+["']tailwindcss["']/);
+              if (tailwindV4ImportMatch) {
+                const cssFiles = fileManifest.filter(f => (f.path || '').endsWith('.css'));
+                for (const cf of cssFiles.slice(0, 3)) {
+                  try {
+                    const readRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ filePath: cf.path })
+                    });
+                    if (readRes.ok) {
+                      const fileData = await readRes.json();
+                      const fc = fileData.content || '';
+                      if (/@import\s+["']tailwindcss["']/.test(fc)) {
+                        const fixedContent = fc.replace(
+                          /@import\s+["']tailwindcss["']\s*;?/g,
+                          '@tailwind base;\n@tailwind components;\n@tailwind utilities;'
+                        );
+                        await fetch(`/api/workspace/${workspaceId}/write`, {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ path: cf.path, content: fixedContent })
+                        });
+                        autoFixes.push(`Replaced @import "tailwindcss" with @tailwind directives in ${cf.path}`);
+                      }
+                    }
+                  } catch (e) { autoFixErrors.push(`${cf.path}: ${e.message}`); }
+                }
+              }
+
+              // Pattern 4: Missing postcss.config with tailwindcss dependency
+              if (/Module not found.*autoprefixer|Error:.*PostCSS plugin.*tailwindcss.*requires.*autoprefixer|Cannot find module.*autoprefixer/i.test(buildLog)) {
+                // Create postcss.config.mjs if missing
+                try {
+                  const postcssPath = 'postcss.config.mjs';
+                  const postcssContent = 'export default {\n  plugins: {\n    tailwindcss: {},\n    autoprefixer: {},\n  },\n};\n';
+                  await fetch(`/api/workspace/${workspaceId}/write`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: postcssPath, content: postcssContent })
+                  });
+                  autoFixes.push('Created missing postcss.config.mjs');
+                } catch (e) { autoFixErrors.push(`postcss.config.mjs: ${e.message}`); }
+              }
+
+              // Pattern 5: _document.tsx in App Router — Pages Router file that breaks App Router builds
+              if (/Cannot find module for page: \/_document|PageNotFoundError.*_document/i.test(buildLog)) {
+                try {
+                  // Delete the _document.tsx from app/ directory
+                  const delRes = await fetch(`/api/workspace/${workspaceId}/file`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filePath: 'app/_document.tsx' })
+                  }).catch(() => null);
+                  // Also try other possible locations
+                  const altPaths = ['src/app/_document.tsx', '_document.tsx'];
+                  for (const alt of altPaths) {
+                    try {
+                      await fetch(`/api/workspace/${workspaceId}/file`, {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filePath: alt })
+                      });
+                    } catch {}
+                  }
+                  if (delRes?.ok) {
+                    autoFixes.push('Deleted app/_document.tsx — Pages Router file that breaks App Router builds. Use app/layout.tsx instead.');
+                  } else {
+                    autoFixes.push('Detected _document.tsx error — deleted conflicting file. Use app/layout.tsx for App Router.');
+                  }
+                  // Also remove from fileManifest
+                  const docIdx = fileManifest.findIndex(f => (f.path || '').includes('_document'));
+                  if (docIdx >= 0) fileManifest.splice(docIdx, 1);
+                } catch (e) { autoFixErrors.push(`_document cleanup: ${e.message}`); }
+              }
+
+              // Pattern 6: Missing page.tsx / page.jsx — model didn't create the main page file
+              if (/Cannot find module for page: \/|PageNotFoundError.*page/i.test(buildLog)) {
+                // Create a minimal page.tsx as fallback
+                const pagePath = 'app/page.tsx';
+                try {
+                  // First check if page.tsx already exists (might be in wrong directory)
+                  const checkRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filePath: pagePath })
+                  });
+                  if (!checkRes.ok) {
+                    // Create a minimal hero page that matches common patterns
+                    const fallbackContent = `"use client";
+
+export default function Home() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center p-24">
+      <h1 className="text-4xl font-bold">Welcome</h1>
+      <p className="mt-4 text-lg text-gray-600">This page was auto-generated as a fallback.</p>
+    </main>
+  );
+}
+`;
+                    await fetch(`/api/workspace/${workspaceId}/write`, {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ path: pagePath, content: fallbackContent })
+                    });
+                    autoFixes.push('Created fallback app/page.tsx — original page was missing');
+                    fileManifest.push({ path: pagePath, action: 'created', purpose: 'Auto-generated fallback page' });
+                  }
+                } catch (e) { autoFixErrors.push(`page.tsx fallback: ${e.message}`); }
+              }
+
+              // ── If auto-fixes were applied, re-run build immediately ──
+              if (autoFixes.length > 0) {
+                captureProblem('auto_fix',
+                  `Auto-fixed ${autoFixes.length} build error(s)`,
+                  autoFixes.join('; ') + (autoFixErrors.length ? ` Errors: ${autoFixErrors.join('; ')}` : ''),
+                  'Applied automatically by auto-heal engine'
+                );
+                // Re-run build (don't count as new retry attempt since it's part of this attempt)
+                let retryLog = '';
+                try {
+                  let buildCmd = 'npm run build';
+                  try {
+                    const treeRes = await fetch(`/api/workspace/${workspaceId}/tree?depth=1`);
+                    const treeData = treeRes.ok ? await treeRes.json() : null;
+                    const files = treeData?.tree ? flattenTree(treeData.tree) : [];
+                    const fileNames = files.map(f => f.name || f);
+                    if (fileNames.some(n => n === 'next.config.js' || n === 'next.config.mjs' || n === 'next.config.ts')) {
+                      buildCmd = 'npx next build';
+                    }
+                  } catch {}
+                  const br = await executeRunInTerminal(workspaceId, buildCmd);
+                  if (!br.success) retryLog = `[${buildCmd}] STILL FAILED after auto-fix:\n${(br.stderr || br.stdout || '').slice(0, 1500)}`;
+                } catch (err) { retryLog = `[build retry] Error: ${err.message}`; }
+
+                if (!retryLog) {
+                  // Auto-fix SUCCEEDED — build passed!
+                  captureProblem('build_failure', 'Build passed after auto-fix', autoFixes.join('; '), 'Auto-fixed by engine');
+                  // Fall through to build-succeeded path below
+                  buildLog = ''; // Clear build log so we proceed to success
+                } else {
+                  // Auto-fix didn't work — tell the model with remaining errors
+                  buildLog = `AUTO-FIX APPLIED: ${autoFixes.join('; ')}\n\nREMAINING BUILD ERRORS:\n${retryLog}`;
+                }
+              }
+
+              // If build log still has errors (auto-fix couldn't solve or wasn't applicable)
+              if (buildLog) {
+                // ── Look up known fixes from the global corpus ──
+                let knownFixes = '';
+                try {
+                  const cr = await fetch('/api/corpus');
+                  if (cr.ok) {
+                    const cd = await cr.json();
+                    const resolvedEntries = (cd.entries || []).filter(e => e.resolved && e.resolution);
+                    const errorKeywords = (buildLog.match(/Module not found|Can't resolve|Failed to compile|Syntax error|Type error|Expected|Unexpected token|Cannot find name|Cannot find module|Property .* does not exist|is not assignable|tailwind|postcss|@import|@tailwind|autoprefixer|globals\.css|Could not resolve|Unable to resolve/gi) || []);
+                    const matching = resolvedEntries.filter(e => {
+                      const text = `${e.problem} ${e.resolution} ${(e.context || '')}`.toLowerCase();
+                      return errorKeywords.some(kw => text.includes(kw.toLowerCase()));
+                    }).slice(0, 3);
+                    if (matching.length > 0) {
+                      knownFixes = '\n\n🔧 KNOWN FIXES for similar errors (from past builds):\n' +
+                        matching.map(e => `- Problem: ${e.problem.slice(0, 120)}\n  Fix: ${e.resolution}`).join('\n');
+                    }
+                  }
+                } catch { /* non-critical */ }
+                if (knownFixes) buildLog += knownFixes;
+                buildAttempted = false;
+                conversation.push({
+                  role: 'user',
+                  content: `BUILD FAILED (attempt ${buildVerificationRetries}/3). Fix these errors with tools, then respond without tool calls to retry:\n\n${buildLog}`
+                });
+                return 'retry';
+              }
+            }
+            // ── Build succeeded ──
+            captureProblem('build_failure', 'Build passed after failure', '', 'Fixed by iterative model corrections');
+            // Auto-resolve all recent build_failure entries for this workspace
+            const bfEntries = corpusEntries.filter(e => e.type === 'build_failure' && !e.resolved && (e.workspaceId || '').includes(workspaceId));
+            for (const e of bfEntries.slice(-3)) {
+              markProblemResolved(e.hash, 'Fixed by code changes during build verification');
+              // Also auto-create a global skill from each resolved entry so it persists across workspaces
+              try {
+                fetch(`/api/workspace/${workspaceId}/skills`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    name: `Fix: ${e.problem.slice(0, 80)}`,
+                    description: `Auto-fix from build failure in workspace ${workspaceId}`,
+                    applyTo: (e.type || '') === 'build_failure' ? 'nextjs, build, tailwind, typescript' : '',
+                    content: `# ${e.problem}\n\n## Resolution\n${e.resolution || 'Fixed by code changes during build verification'}\n\n## Context\n${e.context || 'Build failure auto-resolved'}`,
+                    scope: 'global'
+                  })
+                }).catch(() => {});
+              } catch {}
+            }
+            // Refresh corpus in state so learnings panel updates
+            try {
+              const rr = await fetch(`/api/workspace/${workspaceId}/corpus`);
+              if (rr.ok) { const rd = await rr.json(); setCorpusEntries(rd.entries || []); }
+            } catch {}
+            buildAttempted = true;
+            try {
+              const dr = await executeDevServerStart(workspaceId, null);
+              if (onOpenPreview) onOpenPreview();
+              const pm = dr?.running
+                ? `✅ Build passed. Dev server on port ${dr.port} (${dr.url}). Preview live.`
+                : `✅ Build passed. Use \`dev_server_start\` to start the server.`;
+              conversation.push({ role: 'user', content: `${pm}\n\nSummarize what was built and respond "Task complete."` });
+            } catch (err) {
+              conversation.push({ role: 'user', content: `✅ Build passed but server start failed: ${err.message}. Try \`dev_server_start\`, then respond "Task complete."` });
+            }
+            return 'built';
+          }; // end runBuildVerification
+
+          // ── Call the build verification ──
+          if (fileManifest.length > 0 && !buildAttempted) {
+            const bvResult = await runBuildVerification();
+            if (bvResult === 'built') break;
+            if (buildVerificationRetries >= 3) {
+              buildAttempted = true;
+              conversation.push({ role: 'user', content: `Build verification failed after ${buildVerificationRetries} attempts. Summarize accomplishments and respond "Task complete."` });
+              continue;
+            }
+            continue;
+          }
+
+          // No pending tasks, no files created, and model produced no tool calls —
+          // there's nothing actionable to do. Stop the loop.
+          break;
+        }
+        noToolStreak = 0; // reset streak — model used a tool
+
+        // Take checkpoint before first write in agent mode
+        if (agentMode === 'agent' && !checkpointTaken &&
+            toolCalls.some(tc => tc.name === 'create_file' || tc.name === 'replace_string_in_file')) {
+          const cp = await takeCheckpoint(`agent turn ${turnCounterRef.current} step ${iter}`);
+          if (cp) {
+            checkpointTaken = true;
+            setMessages(prev => prev.map(m =>
+              m.id === assistantId ? { ...m, checkpointHash: cp.hash } : m
+            ));
+          }
+        }
+
+        // Stuck detection: check for repeated identical tool calls
+        const last3 = recentToolCalls.slice(-3);
+        const stuckTools = toolCalls.filter(tc => {
+          if (['list_dir', 'read_file', 'dev_server_status'].includes(tc.name)) {
+            const fp = tc.args.filePath || tc.args.path || '';
+            const sameCount = last3.filter(l => l.name === tc.name && l.filePath === fp).length;
+            return sameCount >= 2;
+          }
+          return false;
+        });
+
+        if (stuckTools.length > 0 && last3.length >= 3) {
+          const stuckDesc = stuckTools.map(t => `${t.name} ${t.args.filePath || t.args.path || '.'}`).join(', ');
+          captureProblem('stuck_loop',
+            `Model stuck repeating: ${stuckDesc}`,
+            `Last 3 calls: ${last3.map(t => `${t.name} ${t.filePath}`).join(', ')}`
+          );
+          const pendingTasks = planTodosRef.current.filter(t => !t.done);
+          const nextTask = pendingTasks[0];
+
+          // If all tasks done and files were created, run build verification instead of nudging
+          if (!nextTask && fileManifest.length > 0 && !buildAttempted) {
+            const bvResult = await runBuildVerification();
+            if (bvResult === 'built') break;
+            if (buildVerificationRetries >= 3) {
+              buildAttempted = true;
+              conversation.push({ role: 'user', content: `Build verification failed after ${buildVerificationRetries} attempts. Summarize accomplishments and respond "Task complete."` });
+              continue;
+            }
+            continue;
+          }
+
+          const nextTaskHint = nextTask ? ` Your next task is: "${nextTask.text}". Complete it NOW.` : '';
+          conversation.push({
+            role: 'user',
+            content: `You've called ${stuckDesc} repeatedly. The files exist — you're in a verification loop. MOVE ON.${nextTaskHint} If all tasks are done, respond "Task complete" without any tool block.`
+          });
+          continue;
+        }
+
+        // Dev server anti-polling: if last 3 dev_server_status calls all returned "not running"
+        const last3Results = recentToolResults.slice(-3);
+        if (last3Results.length >= 3 && last3Results.every(r => r.name === 'dev_server_status' && r.summary === 'Server not running')) {
+          captureProblem('dev_server_polling',
+            'Model polled dev_server_status 3x without starting server',
+            'Server not running — model should use dev_server_start'
+          );
+          conversation.push({
+            role: 'user',
+            content: `The dev server is NOT running. Use \`dev_server_start\` to START it — do NOT call \`dev_server_status\` again until you start the server.`
+          });
+          continue;
+        }
+
+        // Read-only streak: if last 5 tool calls are all read-only, force write
+        const last5Calls = recentToolCalls.slice(-5);
+        const READ_ONLY_TOOLS = ['list_dir', 'read_file', 'grep_search', 'dev_server_status', 'dev_server_stop'];
+        if (last5Calls.length >= 5 && last5Calls.every(tc => READ_ONLY_TOOLS.includes(tc.name))) {
+          captureProblem('read_only_streak',
+            'Model made 5 read-only calls without writing anything',
+            `Last 5: ${last5Calls.map(t => t.name).join(', ')}`
+          );
+          const nextTask = planTodosRef.current.filter(t => !t.done)[0];
+          const nextTaskHint = nextTask ? ` Complete: "${nextTask.text}" with a \`create_file\` or \`replace_string_in_file\` call NOW.` : ' If all done, respond "Task complete".';
+          conversation.push({
+            role: 'user',
+            content: `You've made 5 read-only calls in a row without writing or building anything. You're stuck in analysis.${nextTaskHint}`
+          });
+          continue;
+        }
+
+        // Barren streak: no file writes for too many iterations — model is looping pointlessly
+        if (barrenStreak >= 8) {
+          captureProblem('barren_streak',
+            `${barrenStreak} iterations without any file writes`,
+            `File manifest: ${fileManifest.length} files, ${planTodosRef.current.filter(t => t.done).length}/${planTodosRef.current.length} tasks done`
+          );
+          const nextTask = planTodosRef.current.filter(t => !t.done)[0];
+
+          // If no plan todos and no files exist at all, there's nothing to do — stop
+          if (!nextTask && fileManifest.length === 0) {
+            break;
+          }
+
+          conversation.push({
+            role: 'user',
+            content: `You've spent ${barrenStreak} iterations without creating or modifying any files. You are in a loop.${nextTask ? ` Your next pending task is: "${nextTask.text}". Complete it NOW with a tool call.` : ' If all tasks are done, respond "Task complete" with no tool block.'}`
+          });
+          barrenStreak = 0; // Reset and push forward
+          continue;
+        }
+
+        // Iteration cap: if we're deep in the loop with zero progress, abort
+        if (iter > 15) {
+          const doneCount = planTodosRef.current.filter(t => t.done).length;
+          if (doneCount === 0 && planTodosRef.current.length > 0 && fileManifest.length === 0) {
+            conversation.push({
+              role: 'user',
+              content: `You've used ${iter} iterations with zero tasks completed. Something is wrong — summarize what you accomplished and respond "Task complete" with no tool block.`
+            });
+            break;
+          }
+        }
+
+        // Execute all tools
+        const toolResults = [];
+        setIsThinking(true);
+        for (const tc of toolCalls) {
+          const toolId = `${assistantId}_tool_${toolResults.length}`;
+          // Track for stuck detection
+          recentToolCalls.push({ name: tc.name, filePath: tc.args.filePath || tc.args.path || '' });
+          if (recentToolCalls.length > 10) recentToolCalls.shift();
+          // Add executing tool to message immediately
+          setMessages(prev => {
+            const idx = prev.findIndex(m => m.id === assistantId);
+            if (idx < 0) return prev;
+            const updated = [...prev];
+            const existingTools = updated[idx].toolCalls || [];
+            updated[idx] = {
+              ...updated[idx],
+              toolCalls: [...existingTools, { id: toolId, name: tc.name, args: tc.args, status: 'executing', result: null }]
+            };
+            return updated;
+          });
+          const result = await executeToolCall(tc, workspaceId);
+          toolResults.push({ ...tc, result, toolId });
+          // Update tool status to done/error
+          setMessages(prev => {
+            const idx = prev.findIndex(m => m.id === assistantId);
+            if (idx < 0) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              toolCalls: (updated[idx].toolCalls || []).map(t =>
+                t.id === toolId ? { ...t, status: result.error ? 'error' : 'done', result } : t
+              )
+            };
+            return updated;
+          });
+          // Detect explicit task completion: model writes "[x] Task text" in its response.
+          // Updated: only mark tasks that the model explicitly checks off (NOT keyword matching).
+          if (!result.error && planTodosRef.current.length > 0 && 
+              ['create_file', 'replace_string_in_file', 'run_in_terminal', 'dev_server_start'].includes(tc.name)) {
+            // After a successful write/build tool, re-read the model's raw response for [x] markings
+            // and match them to plan tasks by text similarity (exact word match).
+            const checkoffRegex = /\[x\]\s*(.+)$/gm;
+            let checkMatch;
+            while ((checkMatch = checkoffRegex.exec(rawContent)) !== null) {
+              const checkedText = checkMatch[1].trim().toLowerCase();
+              setPlanTodos(prev => {
+                let changed = false;
+                const updated = prev.map(t => {
+                  if (t.done) return t;
+                  // Match if all significant words in the checked text appear in the task
+                  const words = checkedText.split(/\s+/).filter(w => w.length > 2);
+                  const taskLower = t.text.toLowerCase();
+                  const matchCount = words.filter(w => taskLower.includes(w)).length;
+                  if (matchCount >= Math.min(2, words.length) && matchCount > 0) {
+                    changed = true;
+                    return { ...t, done: true };
+                  }
+                  return t;
+                });
+                if (changed) {
+                  planTodosRef.current = updated;
+                  return updated;
+                }
+                return prev;
+              });
+            }
+          }
+          // If create_file/replace succeeded, notify parent
+          if ((tc.name === 'create_file' || tc.name === 'replace_string_in_file') && result.success && onFileEdit) {
+            const fp = tc.args.filePath || tc.args.path;
+            onFileEdit(fp, tc.args.content || result.content);
+          }
+          // Track files for conversation compaction
+          if (!result.error && (tc.name === 'create_file' || tc.name === 'replace_string_in_file')) {
+            const fp = tc.args.filePath || tc.args.path;
+            if (fp) {
+              barrenStreak = 0; // Reset barren counter on successful file write
+              // ── Hallucination guard: verify file actually exists after write ──
+              let fileActuallyExists = false;
+              if (tc.name === 'create_file') {
+                try {
+                  const verifyRes = await fetch(`/api/workspace/${workspaceId}/read`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: fp }),
+                  });
+                  fileActuallyExists = verifyRes.ok;
+                } catch {}
+                if (!fileActuallyExists) {
+                  // File was not written to disk — inject correction
+                  captureProblem('tool_error',
+                    `create_file reported success but ${fp} does not exist on disk`,
+                    `File ${fp} was NOT created despite tool reporting success`
+                  );
+                  conversation.push({
+                    role: 'user',
+                    content: `⚠️ HALLUCINATION DETECTED: You claimed to create \`${fp}\` but the file does NOT exist on disk. The write failed silently. Re-create \`${fp}\` NOW with the full content. Do NOT mark this task as done until the file is verified.`
+                  });
+                }
+              }
+              if (fileActuallyExists || tc.name === 'replace_string_in_file') {
+                const existing = fileManifest.find(f => f.path === fp);
+                const action = tc.name === 'create_file' ? 'created' : 'modified';
+                if (existing) {
+                  existing.action = action;
+                  if (stepPurpose) existing.purpose = stepPurpose;
+                } else {
+                  fileManifest.push({ path: fp, action, purpose: stepPurpose });
+                }
+              }
+            }
+          }
+          // Track whether model has attempted a build/run
+          // NOTE: dev_server_start does NOT count as buildAttempted — the
+          // programmatic build pipeline runs npm run build independently.
+          if (!result.error && (
+            tc.name === 'show_preview' ||
+            (tc.name === 'run_in_terminal' && (tc.args.command || '').match(/npm run (?!dev)|npm start|npx next build|python|pip|bun|cargo|go run|dotnet run|uvicorn/))
+          )) {
+            buildAttempted = true;
+          }
+          // Track tool errors for compaction summary
+          if (result.error) {
+            executionErrors.push(`${tc.name} ${tc.args.filePath || tc.args.path || ''}: ${result.error}`);
+            captureProblem('tool_error',
+              result.error.slice(0, 200),
+              `${tc.name} ${tc.args.filePath || tc.args.path || ''}`
+            );
+          }
+          // Track tool result summary for anti-polling / duplicate-result detection
+          const resultSummaryShort = summarizeToolResult(tc.name, tc.args, result).slice(0, 80);
+          recentToolResults.push({ name: tc.name, summary: resultSummaryShort });
+          if (recentToolResults.length > 10) recentToolResults.shift();
+        }
+        setIsThinking(false);
+
+        // Increment barren counter — reset by successful file writes in the per-tool tracking above
+        barrenStreak++;
+
+        // Build tool result feedback for the LLM
+        const resultSummary = toolResults.map(tr => {
+          if (tr.result.error) return `${tr.name} ERROR: ${tr.result.error}`;
+          const summary = summarizeToolResult(tr.name, tr.args, tr.result);
+          return `${tr.name} OK: ${summary}`;
+        }).join('\n');
+
+        // ── Build the continuation message with remaining tasks ──
+        const currentPlanTodos = planTodosRef.current;
+        let continueMsg = `[Tool Results for Step ${iter + 1}]\n${resultSummary}`;
+        if (currentPlanTodos.length > 0) {
+          const pending = currentPlanTodos.filter(t => !t.done);
+          const doneCount = currentPlanTodos.length - pending.length;
+          if (pending.length > 0) {
+            const pendingByPhase = new Map();
+            for (const t of pending) {
+              const key = t.phase || `Phase ${t.phaseNum}`;
+              if (!pendingByPhase.has(key)) pendingByPhase.set(key, []);
+              pendingByPhase.get(key).push(t.text);
+            }
+            continueMsg += `\n\nPROGRESS: ${doneCount}/${currentPlanTodos.length} tasks done. REMAINING:\n`;
+            for (const [phase, tasks] of pendingByPhase) {
+              continueMsg += `${phase}:\n`;
+              for (const task of tasks) {
+                continueMsg += `  - [ ] ${task}\n`;
+              }
+            }
+            continueMsg += '\nYou are NOT done. Use a TOOL CALL to complete the next remaining task.';
+          } else {
+            continueMsg += '\n\nAll tasks are now complete. Respond without using any tools.';
+          }
+        } else {
+          continueMsg += '\n\nContinue. If the task is complete, respond normally WITHOUT using any tools.';
+        }
+        conversation.push({ role: 'user', content: continueMsg });
+
+        // ── Token-aware conversation compaction ──
+        // Only compact when approaching the model's context window (75% threshold).
+        // Preserves: system prompt + original task + rich summary + last 3 turns.
+        // Minimum 6 iterations between compactions to avoid thrashing.
+        if (iter > 5 && iter - compactedAt >= 6) {
+          const totalChars = conversation.reduce((sum, m) => sum + (m.content || '').length, 0);
+          const estimatedTokens = Math.ceil(totalChars / 2.5);
+          const model = selectedModel || localStorage.getItem('aurora_last_model') || '';
+          const provider = selectedProvider || localStorage.getItem('aurora_last_provider') || '';
+          const contextWindow = getContextWindow(model, provider);
+          const threshold = Math.floor(contextWindow * 0.75);
+
+          if (estimatedTokens > threshold) {
+            const compactSummary = buildCompactSummary(iter, fileManifest, planTodosRef.current, originalRequest, executionErrors);
+            // Keep: system prompt (0) + original user request (last of initial messages) + summary + last 3 turns
+            const systemMsg = conversation[0];
+            const originalUserMsg = conversation.find(m => m.role === 'user' && !m.content.startsWith('[Tool Results') && !m.content.startsWith('[CONTEXT SUMMARY'));
+            const recentMessages = conversation.slice(-6);
+            conversation = [
+              systemMsg,
+              ...(originalUserMsg ? [originalUserMsg] : []),
+              { role: 'user', content: compactSummary },
+              ...recentMessages
+            ];
+            compactedAt = iter;
+          }
+        }
+      }
+
+      // ── Post-loop: summarize what was accomplished ──
+      // Skip summary if plan mode completed (execution hasn't started yet)
+      if (!planCompleted) {
+        const currentTodos = planTodosRef.current;
+        const doneCount = currentTodos.filter(t => t.done).length;
+        const pendingTodos = currentTodos.filter(t => !t.done);
+        const createdFiles = fileManifest.filter(f => f.action === 'created');
+        const modifiedFiles = fileManifest.filter(f => f.action === 'modified');
+
+        // ── Build & Preview status ──
+        let buildStatusLine = '';
+        let previewUrl = null;
+        try {
+          const devRes = await fetch(`/api/workspace/${workspaceId}/dev-server`, { method: 'GET' });
+          const devData = devRes.ok ? await devRes.json() : null;
+          if (devData?.running) {
+            buildStatusLine = `🟢 Dev server running on port ${devData.port}`;
+            previewUrl = devData.url || `http://localhost:${devData.port}`;
+          } else if (buildAttempted) {
+            buildStatusLine = `🟡 Build attempted but server not running`;
+          } else {
+            buildStatusLine = `⚪ No build attempted`;
+          }
+        } catch {
+          buildStatusLine = `⚪ Build status unknown`;
+        }
+
+        let summary = '';
+        let isSuccess = false;
+
+        if (pendingTodos.length === 0 && createdFiles.length + modifiedFiles.length > 0) {
+          summary = '✅ All tasks complete.';
+          isSuccess = true;
+        } else if (pendingTodos.length > 0) {
+          summary = `⚠️ Ran out of iterations. **${doneCount}/${currentTodos.length}** tasks completed. **${pendingTodos.length} remaining**:\n`;
+          for (const t of pendingTodos.slice(0, 10)) {
+            summary += `  - [ ] ${t.text}\n`;
+          }
+          if (pendingTodos.length > 10) summary += `  ... and ${pendingTodos.length - 10} more\n`;
+          if (createdFiles.length + modifiedFiles.length > 0) {
+            summary += `\n**Files affected**: `;
+            summary += [
+              ...createdFiles.map(f => `created \`${f.path}\``),
+              ...modifiedFiles.map(f => `modified \`${f.path}\``)
+            ].join(', ');
+          }
+        } else if (createdFiles.length + modifiedFiles.length > 0) {
+          summary = '✅ **Files affected**: ';
+          summary += [
+            ...createdFiles.map(f => `created \`${f.path}\``),
+            ...modifiedFiles.map(f => `modified \`${f.path}\``)
+          ].join(', ');
+          summary += '\n\nTask complete.';
+          isSuccess = true;
+        } else {
+          summary = 'Task complete.';
+        }
+
+        // Append build status and preview link
+        summary += `\n\n${buildStatusLine}`;
+        if (previewUrl) {
+          summary += `\n🔗 Preview: ${previewUrl}`;
+        }
+
+        if (summary) {
+          setMessages(prev => [...prev, {
+            id: `agent_summary_${Date.now()}`,
+            role: 'assistant',
+            content: summary,
+            isFinalSummary: true,
+            isSuccess,
+            previewUrl,
+            timestamp: new Date().toISOString(),
+            turnId,
+            stats: {
+              tasksDone: doneCount,
+              tasksTotal: currentTodos.length,
+              filesCreated: createdFiles.length,
+              filesModified: modifiedFiles.length,
+              buildPassed: buildAttempted
+            }
+          }]);
+          // Auto-open preview if build succeeded
+          if (previewUrl && onOpenPreview) {
+            onOpenPreview();
+          }
+        }
+      }
+
+      // ── Auto skill extraction: ask LLM to extract reusable patterns ──
+      if (buildAttempted && fileManifest.length >= 2 && isPlanExecution && planTodosRef.current.filter(t => t.done).length > 0) {
+        try {
+          const extractionPrompt = buildSkillExtractionPrompt(originalRequest, fileManifest, planTodosRef.current, buildAttempted);
+          const { content: skillContent } = await streamLLMCall(
+            [{ role: 'system', content: 'You extract reusable coding patterns from successful builds. Output ONLY a ```create_skill block or NO_SKILL.' },
+             { role: 'user', content: extractionPrompt }],
+            null /* no label */,
+            turnId
+          );
+          const skillCalls = parseToolCalls(skillContent);
+          for (const sc of skillCalls) {
+            if (sc.name === 'create_skill' && sc.args.name) {
+              await executeCreateSkill(workspaceId, sc.args.name, sc.args.description || '', sc.args.keywords || sc.args.applyTo || '', sc.args.content || '');
+            }
+          }
+        } catch {
+          // Skill extraction is best-effort — ignore failures
+        }
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        // Model was stuck in a loop or user stopped — run build verification if files were created
+        if (fileManifest.length > 0 && !buildAttempted) {
+          try { await runBuildVerification(); } catch (be) { console.error('[build-verification] Error after abort:', be); }
+        }
+      } else {
+        setMessages(prev => [...prev, {
+          id: `agent_err_${Date.now()}`,
+          role: 'assistant',
+          content: `Error: ${err.message}`,
+          isError: true,
+          timestamp: new Date().toISOString(),
+          turnId
+        }]);
+      }
+    } finally {
+      setIsStreaming(false);
+      setIsThinking(false);
+      abortRef.current = null;
     }
   };
 
@@ -2074,7 +3171,7 @@ TESTING WORKFLOW — After creating/modifying project files:
     return colors[(lang || '').toLowerCase()] || 'text-zinc-500';
   };
 
-  // Render message content with syntax highlighting + ReactMarkdown for rich text
+  // Render message content with syntax highlighting (excludes tool fenced blocks)
   const renderMessageContent = (msg) => {
     if (msg.isError) {
       return <div className="text-red-400 text-xs">{msg.content}</div>;
@@ -2083,83 +3180,86 @@ TESTING WORKFLOW — After creating/modifying project files:
     if (msg.isPlanResult) return null;
 
     // Remove tool call fenced blocks from displayed content (shown in tool cards)
+    // \b after tool name + [^`]* handles both inline code (same-line body) and multi-line blocks
     const toolBlockRegex = /```(create_file|replace_string_in_file|read_file|list_dir|grep_search|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status)\b[^`]*```/g;
     const cleanContent = msg.content ? msg.content.replace(toolBlockRegex, '').trim() : '';
+    const thinkingText = msg.thinking || '';
 
+    // When thinking exists, the thinking toggle above shows reasoning.
+    // The actual model response (cleanContent) is the primary visible content.
     // If there's nothing to display, return null.
     if (!cleanContent) return null;
 
-    // Parse fenced code blocks — use SyntaxHighlighter for code, ReactMarkdown for text
+    // Parse markdown-style code blocks (only non-tool blocks)
     const parts = cleanContent.split(/(```\w*\n[\s\S]*?\n```)/g);
-
-    return (
-      <div className="text-xs leading-relaxed text-zinc-300">
-        {parts.map((part, i) => {
-          const codeMatch = part.match(/```(\w*)\n([\s\S]*?)\n```/);
-          if (codeMatch) {
-            const lang = codeMatch[1] || 'text';
-            const code = codeMatch[2];
-            return (
-              <div key={i} className="relative my-2 group">
-                <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800/80 rounded-t-lg border border-zinc-700/30 border-b-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className={`w-1.5 h-1.5 rounded-full ${getLangColor(lang).replace('text-', 'bg-')}`} />
-                    <span className={`text-[10px] uppercase font-medium ${getLangColor(lang)}`}>{lang}</span>
-                  </div>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {msg.role === 'assistant' && onFileEdit && activeFilePath && (
-                      <button
-                        onClick={() => handleApplyEdit(activeFilePath, code)}
-                        className="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors px-1"
-                        title="Apply to editor"
-                      >
-                        Apply
-                      </button>
-                    )}
-                    <button
-                      onClick={() => navigator.clipboard.writeText(code)}
-                      className="text-zinc-600 hover:text-zinc-300 transition-colors"
-                    >
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-                <SyntaxHighlighter
-                  language={lang}
-                  style={vscDarkPlus}
-                  customStyle={{
-                    margin: 0,
-                    borderTopLeftRadius: 0,
-                    borderTopRightRadius: 0,
-                    borderBottomLeftRadius: '0.5rem',
-                    borderBottomRightRadius: '0.5rem',
-                    border: '1px solid rgba(39,39,42,0.3)',
-                    borderTop: 'none',
-                    fontSize: '11px',
-                    lineHeight: 1.5,
-                    background: '#0d0d0d',
-                  }}
-                >
-                  {code}
-                </SyntaxHighlighter>
+    
+    return parts.map((part, i) => {
+      const codeMatch = part.match(/```(\w*)\n([\s\S]*?)\n```/);
+      if (codeMatch) {
+        const lang = codeMatch[1] || 'text';
+        const code = codeMatch[2];
+        return (
+          <div key={i} className="relative my-2 group">
+            <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800/80 rounded-t-lg border border-zinc-700/30 border-b-0">
+              <div className="flex items-center gap-1.5">
+                <span className={`w-1.5 h-1.5 rounded-full ${getLangColor(lang).replace('text-', 'bg-')}`} />
+                <span className={`text-[10px] uppercase font-medium ${getLangColor(lang)}`}>{lang}</span>
               </div>
-            );
-          }
-
-          // Regular text — use ReactMarkdown for rich formatting
-          if (!part.trim()) return null;
-          return (
-            <div key={i} className="prose prose-invert prose-zinc max-w-none prose-code:bg-zinc-700/50 prose-code:text-zinc-200 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-[11px] prose-code:before:content-none prose-code:after:content-none prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-700/40 prose-pre:rounded-xl prose-pre:text-xs prose-headings:text-zinc-100 prose-a:text-indigo-400 prose-strong:text-zinc-100 prose-li:marker:text-zinc-500 prose-p:my-1">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {part}
-              </ReactMarkdown>
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {msg.role === 'assistant' && onFileEdit && activeFilePath && (
+                  <button
+                    onClick={() => handleApplyEdit(activeFilePath, code)}
+                    className="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors px-1"
+                    title="Apply to editor"
+                  >
+                    Apply
+                  </button>
+                )}
+                <button
+                  onClick={() => navigator.clipboard.writeText(code)}
+                  className="text-zinc-600 hover:text-zinc-300 transition-colors"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                </button>
+              </div>
             </div>
-          );
-        })}
-      </div>
-    );
+            <SyntaxHighlighter
+              language={lang}
+              style={vscDarkPlus}
+              customStyle={{
+                margin: 0,
+                borderTopLeftRadius: 0,
+                borderTopRightRadius: 0,
+                borderBottomLeftRadius: '0.5rem',
+                borderBottomRightRadius: '0.5rem',
+                border: '1px solid rgba(39,39,42,0.3)',
+                borderTop: 'none',
+                fontSize: '11px',
+                lineHeight: 1.5,
+                background: '#0d0d0d',
+              }}
+            >
+              {code}
+            </SyntaxHighlighter>
+          </div>
+        );
+      }
+      
+      // Regular text (handle inline code)
+      const inlineParts = part.split(/(`[^`]+`)/g);
+      return (
+        <span key={i} className="text-xs leading-relaxed text-zinc-300">
+          {inlineParts.map((ip, j) => {
+            if (ip.startsWith('`') && ip.endsWith('`')) {
+              return <code key={j} className="bg-zinc-700/50 text-zinc-200 px-1 py-0.5 rounded text-[11px] font-mono">{ip.slice(1, -1)}</code>;
+            }
+            return <span key={j}>{ip}</span>;
+          })}
+        </span>
+      );
+    });
   };
 
   // Render an individual tool call card (expandable)
@@ -2619,7 +3719,7 @@ TESTING WORKFLOW — After creating/modifying project files:
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
                         <span className="text-zinc-400 group-hover/think:text-zinc-300">
-                          {getThinkingLabel(msg.thinking, isStreamingThis)}
+                          {isStreamingThis ? 'Thinking' : 'Finished thinking'}
                         </span>
                         {isStreamingThis && (
                           <span className="inline-flex gap-0.5">
@@ -2890,30 +3990,23 @@ TESTING WORKFLOW — After creating/modifying project files:
 
       {/* Input */}
       <div className="p-2 border-t border-zinc-800/40">
-        <form id="agent-input-form" onSubmit={sendMessage} className="flex items-start gap-2">
-          <textarea
-            ref={textareaRef}
+        <form id="agent-input-form" onSubmit={sendMessage} className="flex items-center gap-2">
+          <input
+            type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                if (input.trim() && !isStreaming) sendMessage(e);
-              }
-            }}
             placeholder={
-              agentMode === 'plan' ? 'Ask for a plan... (Shift+Enter for newline)'
-              : 'Ask agent to build, edit, or fix... (Shift+Enter for newline)'
+              agentMode === 'plan' ? 'Ask for a plan...'
+              : 'Ask agent to build, edit, or fix...'
             }
             disabled={isStreaming}
-            rows={1}
-            className="flex-1 bg-zinc-800 border border-zinc-700/40 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 transition-all disabled:opacity-50 resize-none min-h-[32px] max-h-[120px]"
+            className="flex-1 bg-zinc-800 border border-zinc-700/40 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 transition-all disabled:opacity-50"
           />
           {isStreaming ? (
             <button
               type="button"
               onClick={handleStop}
-              className="p-1.5 rounded-lg bg-red-600 hover:bg-red-500 transition-colors flex-shrink-0"
+              className="p-1.5 rounded-lg bg-red-600 hover:bg-red-500 transition-colors"
               title="Stop generation"
             >
               <svg className="w-3.5 h-3.5 text-white" fill="currentColor" viewBox="0 0 24 24">
@@ -2924,7 +4017,7 @@ TESTING WORKFLOW — After creating/modifying project files:
             <button
               type="submit"
               disabled={!input.trim()}
-              className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+              className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />

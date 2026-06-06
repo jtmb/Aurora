@@ -13,7 +13,7 @@ import PreviewPanel from './PreviewPanel';
 // xterm.js uses browser APIs, must be client-only
 const TerminalPanel = dynamic(() => import('./TerminalPanel'), { ssr: false });
 
-export default function WorkspaceMode({ onWorkspaceDeleted }) {
+export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, onWorkspaceOpened }) {
   const [workspaces, setWorkspaces] = useState([]);
   const [workspacePage, setWorkspacePage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(4);
@@ -97,6 +97,13 @@ export default function WorkspaceMode({ onWorkspaceDeleted }) {
   useEffect(() => {
     loadWorkspaces();
   }, []);
+
+  // Open workspace from sidebar navigation
+  useEffect(() => {
+    if (!pendingWorkspace) return;
+    openWorkspace(pendingWorkspace);
+    onWorkspaceOpened?.();
+  }, [pendingWorkspace]);
 
   const loadWorkspaces = async () => {
     try {

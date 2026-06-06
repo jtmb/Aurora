@@ -75,3 +75,32 @@ export async function PUT(request) {
     return NextResponse.json({ error: { message: 'Failed to rotate API key' } }, { status: 500 });
   }
 }
+
+export async function DELETE(request) {
+  try {
+    runMigrations();
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    const keyId = url.searchParams.get('keyId');
+    const provider = url.searchParams.get('provider');
+
+    if (keyId) {
+      await apiKeyManager.deleteKey(keyId, userId);
+      return NextResponse.json({ deleted: true });
+    }
+
+    if (provider) {
+      const result = await apiKeyManager.deleteKeysByProvider(userId, provider.toUpperCase());
+      return NextResponse.json(result);
+    }
+
+    return NextResponse.json({ error: { message: 'keyId or provider query parameter is required' } }, { status: 400 });
+  } catch (error) {
+    console.error('Delete API key error:', error);
+    return NextResponse.json({ error: { message: 'Failed to delete API key' } }, { status: 500 });
+  }
+}

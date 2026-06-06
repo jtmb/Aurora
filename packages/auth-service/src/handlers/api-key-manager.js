@@ -116,6 +116,12 @@ export class ApiKeyManager {
     return { deleted: true };
   }
 
+  async deleteKeysByProvider(userId, provider) {
+    const db = getDb();
+    const result = db.prepare('DELETE FROM api_keys WHERE user_id = ? AND provider = ?').run(userId, provider);
+    return { deleted: true, count: result.changes };
+  }
+
   _encrypt(text) {
     const iv = crypto.randomBytes(16);
     const key = Buffer.from(this.encryptionKey.slice(0, 32), 'utf8');

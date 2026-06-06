@@ -115,6 +115,8 @@ export async function GET(request) {
         SUM(prompt_tokens) as promptTokens,
         SUM(completion_tokens) as completionTokens,
         SUM(total_tokens) as totalTokens,
+        SUM(prompt_cache_hit_tokens) as promptCacheHitTokens,
+        SUM(prompt_cache_miss_tokens) as promptCacheMissTokens,
         COUNT(*) as requestCount
       FROM usage_records
       WHERE ${whereClause}
@@ -130,6 +132,8 @@ export async function GET(request) {
         SUM(prompt_tokens) as promptTokens,
         SUM(completion_tokens) as completionTokens,
         SUM(total_tokens) as totalTokens,
+        SUM(prompt_cache_hit_tokens) as promptCacheHitTokens,
+        SUM(prompt_cache_miss_tokens) as promptCacheMissTokens,
         COUNT(*) as requestCount
       FROM usage_records
       WHERE ${whereClause}
@@ -147,6 +151,8 @@ export async function GET(request) {
           SUM(prompt_tokens) as promptTokens,
           SUM(completion_tokens) as completionTokens,
           SUM(total_tokens) as totalTokens,
+          SUM(prompt_cache_hit_tokens) as promptCacheHitTokens,
+          SUM(prompt_cache_miss_tokens) as promptCacheMissTokens,
           COUNT(*) as requestCount
         FROM usage_records
         WHERE ${whereClause}
@@ -169,6 +175,8 @@ export async function GET(request) {
         totalTokens: row.totalTokens,
         promptTokens: row.promptTokens,
         completionTokens: row.completionTokens,
+        promptCacheHitTokens: row.promptCacheHitTokens || 0,
+        promptCacheMissTokens: row.promptCacheMissTokens || 0,
         requestCount: row.requestCount,
         byModel: {},
       };
@@ -184,6 +192,8 @@ export async function GET(request) {
           totalTokens: row.totalTokens,
           promptTokens: row.promptTokens,
           completionTokens: row.completionTokens,
+          promptCacheHitTokens: row.promptCacheHitTokens || 0,
+          promptCacheMissTokens: row.promptCacheMissTokens || 0,
           requestCount: row.requestCount,
         };
       }

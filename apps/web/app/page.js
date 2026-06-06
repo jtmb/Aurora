@@ -45,6 +45,7 @@ export default function Home() {
   const [appMode, setAppMode] = useState('chat'); // 'chat' | 'workspace'
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceList, setWorkspaceList] = useState([]);
+  const [pendingWorkspace, setPendingWorkspace] = useState(null);
 
   // Provider icons for model selector — size variant
   const providerIcons = (source, size = 'w-3.5 h-3.5') => {
@@ -318,9 +319,45 @@ export default function Home() {
     init();
   }, []);
 
-  // Hydrate localStorage with provider keys from server (SQLite) on login.
-  // Only fills missing keys — localStorage is canonical, server is backup.
+  // Hydrate localStorage with provider settings from server DB on login.
+  // Source of truth: provider_settings DB table → api_keys table (legacy fallback)
   const hydrateKeysFromServer = async (token) => {
+    try {
+      // First, try the provider_settings endpoint (DB-backed)
+      const psRes = await fetch('/api/auth/provider-settings', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (psRes.ok) {
+        const psData = await psRes.json();
+        if (psData.settings) {
+          const s = psData.settings;
+          // Only restore if localStorage is empty (never overwrite user changes)
+          const hasLocal = localStorage.getItem('PROVIDER_ENABLED')
+            || localStorage.getItem('OPENAI_API_KEY')
+            || localStorage.getItem('ANTHROPIC_API_KEY')
+            || localStorage.getItem('DEEPSEEK_API_KEY')
+            || localStorage.getItem('OLLAMA_API_BASE')
+            || localStorage.getItem('LM_STUDIO_URL');
+          if (!hasLocal) {
+            if (s.openai) localStorage.setItem('OPENAI_API_KEY', s.openai);
+            if (s.anthropic) localStorage.setItem('ANTHROPIC_API_KEY', s.anthropic);
+            if (s.deepseek) localStorage.setItem('DEEPSEEK_API_KEY', s.deepseek);
+            if (s.ollamaBase) localStorage.setItem('OLLAMA_API_BASE', s.ollamaBase);
+            if (s.lmStudioHost) localStorage.setItem('LM_STUDIO_HOST', s.lmStudioHost);
+            if (s.lmStudioPort) localStorage.setItem('LM_STUDIO_PORT', String(s.lmStudioPort));
+            if (s.lmStudioUrl) localStorage.setItem('LM_STUDIO_URL', s.lmStudioUrl);
+            if (s.lmStudioMaxModels) localStorage.setItem('LM_STUDIO_MAX_MODELS', String(s.lmStudioMaxModels));
+            if (s.lmStudioApiKey) localStorage.setItem('LM_STUDIO_API_KEY', s.lmStudioApiKey);
+            localStorage.setItem('LM_STUDIO_API_KEY_ENABLED', String(s.lmStudioApiKeyEnabled ?? false));
+            localStorage.setItem('PROVIDER_ENABLED', JSON.stringify(s.providerEnabled || {}));
+            localStorage.setItem('PROVIDER_REMOVED', JSON.stringify(s.removedProviders || []));
+          }
+          return;
+        }
+      }
+    } catch {}
+
+    // Legacy fallback: load from api_keys table (backward compatibility)
     try {
       const res = await fetch('/api/auth/keys', {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -328,15 +365,12 @@ export default function Home() {
       if (!res.ok) return;
       const data = await res.json();
       const keys = data.keys || [];
-      // Only restore keys from the server (SQLite) if available.
-      // localStorage values take priority for fields not returned by the server.
       for (const k of keys) {
         if (k.rawKey) {
           const storageKey = k.provider === 'OLLAMA' ? 'OLLAMA_API_BASE'
             : k.provider === 'LM_STUDIO' ? 'LM_STUDIO_URL'
             : k.provider === 'DEEPSEEK' ? 'DEEPSEEK_API_KEY'
             : `${k.provider.toUpperCase()}_API_KEY`;
-          // Never overwrite — localStorage is the source of truth
           if (!localStorage.getItem(storageKey)) {
             localStorage.setItem(storageKey, k.rawKey);
           }
@@ -415,8 +449,11 @@ export default function Home() {
             }
             return true;
           }
-          // Successful response but empty models — clear if anything was stale
+          // Successful response but empty models — clear stale state
           setAvailableModels([]);
+          setModel('');
+          localStorage.removeItem('aurora_last_model');
+          localStorage.removeItem('aurora_last_provider');
           return false;
         }
         // Non-ok response — don't clear existing models
@@ -731,9 +768,28 @@ export default function Home() {
     return text;
   };
 
-  // Get dynamic thinking label based on content
+  // Count reasoning "steps" from thinking text (Copilot-style: "Finished with X steps")
+  const countSteps = (thinking) => {
+    if (!thinking) return 0;
+    const text = thinking.trim();
+    // Count paragraphs (text separated by blank lines)
+    const paragraphs = text.split(/\n\s*\n/).filter(Boolean);
+    // Count lines that look like steps (numbered, bullet, or imperative)
+    const stepLines = text.split('\n').filter(line => {
+      const trimmed = line.trim();
+      return /^\d+[\.\)]\s/.test(trimmed) || /^[-*•]\s/.test(trimmed) || /^(Step|Phase|Task)\s*\d/i.test(trimmed);
+    });
+    // Use whichever gives a more meaningful count (favor explicit step markers)
+    if (stepLines.length >= 2) return stepLines.length;
+    return paragraphs.length || 1;
+  };
+
+  // Get dynamic thinking label based on content (Copilot-style)
   const getThinkingLabel = (thinking, streaming) => {
-    if (!streaming) return <>Done <span className="text-green-400">✓</span></>;
+    if (!streaming) {
+      const steps = countSteps(thinking);
+      return <span>Finished with {steps} step{steps !== 1 ? 's' : ''}</span>;
+    }
     const t = (thinking || '').toLowerCase();
     if (/\b(?:analyz|break\s*down|examin|inspect|dissect|scrutiniz)\b/i.test(t)) return 'Analyzing';
     if (/\b(?:reason|think|logic|deduc|infer|conclude|ponder)\b/i.test(t)) return 'Reasoning';
@@ -958,25 +1014,51 @@ export default function Home() {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
-      // Thinking effort → temperature mapping (matching AgentPanel)
+      // Guard: no model selected
+      if (!model) {
+        const guardId = (Date.now() + 1).toString();
+        setMessages(prev => [...prev, {
+          id: guardId,
+          role: 'error',
+          content: 'No model selected. Pick a model from the sidebar above.',
+          timestamp: new Date().toISOString(),
+        }]);
+        setIsLoading(false);
+        return;
+      }
+
+      // Thinking effort → temperature mapping, with provider-specific params
       const temp = thinkingEffort === 'high' ? 0.1 : thinkingEffort === 'low' ? 0.5 : 0.3;
       const extraParams = {};
-      if (thinkingEffort === 'high') extraParams.extended_thinking = true;
+      if (providerId === 'deepseek' && thinkingEffort === 'high') {
+        // DeepSeek OpenAI-format thinking: reasoning_effort + thinking: { type: "enabled" }
+        // No temperature/top_p in thinking mode (DeepSeek ignores them)
+        extraParams.reasoning_effort = thinkingEffort;
+        extraParams.thinking_type = 'enabled';
+      } else if (providerId !== 'deepseek' && thinkingEffort === 'high') {
+        // LM Studio / Anthropic-format thinking
+        extraParams.extended_thinking = true;
+      }
+
+      // For DeepSeek thinking mode, omit temperature from the body
+      const bodyObj = {
+        model,
+        messages: messagesArray,
+        provider: providerId,
+        stream: true,
+        max_tokens: null,
+        ...extraParams,
+      };
+      if (!(providerId === 'deepseek' && thinkingEffort === 'high')) {
+        bodyObj.temperature = temp;
+        bodyObj.top_p = 1;
+      }
 
       const res = await fetch('/api/v1/chat/completions', {
         method: 'POST',
         headers,
         signal: controller.signal,
-        body: JSON.stringify({
-          model,
-          messages: messagesArray,
-          temperature: temp,
-          top_p: 1,
-          max_tokens: null,
-          provider: providerId,
-          stream: true,
-          ...extraParams
-        })
+        body: JSON.stringify(bodyObj)
       });
 
       if (!res.ok) {
@@ -1080,8 +1162,28 @@ export default function Home() {
         // Keep any partial content that may have been streamed
       } else {
         console.error('Chat error:', error.message);
-        setErrorMessage(error.message);
-        setTimeout(() => setErrorMessage(''), 5000);
+        const errMsg = error.message || 'Something went wrong. Try again.';
+        // Map common errors to user-friendly messages
+        let displayMsg = errMsg;
+        if (errMsg.includes('No LLM provider configured')) {
+          displayMsg = 'No provider configured.\nAdd an API key in Settings → Providers.';
+        } else if (errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError')) {
+          displayMsg = 'Couldn\u2019t reach the API. Check your connection.';
+        } else if (errMsg.includes('timed out') || errMsg.includes('AbortError')) {
+          displayMsg = 'Request timed out. The model may be overloaded.';
+        } else if (errMsg.includes('402') || errMsg.includes('insufficient') || errMsg.includes('Insufficient Balance')) {
+          displayMsg = 'Insufficient balance. Top up at platform.deepseek.com.';
+        } else if (errMsg.includes('401') || errMsg.includes('unauthorized') || errMsg.includes('Invalid API key')) {
+          displayMsg = 'Invalid API key. Check your key in Settings → Providers.';
+        }
+        // Add error bubble in chat
+        const errId = (Date.now() + 1).toString();
+        setMessages(prev => [...prev, {
+          id: errId,
+          role: 'error',
+          content: displayMsg,
+          timestamp: new Date().toISOString(),
+        }]);
       }
     } finally {
       setIsLoading(false);
@@ -1508,7 +1610,7 @@ export default function Home() {
                     workspaceList.map((ws) => (
                       <button
                         key={ws.id}
-                        onClick={() => setAppMode('workspace')}
+                        onClick={() => { setPendingWorkspace(ws); setAppMode('workspace'); }}
                         className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20"
                         title={`Open workspace: ${ws.name}`}
                       >
@@ -1653,7 +1755,7 @@ export default function Home() {
         {/* Conditional content: Chat vs Workspace */}
         {appMode === 'workspace' ? (
           <div className="flex-1 mt-[50px] flex min-h-0">
-            <WorkspaceMode onWorkspaceDeleted={loadWorkspacesForSidebar} />
+            <WorkspaceMode onWorkspaceDeleted={loadWorkspacesForSidebar} pendingWorkspace={pendingWorkspace} onWorkspaceOpened={() => setPendingWorkspace(null)} />
           </div>
         ) : (
         <>
@@ -1708,8 +1810,27 @@ export default function Home() {
 
                 return (
                 <div key={msg.id || `msg-${i}`} className={`flex gap-4 max-w-[90%] ${msg.role === 'user' ? 'ml-auto justify-end' : ''}`}>
-                  {/* Search suggestion bubble */}
-                  {msg.isSearchSuggestion ? (
+                  {/* Error bubble */}
+                  {msg.role === 'error' ? (
+                    <>
+                      <div className="w-8 h-8 rounded-full bg-red-600/80 flex items-center justify-center flex-shrink-0 mt-1">
+                        <span className="text-white font-bold text-xs">!</span>
+                      </div>
+                      <div className="relative max-w-[85%] px-4 py-3 rounded-2xl bg-red-950/40 text-red-300 border border-red-800/40 rounded-tl-sm">
+                        <div className="flex items-start gap-2">
+                          <svg className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                        </div>
+                        {msg.timestamp && (
+                          <p className="text-[10px] text-zinc-500 mt-2">
+                            {new Date(msg.timestamp).toLocaleTimeString()}
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  ) : msg.isSearchSuggestion ? (
                     <>
                       <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-700/50 flex items-center justify-center flex-shrink-0 mt-1 overflow-hidden">
                         <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
@@ -1785,8 +1906,10 @@ export default function Home() {
                           </svg>
                           <span>{getThinkingLabel(msg.thinking, isStreaming)}</span>
                           {isStreaming && (
-                            <span className="animate-thinking-dots">
-                              <span>.</span><span>.</span><span>.</span>
+                            <span className="inline-flex gap-0.5">
+                              <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                             </span>
                           )}
                         </button>
@@ -1797,14 +1920,14 @@ export default function Home() {
                               <div className="absolute top-0 left-4 right-0 h-8 bg-gradient-to-b from-zinc-800/60 via-zinc-800/30 to-transparent z-10 pointer-events-none" />
                               <div
                                 ref={thinkingContainerRef}
-                                className="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap max-h-[10rem] overflow-y-auto"
+                                className="text-[11px] text-zinc-400 font-mono leading-relaxed whitespace-pre-wrap max-h-[10rem] overflow-y-auto tracking-tight"
                                 style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
                               >
                                 {msg.thinking}
                               </div>
                             </div>
                           ) : (
-                            <div className="mt-2 pl-4 border-l-2 border-zinc-600/50 text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap">
+                            <div className="mt-2 pl-4 border-l-2 border-zinc-600/50 text-[11px] text-zinc-400 font-mono leading-relaxed whitespace-pre-wrap tracking-tight">
                               {msg.thinking}
                             </div>
                           )
