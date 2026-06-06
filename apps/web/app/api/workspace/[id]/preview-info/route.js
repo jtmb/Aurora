@@ -79,16 +79,35 @@ export async function GET(request, { params }) {
       }
     }
     
+    // Fallback: Python/Flask project
+    if (type === 'none' && (files.includes('requirements.txt') || files.includes('pyproject.toml') || files.some(f => f.endsWith('.py')))) {
+      type = 'python';
+      port = 5000;
+      framework = 'Python';
+      if (files.includes('app.py')) {
+        suggestedCommand = 'python app.py';
+      } else if (files.includes('main.py')) {
+        suggestedCommand = 'python main.py';
+      } else if (files.includes('server.py')) {
+        suggestedCommand = 'python server.py';
+      } else {
+        suggestedCommand = 'python -m flask run --host 0.0.0.0';
+      }
+    }
+
     // Fallback: check for static index.html
     if (type === 'none' && files.includes('index.html')) {
       type = 'static';
       port = null;
       framework = 'Static Site';
-      suggestedCommand = null;
+      suggestedCommand = 'npx serve . --no-clipboard';
     }
     
     // Check if node_modules exists (dependencies installed)
     const nodeModulesExist = fs.existsSync(path.join(wsDir, 'node_modules'));
+    
+    // Check if venv exists (Python dependencies installed)
+    const venvExists = fs.existsSync(path.join(wsDir, '.venv')) || fs.existsSync(path.join(wsDir, 'venv'));
     
     const result = {
       type,
@@ -96,6 +115,7 @@ export async function GET(request, { params }) {
       port,
       suggestedCommand,
       nodeModulesInstalled: nodeModulesExist,
+      venvInstalled: venvExists,
       hasScripts: packageJson ? Object.keys(packageJson.scripts || {}) : [],
       urls: port ? [`http://localhost:${port}`] : []
     };

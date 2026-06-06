@@ -42,6 +42,10 @@ export default function Home() {
   const scrollRef = useRef(null);
   const plusMenuRef = useRef(null);
   const [appMode, setAppMode] = useState('chat'); // 'chat' | 'workspace'
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [workspaceList, setWorkspaceList] = useState([]);
+  const [workspaceSidebarPage, setWorkspaceSidebarPage] = useState(1);
+  const WORKSPACES_PER_PAGE = 4;
 
   // Provider icons for model selector — size variant
   const providerIcons = (source, size = 'w-3.5 h-3.5') => {
@@ -430,19 +434,21 @@ export default function Home() {
     const token = localStorage.getItem('auth_token');
     
     if (!token) {
-      setUser(null);
-    } else {
-      // Decode JWT to extract user info from the token payload
-      try {
-        const payload = JSON.parse(atob(token.split('.')[1]));
-        setUser({ id: payload.userId, email: payload.email, name: payload.sub });
-        // Hydrate localStorage with provider keys from server (SQLite)
-        await hydrateKeysFromServer(token);
-      } catch {
-        // Invalid token format — clear it
-        localStorage.removeItem('auth_token');
-        setUser(null);
-      }
+      window.location.href = '/login';
+      return;
+    }
+
+    // Decode JWT to extract user info from the token payload
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      setUser({ id: payload.userId, email: payload.email, name: payload.sub });
+      // Hydrate localStorage with provider keys from server (SQLite)
+      await hydrateKeysFromServer(token);
+    } catch {
+      // Invalid token format — clear it and redirect
+      localStorage.removeItem('auth_token');
+      window.location.href = '/login';
+      return;
     }
 
     let modelsLoaded = false;
@@ -506,6 +512,24 @@ export default function Home() {
 
     // Load existing chats
     loadChats();
+    // Load workspaces for sidebar
+    loadWorkspacesForSidebar();
+  };
+
+  const loadWorkspacesForSidebar = async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) return;
+      const res = await fetch('/api/workspace/list', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setWorkspaceList(data.workspaces || []);
+      }
+    } catch (e) {
+      console.debug('Load workspaces for sidebar error:', e.message);
+    }
   };
 
   const loadChats = async () => {
@@ -1119,6 +1143,7 @@ export default function Home() {
     setWebSearchEnabled(false);
     setChatWebSearch({});
     setUserMenuOpen(false);
+    window.location.href = '/login';
   };
 
   const handleAuthSubmit = async (e) => {
@@ -1204,177 +1229,294 @@ export default function Home() {
     }
   };
 
+  // Redirect to /login if not authenticated
+  if (!hydrated || !user) {
+    return (
+      <div className="flex h-screen bg-zinc-950 items-center justify-center">
+        <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-zinc-950 text-white overflow-hidden">
       {/* LEFT SIDEBAR */}
-      <aside className={`w-[260px] flex-shrink-0 flex flex-col border-r border-zinc-800/40 bg-zinc-900 hidden md:flex`}>        {/* Aurora Logo — static brand */}
-        <div className="px-3 pt-3 pb-2 border-b border-zinc-800/40">
-          <div className="w-full flex items-center gap-3 px-3 py-2.5">
-            <svg className="w-10 h-10 flex-shrink-0" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
-              <defs>
-                <linearGradient id="aurora-stroke" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#818cf8" />
-                  <stop offset="100%" stopColor="#c084fc" />
-                </linearGradient>
-                <linearGradient id="aurora-stroke-2" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#a78bfa" />
-                  <stop offset="100%" stopColor="#e879f9" />
-                </linearGradient>
-                <linearGradient id="aurora-stroke-3" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#c4b5fd" />
-                  <stop offset="100%" stopColor="#f0abfc" />
-                </linearGradient>
-              </defs>
-              <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-stroke)" strokeWidth="1.5" opacity="0.9" />
-              <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-stroke-2)" strokeWidth="1.5" opacity="0.7" />
-              <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-stroke-3)" strokeWidth="1.5" opacity="0.5" />
-            </svg>
-            <div className="flex-1 text-left min-w-0">
-              <p className="text-sm font-semibold text-white tracking-tight">Aurora</p>
-              <p className="text-[10px] text-zinc-500 truncate">Multi-model Gateway</p>
-            </div>
+      <aside 
+        className={`${sidebarCollapsed ? 'w-[52px]' : 'w-[260px]'} flex-shrink-0 flex flex-col border-r border-zinc-800/40 bg-zinc-900 hidden md:flex transition-all duration-200`}
+      >        {/* Aurora Logo — static brand */}
+        <div className={`${sidebarCollapsed ? 'px-1.5 pt-3 pb-2' : 'px-3 pt-3 pb-2'} border-b border-zinc-800/40`}>
+          <div className={`w-full flex items-center ${sidebarCollapsed ? '' : 'gap-3 px-3'} py-2.5`}>
+            {sidebarCollapsed ? (
+              <button
+                onClick={() => setSidebarCollapsed(false)}
+                className="flex items-center justify-center w-full"
+                title="Expand sidebar"
+              >
+                <svg className="w-10 h-10 flex-shrink-0" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                  <defs>
+                    <linearGradient id="aurora-stroke" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#818cf8" />
+                      <stop offset="100%" stopColor="#c084fc" />
+                    </linearGradient>
+                    <linearGradient id="aurora-stroke-2" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#a78bfa" />
+                      <stop offset="100%" stopColor="#e879f9" />
+                    </linearGradient>
+                    <linearGradient id="aurora-stroke-3" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#c4b5fd" />
+                      <stop offset="100%" stopColor="#f0abfc" />
+                    </linearGradient>
+                  </defs>
+                  <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-stroke)" strokeWidth="1.5" opacity="0.9" />
+                  <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-stroke-2)" strokeWidth="1.5" opacity="0.7" />
+                  <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-stroke-3)" strokeWidth="1.5" opacity="0.5" />
+                </svg>
+              </button>
+            ) : (
+              <>
+                <svg className="w-10 h-10 flex-shrink-0" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                  <defs>
+                    <linearGradient id="aurora-stroke" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#818cf8" />
+                      <stop offset="100%" stopColor="#c084fc" />
+                    </linearGradient>
+                    <linearGradient id="aurora-stroke-2" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#a78bfa" />
+                      <stop offset="100%" stopColor="#e879f9" />
+                    </linearGradient>
+                    <linearGradient id="aurora-stroke-3" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#c4b5fd" />
+                      <stop offset="100%" stopColor="#f0abfc" />
+                    </linearGradient>
+                  </defs>
+                  <path d="M3 17c1.5-2 4-4 6-5s4-1 6 1 4 3 6 2" stroke="url(#aurora-stroke)" strokeWidth="1.5" opacity="0.9" />
+                  <path d="M3 13c2-3 5-5 8-4s5 3 8 0" stroke="url(#aurora-stroke-2)" strokeWidth="1.5" opacity="0.7" />
+                  <path d="M3 9c2.5-3 6-4 9-2s5 4 8 1" stroke="url(#aurora-stroke-3)" strokeWidth="1.5" opacity="0.5" />
+                </svg>
+                <div className="flex-1 text-left min-w-0">
+                  <p className="text-sm font-semibold text-white tracking-tight">Aurora</p>
+                  <p className="text-[10px] text-zinc-500 truncate">Multi-model Gateway</p>
+                </div>
+                <button
+                  onClick={() => setSidebarCollapsed(true)}
+                  className="p-1 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors flex-shrink-0"
+                  title="Collapse sidebar"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                </button>
+              </>
+            )}
           </div>
         </div>
+
         <div className="flex-1 overflow-y-auto py-3">
-          <button 
-            onClick={newChat} 
-            className={`w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm transition-colors bg-indigo-600/10 text-white hover:bg-indigo-600/20`}
-          >
-            <svg className="w-[1.2rem] h-[1.2rem] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-            </svg>
-            New chat
-          </button>
-
-          {/* Model selector — inline in sidebar with aurora-gradient status blip */}
-          {user ? (
-            <button 
-              onClick={() => { setModelOverlayOpen(true); if (availableModels.length === 0) getModelsFromStorage(); }}
-              className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm transition-colors text-zinc-400 hover:text-white hover:bg-zinc-800/20 mt-0.5"
-            >
-              <svg className="w-[1.2rem] h-[1.2rem] shrink-0 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" strokeWidth={1.5} /><path d="M8 21h8" strokeWidth={1.5} strokeLinecap="round" /><path d="M12 17v4" strokeWidth={1.5} strokeLinecap="round" /></svg>
-              <div className="flex-1 text-left min-w-0">
-                <span className="truncate block text-zinc-300">{modelsLoading ? 'Loading...' : (model || 'Select a model')}</span>
-                {activePersonalityId && (() => {
-                  const p = personalities.find(x => x.id === activePersonalityId);
-                  return p ? <span className="text-[10px] text-indigo-400/70 truncate block">{p.name}</span> : null;
-                })()}
+          {sidebarCollapsed ? (
+            /* COLLAPSED — icon-only strip */
+            <div className="flex flex-col items-center gap-2 px-2">
+              {/* New Chat / New Workspace icon */}
+              {appMode === 'chat' ? (
+                <button onClick={newChat} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/40 transition-colors" title="New chat">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                  </svg>
+                </button>
+              ) : (
+                <button onClick={() => { setAppMode('workspace'); loadWorkspacesForSidebar(); }} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/40 transition-colors" title="New Workspace">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                </button>
+              )}
+              {/* Model selector icon (chat only) */}
+              {appMode === 'chat' && (
+                <button onClick={() => { setModelOverlayOpen(true); if (availableModels.length === 0) getModelsFromStorage(); }} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/40 transition-colors" title="Select model">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" strokeWidth={1.5} /><path d="M8 21h8" strokeWidth={1.5} strokeLinecap="round" /><path d="M12 17v4" strokeWidth={1.5} strokeLinecap="round" /></svg>
+                </button>
+              )}
+              {/* Divider */}
+              <div className="w-6 border-t border-zinc-800/40 my-1" />
+              {/* Mode indicator */}
+              <div className="p-2 rounded-lg text-zinc-600" title={appMode === 'chat' ? 'Chat mode' : 'Workspace mode'}>
+                {appMode === 'chat' ? (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                )}
               </div>
-              <span className="relative flex items-center justify-center w-[1.2rem] h-[1.2rem] shrink-0">
-                <span className="absolute inset-0 rounded-full opacity-30 blur-[3px]" style={{ background: 'linear-gradient(135deg, #818cf8, #c084fc, #f0abfc)' }} />
-                <span className="relative w-2 h-2 rounded-full" style={{ background: 'linear-gradient(135deg, #818cf8, #e879f9)' }} />
-              </span>
-            </button>
-          ) : (
-            <div className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-zinc-600 mt-0.5 cursor-not-allowed select-none">
-              <svg className="w-[1.2rem] h-[1.2rem] shrink-0 text-zinc-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" strokeWidth={1.5} /><path d="M8 21h8" strokeWidth={1.5} strokeLinecap="round" /><path d="M12 17v4" strokeWidth={1.5} strokeLinecap="round" /></svg>
-              <span className="truncate flex-1 text-left">Sign in to load models</span>
-              <span className="relative flex items-center justify-center w-[1.2rem] h-[1.2rem] shrink-0">
-                <span className="absolute inset-0 rounded-full opacity-15 blur-[3px]" style={{ background: 'linear-gradient(135deg, #52525b, #3f3f46, #52525b)' }} />
-                <span className="relative w-2 h-2 rounded-full bg-zinc-600" />
-              </span>
             </div>
-          )}
-
-          <div className="my-2 border-t border-zinc-800/40"></div>
-
-          <nav className="space-y-[calc(0.75rem+3px)]">
-            {chatList.length === 0 ? (
-              <p className="px-4 py-2 text-xs text-zinc-600">No chats yet. Start a conversation!</p>
-            ) : (
-              chatList.map((chat) => (
-                <div
-                  key={chat.id}
-                  className="relative group"
-                  onMouseEnter={() => setHoveredChatId(chat.id)}
-                  onMouseLeave={() => setHoveredChatId(null)}
+          ) : (
+            /* EXPANDED — full nav */
+            <>
+              {appMode === 'chat' ? (
+                <button 
+                  onClick={newChat} 
+                  className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm transition-colors bg-indigo-600/10 text-white hover:bg-indigo-600/20"
                 >
-                  {renamingChatId === chat.id ? (
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        renameChat(chat.id, renameValue);
-                        setRenamingChatId(null);
-                        setRenameValue('');
-                      }}
-                      className="w-full flex items-center gap-2 px-4 py-[calc(0.75rem+6px)]"
-                    >
-                      <input
-                        autoFocus
-                        value={renameValue}
-                        onChange={(e) => setRenameValue(e.target.value)}
-                        onBlur={() => { setRenamingChatId(null); setRenameValue(''); }}
-                        onKeyDown={(e) => { if (e.key === 'Escape') { setRenamingChatId(null); setRenameValue(''); } }}
-                        className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-sm text-white outline-none focus:border-indigo-500"
-                      />
-                    </form>
+                  <svg className="w-[1.2rem] h-[1.2rem] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                  </svg>
+                  New chat
+                </button>
+              ) : (
+                <button 
+                  onClick={() => { setAppMode('workspace'); loadWorkspacesForSidebar(); }} 
+                  className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm transition-colors bg-indigo-600/10 text-white hover:bg-indigo-600/20"
+                >
+                  <svg className="w-[1.2rem] h-[1.2rem] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                  New Workspace
+                </button>
+              )}
+
+              {/* Model selector — inline in sidebar with aurora-gradient status blip (chat mode only) */}
+              {appMode === 'chat' && (
+                <button 
+                  onClick={() => { setModelOverlayOpen(true); if (availableModels.length === 0) getModelsFromStorage(); }}
+                  className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm transition-colors text-zinc-400 hover:text-white hover:bg-zinc-800/20 mt-0.5"
+                >
+                  <svg className="w-[1.2rem] h-[1.2rem] shrink-0 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" strokeWidth={1.5} /><path d="M8 21h8" strokeWidth={1.5} strokeLinecap="round" /><path d="M12 17v4" strokeWidth={1.5} strokeLinecap="round" /></svg>
+                  <div className="flex-1 text-left min-w-0">
+                    <span className="truncate block text-zinc-300">{modelsLoading ? 'Loading...' : (model || 'Select a model')}</span>
+                    {activePersonalityId && (() => {
+                      const p = personalities.find(x => x.id === activePersonalityId);
+                      return p ? <span className="text-[10px] text-indigo-400/70 truncate block">{p.name}</span> : null;
+                    })()}
+                  </div>
+                  <span className="relative flex items-center justify-center w-[1.2rem] h-[1.2rem] shrink-0">
+                    <span className="absolute inset-0 rounded-full opacity-30 blur-[3px]" style={{ background: 'linear-gradient(135deg, #818cf8, #c084fc, #f0abfc)' }} />
+                    <span className="relative w-2 h-2 rounded-full" style={{ background: 'linear-gradient(135deg, #818cf8, #e879f9)' }} />
+                  </span>
+                </button>
+              )}
+
+              <div className="my-2 border-t border-zinc-800/40"></div>
+
+              {appMode === 'chat' ? (
+                /* --- Chat List --- */
+                <nav className="space-y-[calc(0.75rem+3px)]">
+                  {chatList.length === 0 ? (
+                    <p className="px-4 py-2 text-xs text-zinc-600">No chats yet. Start a conversation!</p>
                   ) : (
-                    <button
-                      onClick={() => openChat(chat.id)}
-                      className={`w-full flex items-center gap-3 pl-4 pr-14 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors ${
-                        currentChatId === chat.id ? 'bg-indigo-600/15 text-white' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20'
-                      }`}
-                    >
-                      <svg className="w-[1.2rem] h-[1.2rem] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
-                      <div className="flex-1 min-w-0">
-                        <p className="truncate text-sm">{chat.title || 'Chat'}</p>
+                    chatList.map((chat) => (
+                      <div
+                        key={chat.id}
+                        className="relative group"
+                        onMouseEnter={() => setHoveredChatId(chat.id)}
+                        onMouseLeave={() => setHoveredChatId(null)}
+                      >
+                        {renamingChatId === chat.id ? (
+                          <form
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              renameChat(chat.id, renameValue);
+                              setRenamingChatId(null);
+                              setRenameValue('');
+                            }}
+                            className="w-full flex items-center gap-2 px-4 py-[calc(0.75rem+6px)]"
+                          >
+                            <input
+                              autoFocus
+                              value={renameValue}
+                              onChange={(e) => setRenameValue(e.target.value)}
+                              onBlur={() => { setRenamingChatId(null); setRenameValue(''); }}
+                              onKeyDown={(e) => { if (e.key === 'Escape') { setRenamingChatId(null); setRenameValue(''); } }}
+                              className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-sm text-white outline-none focus:border-indigo-500"
+                            />
+                          </form>
+                        ) : (
+                          <button
+                            onClick={() => openChat(chat.id)}
+                            className={`w-full flex items-center gap-3 pl-4 pr-14 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors ${
+                              currentChatId === chat.id ? 'bg-indigo-600/15 text-white' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20'
+                            }`}
+                          >
+                            <svg className="w-[1.2rem] h-[1.2rem] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
+                            <div className="flex-1 min-w-0">
+                              <p className="truncate text-sm">{chat.title || 'Chat'}</p>
+                            </div>
+                          </button>
+                        )}
+                        {hoveredChatId === chat.id && !renamingChatId && (
+                          <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-zinc-900/90 backdrop-blur-sm rounded-lg px-1 py-0.5">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setRenamingChatId(chat.id); setRenameValue(chat.title || ''); }}
+                              className="p-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700/50 transition-colors"
+                              title="Rename"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setDeleteConfirmChat(chat); }}
+                              className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-colors"
+                              title="Delete"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            </button>
+                          </div>
+                        )}
                       </div>
-                    </button>
+                    ))
                   )}
-                  {hoveredChatId === chat.id && !renamingChatId && (
-                    <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-zinc-900/90 backdrop-blur-sm rounded-lg px-1 py-0.5">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setRenamingChatId(chat.id); setRenameValue(chat.title || ''); }}
-                        className="p-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700/50 transition-colors"
-                        title="Rename"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setDeleteConfirmChat(chat); }}
-                        className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-colors"
-                        title="Delete"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                      </button>
-                    </div>
+                </nav>
+              ) : (
+                /* --- Workspace List (max 4 with pagination) --- */
+                <nav className="space-y-[calc(0.75rem+3px)]">
+                  {workspaceList.length === 0 ? (
+                    <p className="px-4 py-2 text-xs text-zinc-600">No workspaces yet. Create one!</p>
+                  ) : (
+                    <>
+                      {workspaceList.slice(0, workspaceSidebarPage * WORKSPACES_PER_PAGE).map((ws) => (
+                        <button
+                          key={ws.id}
+                          onClick={() => setAppMode('workspace')}
+                          className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20"
+                          title={`Open workspace: ${ws.name}`}
+                        >
+                          <svg className="w-[1.2rem] h-[1.2rem] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                          <div className="flex-1 min-w-0">
+                            <p className="truncate text-sm">{ws.name}</p>
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              {ws.codeMode === 'vibe' && (
+                                <span className="text-[10px] px-1 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10">Vibe</span>
+                              )}
+                              {ws.isGitRepo && (
+                                <span className="text-[10px] text-zinc-600">Git</span>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                      {workspaceList.length > workspaceSidebarPage * WORKSPACES_PER_PAGE && (
+                        <button
+                          onClick={() => setWorkspaceSidebarPage(p => p + 1)}
+                          className="w-full px-4 py-2 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/20 rounded-lg transition-colors"
+                        >
+                          Show more ({workspaceList.length - workspaceSidebarPage * WORKSPACES_PER_PAGE} more)
+                        </button>
+                      )}
+                    </>
                   )}
-                </div>
-              ))
-            )}
-          </nav>
+                </nav>
+              )}
+            </>
+          )}
         </div>
 
-        <div className="p-4 border-t border-zinc-800/40">
-          {!hydrated ? (
-            <div className="flex items-center gap-3 px-2 py-2 animate-pulse">
-              <div className="w-8 h-8 rounded-full bg-zinc-800" />
-              <div className="flex-1 space-y-1.5">
-                <div className="h-3.5 w-28 bg-zinc-800 rounded" />
-                <div className="h-2.5 w-14 bg-zinc-800 rounded" />
-              </div>
-            </div>
-          ) : !user ? (
-            <button
-              onClick={() => setAuthModalOpen(true)}
-              className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-500 transition-colors flex items-center justify-center"
-            >
-              Sign In
-            </button>
-          ) : (
+        <div className={`${sidebarCollapsed ? 'p-2' : 'p-4'} border-t border-zinc-800/40`}>
             <div className="relative">
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="w-full flex items-center gap-3 px-2 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-700/50 transition-colors"
+                className={`w-full flex items-center gap-3 ${sidebarCollapsed ? 'px-0 justify-center' : 'px-2'} py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-700/50 transition-colors`}
               >
-                <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-medium">
+                <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-medium flex-shrink-0">
                   {user.name?.[0] || user.email[0].toUpperCase()}
                 </div>
-                <div className="flex-1 min-w-0 text-left">
-                  <p className="text-sm font-medium truncate">{user.name || user.email}</p>
-                  <p className="text-xs text-zinc-500">Free Plan</p>
-                </div>
-                <svg className={`w-4 h-4 text-zinc-500 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                {!(sidebarCollapsed) && (
+                  <>
+                    <div className="flex-1 min-w-0 text-left">
+                      <p className="text-sm font-medium truncate">{user.name || user.email}</p>
+                      <p className="text-xs text-zinc-500">Free Plan</p>
+                    </div>
+                    <svg className={`w-4 h-4 text-zinc-500 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                  </>
+                )}
               </button>
 
               {/* Drop-up Menu */}
@@ -1399,7 +1541,6 @@ export default function Home() {
                 </>
               )}
             </div>
-          )}
         </div>
       </aside>
 
@@ -1415,7 +1556,7 @@ export default function Home() {
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Header with mode tabs + model selector */}
-        <header className="fixed top-0 left-26 right-0 h-[50px] bg-zinc-950/80 backdrop-blur-md flex items-center justify-between px-3 z-40">
+        <header className={`fixed top-0 ${sidebarCollapsed ? 'left-[52px]' : 'left-[260px]'} right-0 h-[50px] bg-zinc-950/80 backdrop-blur-md flex items-center justify-between px-3 z-40 transition-all duration-200`}>
           {/* Mode Tabs */}
           <div className="flex items-center gap-1">
             <button
@@ -1434,7 +1575,7 @@ export default function Home() {
               </span>
             </button>
             <button
-              onClick={() => setAppMode('workspace')}
+              onClick={() => { setAppMode('workspace'); loadWorkspacesForSidebar(); }}
               className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                 appMode === 'workspace'
                   ? 'bg-zinc-800 text-white'
@@ -1472,24 +1613,7 @@ export default function Home() {
             <span className="font-semibold text-zinc-100">Aurora</span>
           </div>
 
-          <div className="hidden md:flex items-center gap-2 flex-shrink-0">
-            {!user && (
-              <>
-                <button
-                  onClick={() => setAuthModalOpen(true)}
-                  className="px-4 py-1.5 text-xs font-medium text-zinc-300 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors"
-                >
-                  Log in
-                </button>
-                <button
-                  onClick={() => { setAuthMode('register'); setAuthModalOpen(true); }}
-                  className="px-4 py-1.5 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-500 transition-colors"
-                >
-                  Sign up
-                </button>
-              </>
-            )}
-          </div>
+          <div className="hidden md:flex items-center gap-2 flex-shrink-0" />
         </header>
 
         {/* Conditional content: Chat vs Workspace */}
@@ -1639,7 +1763,7 @@ export default function Home() {
                               <div className="absolute top-0 left-4 right-0 h-8 bg-gradient-to-b from-zinc-800/60 via-zinc-800/30 to-transparent z-10 pointer-events-none" />
                               <div
                                 ref={thinkingContainerRef}
-                                className="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap max-h-[6rem] overflow-y-auto"
+                                className="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap max-h-[10rem] overflow-y-auto"
                                 style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
                               >
                                 {msg.thinking}

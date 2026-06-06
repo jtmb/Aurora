@@ -16,6 +16,7 @@ function getUserId(request) {
 }
 
 // GET /api/chats — list user's chats (newest first)
+// Optional query param: ?workspaceId=xyz to filter by workspace
 export async function GET(request) {
   try {
     runMigrations();
@@ -25,9 +26,19 @@ export async function GET(request) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
     }
 
-    const chats = db.prepare(`
-      SELECT * FROM chats WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
-    `).all(userId);
+    const { searchParams } = new URL(request.url);
+    const workspaceId = searchParams.get('workspaceId');
+
+    let chats;
+    if (workspaceId) {
+      chats = db.prepare(`
+        SELECT * FROM chats WHERE user_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 50
+      `).all(userId, workspaceId);
+    } else {
+      chats = db.prepare(`
+        SELECT * FROM chats WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
+      `).all(userId);
+    }
 
     return NextResponse.json({ chats: chats.map(c => ({ id: c.id, ...c })) });
   } catch (error) {
@@ -60,9 +71,9 @@ export async function POST(request) {
     };
 
     db.prepare(`
-      INSERT INTO chats (id, user_id, title, model_id, provider, message_count, created_at)
-      VALUES (?, ?, ?, ?, ?, 0, ?)
-    `).run(chatId, userId, chatData.title, chatData.modelId, chatData.provider, chatData.createdAt);
+      INSERT INTO chats (id, user_id, title, model_id, provider, message_count, workspace_id, created_at)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+    `).run(chatId, userId, chatData.title, chatData.modelId, chatData.provider, body.workspaceId || '', chatData.createdAt);
 
     return NextResponse.json({ id: chatId, ...chatData }, { status: 201 });
   } catch (error) {

@@ -57,6 +57,7 @@ const SCHEMA = {
       title TEXT DEFAULT 'New Chat',
       model_id TEXT DEFAULT '',
       provider TEXT DEFAULT '',
+      workspace_id TEXT DEFAULT '',
       message_count INTEGER DEFAULT 0,
       last_message_at TEXT DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -143,6 +144,21 @@ export function runMigrations() {
       created.push(name);
       console.log(`[SQLite] Created table: ${name}`);
     }
+  }
+
+  // Migrate existing chats table: add workspace_id column (new in 2026-06)
+  try {
+    db.exec(`ALTER TABLE chats ADD COLUMN workspace_id TEXT DEFAULT ''`);
+    console.log('[SQLite] Added workspace_id column to chats (migration)');
+  } catch {
+    // Column already exists — safe to ignore
+  }
+
+  // Create workspace index if it doesn't exist (must run after column migration)
+  try {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_chats_workspace ON chats(workspace_id)`);
+  } catch {
+    // Already exists — safe to ignore
   }
 
   // Seed default local model mapping for any users who don't have one

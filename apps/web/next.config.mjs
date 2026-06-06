@@ -4,7 +4,15 @@ const nextConfig = {
     '@aurora/auth-service',
     '@aurora/api-gateway',
   ],
-  serverExternalPackages: ['better-sqlite3', 'node-pty', 'ws'],
+  serverExternalPackages: [
+    'better-sqlite3',
+    'node-pty',
+    'ws',
+    'jsonwebtoken',
+    'simple-git',
+    'debug',
+    '@kwsites/file-exists',
+  ],
   experimental: {
     externalDir: true,
   },

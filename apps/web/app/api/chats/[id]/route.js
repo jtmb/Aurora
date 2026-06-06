@@ -41,6 +41,7 @@ export async function GET(request, { params }) {
       title: chat.title,
       modelId: chat.model_id,
       provider: chat.provider,
+      workspaceId: chat.workspace_id || '',
       messageCount: chat.message_count,
       createdAt: chat.created_at,
       messages: messages.map(m => ({ id: m.id, role: m.role, content: m.content, timestamp: m.timestamp, model: m.model, provider: m.provider }))

@@ -15,6 +15,8 @@ const TerminalPanel = dynamic(() => import('./TerminalPanel'), { ssr: false });
 
 export default function WorkspaceMode({}) {
   const [workspaces, setWorkspaces] = useState([]);
+  const [workspacePage, setWorkspacePage] = useState(1);
+  const WORKSPACES_PER_PAGE = 4;
   const [activeWorkspace, setActiveWorkspace] = useState(null);
   const [fileTree, setFileTree] = useState([]);
   const [openFiles, setOpenFiles] = useState([]);
@@ -100,6 +102,7 @@ export default function WorkspaceMode({}) {
       const res = await fetch('/api/workspace/list');
       const data = await res.json();
       setWorkspaces(data.workspaces || []);
+      setWorkspacePage(1);
     } catch (err) {
       console.error('Load workspaces error:', err);
     }
@@ -173,11 +176,37 @@ export default function WorkspaceMode({}) {
         localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
       }
 
+      // No localStorage mapping — query server for chats by workspace_id
+      const listRes = await fetch(`/api/chats?workspaceId=${encodeURIComponent(ws.id)}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        const existingChats = listData.chats || [];
+        if (existingChats.length > 0) {
+          // Found an existing chat for this workspace — use the newest one
+          chatId = existingChats[0].id;
+          wsChats[ws.id] = chatId;
+          localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
+          setWorkspaceChatId(chatId);
+
+          // Load its messages
+          const chatRes = await fetch(`/api/chats/${chatId}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (chatRes.ok) {
+            const chatData = await chatRes.json();
+            setWorkspaceMessages(chatData.messages || []);
+            return;
+          }
+        }
+      }
+
       // Create a new chat for this workspace
       const createRes = await fetch('/api/chats', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: `Workspace: ${ws.name}` })
+        body: JSON.stringify({ title: `Workspace: ${ws.name}`, workspaceId: ws.id })
       });
       if (createRes.ok) {
         const createData = await createRes.json();
@@ -559,7 +588,7 @@ export default function WorkspaceMode({}) {
             <div>
               <p className="text-xs font-medium text-zinc-500 mb-3 uppercase tracking-wider">Recent Workspaces</p>
               <div className="space-y-1">
-                {workspaces.map((ws) => (
+                {workspaces.slice(0, workspacePage * WORKSPACES_PER_PAGE).map((ws) => (
                   <div
                     key={ws.id}
                     className="flex items-center gap-3 px-4 py-3 rounded-xl bg-zinc-900/60 border border-zinc-800/40 hover:border-zinc-700/40 transition-colors group"
@@ -605,6 +634,14 @@ export default function WorkspaceMode({}) {
                     </button>
                   </div>
                 ))}
+                {workspaces.length > workspacePage * WORKSPACES_PER_PAGE && (
+                  <button
+                    onClick={() => setWorkspacePage(p => p + 1)}
+                    className="w-full px-4 py-2 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/20 rounded-lg transition-colors"
+                  >
+                    Show more ({workspaces.length - workspacePage * WORKSPACES_PER_PAGE} more)
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -705,17 +742,15 @@ export default function WorkspaceMode({}) {
                 }}
                 currentFileContent={null}
                 onOpenPreview={async () => {
-                  // Detect/re-detect preview info, then show if valid
+                  // Refresh preview info, then ALWAYS open panel
                   try {
                     const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
                     const previewData = await previewRes.json();
                     if (!previewData.error) {
                       setPreviewInfo(previewData);
-                      if (previewData.type && previewData.type !== 'none') {
-                        setShowPreview(true);
-                      }
                     }
                   } catch {}
+                  setShowPreview(true);
                 }}
                 onToggleMode={handleToggleMode}
                 codeMode={codeMode}
@@ -748,17 +783,16 @@ export default function WorkspaceMode({}) {
                     setShowPreview(false);
                     return;
                   }
-                  // Detect/re-detect preview info
+                  // Always refresh preview info, then open panel
                   try {
                     const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
                     const previewData = await previewRes.json();
                     if (!previewData.error) {
                       setPreviewInfo(previewData);
-                      if (previewData.type && previewData.type !== 'none') {
-                        setShowPreview(true);
-                      }
                     }
                   } catch {}
+                  // ALWAYS open the preview panel — detection is informational
+                  setShowPreview(true);
                 }}
                 className={`p-1 rounded transition-colors ${showPreview ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-500 hover:text-zinc-300'}`}
                 title={showPreview ? 'Show code editor' : `Preview ${previewInfo?.framework || 'app'}`}

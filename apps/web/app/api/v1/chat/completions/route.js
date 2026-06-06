@@ -133,7 +133,7 @@ const normalizeToOpenAIFormat = (data, providerId, modelName) => {
 /**
  * Build the provider-specific request URL and body
  */
-const buildProviderRequest = (provider, model, messages, temperature, maxTokens, stream = false) => {
+const buildProviderRequest = (provider, model, messages, temperature, maxTokens, stream = false, extraParams = {}) => {
   let url, body, headers = { 'Content-Type': 'application/json' };
 
   switch (provider.id) {
@@ -142,14 +142,14 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens,
       // Ensure /v1 prefix regardless of whether settings already includes it
       const lmBase = provider.baseUrl.endsWith('/v1') ? provider.baseUrl : `${provider.baseUrl}/v1`;
       url = `${lmBase}/chat/completions`;
-      body = { model, messages, temperature, max_tokens: maxTokens, stream };
+      body = { model, messages, temperature, max_tokens: maxTokens, stream, ...extraParams };
       break;
 
     case 'deepseek':
       // DeepSeek uses OpenAI-compatible API
       url = `${provider.baseUrl}/chat/completions`;
       headers['Authorization'] = `Bearer ${provider.apiKey}`;
-      body = { model, messages, temperature, max_tokens: maxTokens, stream };
+      body = { model, messages, temperature, max_tokens: maxTokens, stream, ...extraParams };
       break;
 
     default:
@@ -211,8 +211,11 @@ export async function POST(request) {
 
     // Build and send the provider request
     const streamMode = body.stream === true;
+    const extraParams = {};
+    if (body.extended_thinking) extraParams.extended_thinking = true;
+    if (body.thinking) extraParams.thinking = body.thinking;
     const { url, body: providerBody, headers } = buildProviderRequest(
-      selectedProvider, model, messages, temperature, body.max_tokens, streamMode
+      selectedProvider, model, messages, temperature, body.max_tokens, streamMode, extraParams
     );
 
     console.log(`[Aurora] Routing to ${selectedProvider.name} (${selectedProvider.id}) -> ${url}${streamMode ? ' [stream]' : ''}`);

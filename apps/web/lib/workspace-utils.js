@@ -151,3 +151,165 @@ export function validateWorkspace(workspaceId) {
   if (!fs.existsSync(dir)) return null;
   return dir;
 }
+
+/**
+ * Detect the project framework from a workspace directory and update/append
+ * framework-specific guidance to AGENTS.md. Only writes if the file doesn't
+ * already have a framework section (idempotent).
+ *
+ * Returns the detected framework name, or null if unknown.
+ */
+export function ensureAgentsMd(wsDir) {
+  try {
+    const files = fs.readdirSync(wsDir);
+    const agentsPath = path.join(wsDir, 'AGENTS.md');
+    const claudePath = path.join(wsDir, 'CLAUDE.md');
+
+    // Check for package.json
+    const pkgPath = path.join(wsDir, 'package.json');
+    let pkg = null;
+    if (fs.existsSync(pkgPath)) {
+      try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')); } catch {}
+    }
+
+    let framework = null;
+    let section = '';
+
+    // --- FRAMEWORK DETECTION ---
+    if (pkg) {
+      const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      const depNames = Object.keys(deps);
+      const scripts = Object.keys(pkg.scripts || {});
+      const hasNextConfig = files.some(f => f.startsWith('next.config.'));
+
+      if (hasNextConfig || depNames.includes('next')) {
+        framework = 'Next.js';
+        section = `
+## Next.js Project
+
+<!-- BEGIN:nextjs-agent-rules -->
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in \`node_modules/next/dist/docs/\` before writing any code. Heed deprecation notices.
+<!-- END:nextjs-agent-rules -->
+
+- **Version**: Use \`"next": "^15.0.3"\` in package.json. NEVER use "latest" — it causes unpredictable install failures.
+- **React**: \`"react": "^19.0.0"\`, \`"react-dom": "^19.0.0"\`.
+- **Typescript**: Use \`"typescript": "~5.6.0"\` (NOT "latest").
+- **App Router**: Use \`app/\` directory with \`page.tsx\`/\`layout.tsx\`, not \`pages/\`.
+- **Dev command**: \`${scripts.includes('dev') ? 'npm run dev' : 'npx next dev'}\`
+- **Port**: Default 3000, auto-assigned to avoid conflicts.
+- **Deps**: \`npm install --legacy-peer-deps\` runs automatically if node_modules is missing.
+- **TypeScript**: Next.js auto-installs TypeScript deps when it detects \`tsconfig.json\`.
+- **Tailwind v3** (use v3 \`tailwindcss@^3\`, NOT v4):
+  - REQUIRES \`postcss.config.mjs\` with \`tailwindcss\` and \`autoprefixer\` plugins
+  - REQUIRES \`tailwind.config.js\` scanning \`./app/**/*.{js,ts,jsx,tsx}\`
+  - CSS MUST use \`@tailwind base;\\n@tailwind components;\\n@tailwind utilities;\` (NEVER \`@import "tailwindcss"\` — that's v4 syntax)
+- **"use client"**: REQUIRED in any file using \`useState\`, \`useEffect\`, \`onClick\`, framer-motion, or lucide-react icons.
+`;
+      } else if (depNames.includes('vite')) {
+        framework = 'Vite';
+        section = `
+## Vite Project
+
+- **Dev command**: \`${scripts.includes('dev') ? 'npm run dev' : 'npx vite'}\`
+- **Port**: Default 5173, auto-assigned to avoid conflicts.
+- **Build**: \`npm run build\` then serve \`dist/\` with \`npx serve dist\`.
+- **Framework variants**: Check \`vite.config\` for React/Svelte/Vue plugin.
+`;
+      } else if (depNames.includes('react-scripts')) {
+        framework = 'Create React App';
+        section = `
+## Create React App Project
+
+- **Dev command**: \`${scripts.includes('start') ? 'npm start' : 'npx react-scripts start'}\`
+- **Port**: Default 3000, auto-assigned.
+- **Build**: \`npm run build\` then serve \`build/\`.
+`;
+      } else if (scripts.includes('start') || scripts.includes('dev')) {
+        framework = 'Node.js';
+        section = `
+## Node.js Project
+
+- **Dev command**: \`${scripts.includes('dev') ? 'npm run dev' : 'npm start'}\`
+- **Runtime**: Node.js v22.22.3, npm 10.9.8.
+- **Deps**: \`npm install\` runs automatically if node_modules is missing.
+`;
+      }
+    }
+
+    // Python detection
+    if (!framework) {
+      if (files.includes('requirements.txt') || files.includes('pyproject.toml') || files.includes('setup.py')) {
+        framework = 'Python';
+        section = `
+## Python Project
+
+- **Runtime**: Python 3.12.3
+- **Virtual env**: Create with \`python3 -m venv .venv\` and activate with \`source .venv/bin/activate\`.
+- **Install deps**: \`pip install -r requirements.txt\` (or \`pip install -e .\` for pyproject.toml).
+- **Dev server**: \`python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000\` (FastAPI) or \`python -m flask run --port 8000\` (Flask).
+- **Port**: Default 8000 for web frameworks.
+`;
+      }
+    }
+
+    // Go detection
+    if (!framework && files.includes('go.mod')) {
+      framework = 'Go';
+      section = `
+## Go Project
+
+- **Runtime**: Use \`go version\` to check. Module in \`go.mod\`.
+- **Install deps**: \`go mod tidy\`
+- **Run**: \`go run .\` or \`go run main.go\`
+- **Build**: \`go build -o bin/app .\`
+`;
+    }
+
+    // Rust detection
+    if (!framework && files.includes('Cargo.toml')) {
+      framework = 'Rust';
+      section = `
+## Rust Project
+
+- **Runtime**: Use \`rustc --version\` to check.
+- **Build**: \`cargo build\`
+- **Run**: \`cargo run\`
+- **Dev**: \`cargo watch -x run\` (install with \`cargo install cargo-watch\`)
+`;
+    }
+
+    // Static site detection
+    if (!framework && files.includes('index.html')) {
+      framework = 'Static Site';
+      section = `
+## Static Site
+
+- **Serve**: \`npx serve . --no-clipboard\`
+- **Port**: Auto-assigned by serve.
+- No build step needed — files are served directly.
+`;
+    }
+
+    // Write framework section if detected
+    if (framework && section) {
+      // Check if AGENTS.md already has a framework section
+      const existingContent = fs.existsSync(agentsPath)
+        ? fs.readFileSync(agentsPath, 'utf-8')
+        : fs.existsSync(claudePath)
+          ? fs.readFileSync(claudePath, 'utf-8')
+          : '';
+
+      // Only append if no framework section exists yet
+      if (existingContent && !existingContent.includes(`## ${framework} Project`)) {
+        fs.appendFileSync(agentsPath, section);
+      }
+    }
+
+    return framework;
+  } catch (err) {
+    console.error('[workspace-utils] ensureAgentsMd error:', err.message);
+    return null;
+  }
+}

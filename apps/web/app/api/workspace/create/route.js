@@ -50,6 +50,102 @@ export async function POST(request) {
       // Create blank workspace directory
       fs.mkdirSync(wsDir, { recursive: true });
     }
+
+    // Bootstrap AGENTS.md with full Next.js rules so the coding agent knows the runtime environment
+    // and project conventions. Framework rules are included directly (no deferred injection).
+    // Only write if no AGENTS.md or CLAUDE.md already exists (cloned repos may have one).
+    const existingAgents = fs.existsSync(path.join(wsDir, 'AGENTS.md'));
+    const existingClaude = fs.existsSync(path.join(wsDir, 'CLAUDE.md'));
+    if (!existingAgents && !existingClaude) {
+      const agentsMd = `# Workspace: ${name.trim()}
+
+## Runtime Environment
+
+| Tool | Version |
+|------|---------|
+| Node.js | v22.22.3 |
+| npm | 10.9.8 |
+| Python | 3.12.3 |
+
+## Universal Rules
+
+1. **Discover first**: Use \`list_dir\` and \`read_file\` to understand the project before writing code.
+2. **Respect existing tooling**: Use whatever package manager and build system the project already has.
+3. **Don't downgrade**: NEVER replace a framework project with a static HTML file because the dev server fails. Debug it instead.
+
+## Next.js Project
+
+<!-- BEGIN:nextjs-agent-rules -->
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in \`node_modules/next/dist/docs/\` before writing any code. Heed deprecation notices.
+<!-- END:nextjs-agent-rules -->
+
+- **Version**: Use \`"next": "latest"\` in package.json (NOT "15.0.0"). Next 16+ works with React 19.
+- **React**: \`"react": "^19.0.0"\`, \`"react-dom": "^19.0.0"\`.
+- **App Router**: Use \`app/\` directory with \`page.tsx\`/\`layout.tsx\`, not \`pages/\`.
+- **🚫 NO src/ DIRECTORY**: Place ALL files at the project root (e.g., \`app/page.tsx\`, \`app/layout.tsx\`). Do NOT nest inside \`src/\` — this is OLD Next.js convention and WILL cause CSS/build failures.
+- **Dev command**: \`npm run dev\`
+- **Port**: Default 3000, auto-assigned to avoid conflicts.
+- **Deps**: \`npm install --legacy-peer-deps\` runs automatically if node_modules is missing.
+- **TypeScript**: Next.js auto-installs TypeScript deps when it detects \`tsconfig.json\`.
+- **Tailwind**: Use v3 (\`tailwindcss@^3\`), not v4. Requires \`postcss.config.js\` with \`tailwindcss\` and \`autoprefixer\` plugins. Tailwind v4 has completely different syntax — \`@tailwind\` directives and \`tailwind.config.ts\` files only work with v3.
+`;
+      fs.writeFileSync(path.join(wsDir, 'AGENTS.md'), agentsMd);
+    }
+
+    // Bootstrap .aurora/ directory for self-improving agent infrastructure
+    const auroraDir = path.join(wsDir, '.aurora');
+    if (!fs.existsSync(auroraDir)) {
+      fs.mkdirSync(auroraDir, { recursive: true });
+      // Create empty corpus.jsonl
+      fs.writeFileSync(path.join(auroraDir, 'corpus.jsonl'), '');
+      // Create skills/ directory
+      const skillsDir = path.join(auroraDir, 'skills');
+      fs.mkdirSync(skillsDir, { recursive: true });
+      // Create skills README explaining auto-creation
+      const skillsReadme = `# Agent-Learned Skills
+
+This directory contains reusable coding patterns automatically extracted by the Aurora AI agent
+after successful build sessions. Skills are **not** manually managed — the agent creates, updates,
+and deletes them as it learns.
+
+## How Skills Work
+
+1. During a build session, the agent detects friction events (build failures, stuck loops, etc.)
+2. These events are recorded in \`.aurora/corpus.jsonl\` to prevent future repetition
+3. After a **successful** build (2+ files created, all tasks complete), the agent auto-extracts
+   reusable patterns into this directory
+4. On subsequent requests, matching skills are injected into the agent's system prompt
+
+## Skill File Format
+
+Skills are Markdown files with YAML frontmatter:
+
+\`\`\`markdown
+---
+name: Pattern Name
+description: What this skill covers
+applyTo: keyword1, keyword2, keyword3
+created: 2025-01-15T00:00:00.000Z
+---
+
+Markdown instructions for reproducing this pattern...
+\`\`\`
+
+## Keyword Matching
+
+The \`applyTo\` field controls which user requests trigger this skill.
+Keywords are matched as **case-insensitive substrings** against the user's message.
+A skill with no \`applyTo\` keywords is considered general-purpose and always injected.
+
+## Do Not Edit Manually
+
+Skills are maintained entirely by the agent. Manual edits may be overwritten.
+If you need to remove a skill, delete its \`.md\` file.
+`;
+      fs.writeFileSync(path.join(skillsDir, 'README.md'), skillsReadme);
+    }
     
     // Write metadata
     const metadata = {
