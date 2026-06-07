@@ -906,10 +906,25 @@ export default function Home() {
       return;
     }
 
+    // Auto-correct providerId from selected model's source (safeguard)
+    const selectedModelObj = availableModels.find(m => m.id === model);
+    let correctedProvider = providerId;
+    if (selectedModelObj) {
+      const sourceProvider = selectedModelObj.source === 'Ollama' ? 'ollama'
+        : selectedModelObj.source === 'Anthropic' ? 'anthropic'
+        : selectedModelObj.source === 'LM Studio' ? 'lmstudio'
+        : selectedModelObj.source === 'DeepSeek' ? 'deepseek'
+        : 'openai';
+      if (correctedProvider !== sourceProvider) {
+        correctedProvider = sourceProvider;
+        setProviderId(sourceProvider);
+      }
+    }
+
     // LM Studio guard: check model limit before doing anything else
     // Models only load on first chat request, not on dropdown selection
-    if (providerId === 'lmstudio') {
-      const canSend = await guardLmStudioSend();
+    if (correctedProvider === 'lmstudio') {
+      const canSend = await guardLmStudioSend(correctedProvider);
       if (!canSend) return;
     }
 
@@ -934,7 +949,7 @@ export default function Home() {
           const chatRes = await fetch('/api/chats', {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: inputValue.slice(0, 60), model, provider: providerId })
+            body: JSON.stringify({ title: inputValue.slice(0, 60), model, provider: correctedProvider })
           });
           if (chatRes.ok) {
             const chatData = await chatRes.json();
@@ -958,13 +973,13 @@ export default function Home() {
           await fetch(`/api/chats/${chatId}/messages`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ role: 'user', content: inputValue, model, provider: providerId })
+            body: JSON.stringify({ role: 'user', content: inputValue, model, provider: correctedProvider })
           });
           // Update the chat's model if it changed
           await fetch(`/api/chats/${chatId}`, {
             method: 'PATCH',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ modelId: model, provider: providerId })
+            body: JSON.stringify({ modelId: model, provider: correctedProvider })
           });
         }
       } catch {}
@@ -1084,12 +1099,12 @@ export default function Home() {
       // Thinking effort → temperature mapping, with provider-specific params
       const temp = thinkingEffort === 'high' ? 0.1 : thinkingEffort === 'low' ? 0.5 : 0.3;
       const extraParams = {};
-      if (providerId === 'deepseek' && thinkingEffort === 'high') {
+      if (correctedProvider === 'deepseek' && thinkingEffort === 'high') {
         // DeepSeek OpenAI-format thinking: reasoning_effort + thinking: { type: "enabled" }
         // No temperature/top_p in thinking mode (DeepSeek ignores them)
         extraParams.reasoning_effort = thinkingEffort;
         extraParams.thinking_type = 'enabled';
-      } else if (providerId !== 'deepseek' && thinkingEffort === 'high') {
+      } else if (correctedProvider !== 'deepseek' && thinkingEffort === 'high') {
         // LM Studio / Anthropic-format thinking
         extraParams.extended_thinking = true;
       }
@@ -1098,12 +1113,12 @@ export default function Home() {
       const bodyObj = {
         model,
         messages: messagesArray,
-        provider: providerId,
+        provider: correctedProvider,
         stream: true,
         max_tokens: null,
         ...extraParams,
       };
-      if (!(providerId === 'deepseek' && thinkingEffort === 'high')) {
+      if (!(correctedProvider === 'deepseek' && thinkingEffort === 'high')) {
         bodyObj.temperature = temp;
         bodyObj.top_p = 1;
       }
@@ -1171,7 +1186,7 @@ export default function Home() {
                 thinking: streamedThinking || undefined,
                 timestamp: new Date().toISOString(),
                 model: data.model || model,
-                provider: providerId,
+                provider: correctedProvider,
                 searchSources: searchSourcesCache || undefined
               }]);
             } else {
@@ -1204,7 +1219,7 @@ export default function Home() {
             await fetch(`/api/chats/${chatId}/messages`, {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ role: 'assistant', content: cleanedFinal, thinking: finalThinking || '', model, provider: providerId })
+              body: JSON.stringify({ role: 'assistant', content: cleanedFinal, thinking: finalThinking || '', model, provider: correctedProvider })
             });
           }
         } catch {}
@@ -1397,8 +1412,8 @@ export default function Home() {
   };
 
   // Guard LM Studio sends: if selected model isn't loaded and limit is reached, ask user to unload
-  const guardLmStudioSend = async () => {
-    if (providerId !== 'lmstudio') return true;
+  const guardLmStudioSend = async (prov) => {
+    if (prov !== 'lmstudio') return true;
     const max = parseInt(localStorage.getItem('LM_STUDIO_MAX_MODELS') || '0', 10);
     if (!max || max <= 0) return true;
 

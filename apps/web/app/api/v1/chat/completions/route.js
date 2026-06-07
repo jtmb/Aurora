@@ -281,8 +281,13 @@ export async function POST(request) {
 
     if (!selectedProvider) {
       // Prefer provider that matches the model name
+      // DeepSeek: models start with "deepseek-"
+      // LM Studio: anything else (general-purpose model names)
       if (model.startsWith('deepseek-') && keys.deepseek) {
         selectedProvider = providers.find(p => p.id === 'deepseek');
+      } else if (!model.startsWith('deepseek-') && providers.find(p => p.id === 'lmstudio')) {
+        // Non-DeepSeek model: if LM Studio is available, use it
+        selectedProvider = providers.find(p => p.id === 'lmstudio');
       }
     }
 
@@ -300,6 +305,7 @@ export async function POST(request) {
 
     // Build and send the provider request
     const streamMode = body.stream === true;
+    console.log(`[Aurora] Request model="${model}" provider="${requestedProvider}" → selected="${selectedProvider?.id || 'none'}" providers=[${providers.map(p => p.id).join(',')}]`);
     const extraParams = {};
     // Anthropic-format thinking (LM Studio / Anthropic)
     if (body.extended_thinking) extraParams.extended_thinking = true;
