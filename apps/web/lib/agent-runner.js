@@ -5,6 +5,11 @@
 import { getDb } from '@aurora/shared/db-client';
 import { runMigrations } from '@aurora/shared/db-migrate';
 
+// ── Concurrency guard ──
+// Track which jobs are actively running in this process to prevent
+// multiple concurrent runAgentJob() calls for the same job ID.
+const _runningJobs = new Set();
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildHeaders(apiKeys) {
@@ -117,6 +122,172 @@ const KNOWN_TOOL_NAMES = new Set([
 
 const CONTENT_TOOLS = ['create_file', 'replace_string_in_file', 'run_in_terminal', 'create_skill'];
 
+// ── Provider tool capabilities ───────────────────────────────────────────────
+// 'native'  → provider supports OpenAI-compatible tools/tool_choice params
+// 'custom'  → provider must use fenced-code-block / XML / bracket tool format
+
+const PROVIDER_TOOL_MODE = {
+  deepseek: 'native',
+  openai: 'native',
+  anthropic: 'native',
+  lmstudio: 'custom',
+  ollama: 'custom',
+};
+
+/**
+ * Build OpenAI-format tools definitions array for native tool calling.
+ * Each tool has a name, description, and JSON Schema parameters.
+ */
+function buildNativeTools() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'list_dir',
+        description: 'List the contents of a directory. Returns file/directory names and types.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Relative path to the directory to list. Use "." for root.' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Read the contents of a file. Returns the file content as text.',
+        parameters: {
+          type: 'object',
+          properties: {
+            filePath: { type: 'string', description: 'Relative path to the file to read.' }
+          },
+          required: ['filePath']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'grep_search',
+        description: 'Search for a text pattern in workspace files. Returns matching file paths and line content.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'The text or regex pattern to search for.' }
+          },
+          required: ['query']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'create_file',
+        description: 'Create a new file or overwrite an existing file with the given content.',
+        parameters: {
+          type: 'object',
+          properties: {
+            filePath: { type: 'string', description: 'Relative path for the new file (e.g. src/index.ts).' },
+            content: { type: 'string', description: 'The full content to write to the file.' }
+          },
+          required: ['filePath', 'content']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'replace_string_in_file',
+        description: 'Replace an exact string in an existing file with a new string.',
+        parameters: {
+          type: 'object',
+          properties: {
+            filePath: { type: 'string', description: 'Relative path to the file to edit.' },
+            oldString: { type: 'string', description: 'The exact text to find and replace.' },
+            newString: { type: 'string', description: 'The new text to replace oldString with.' }
+          },
+          required: ['filePath', 'oldString', 'newString']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'run_in_terminal',
+        description: 'Execute a shell command in the workspace. Use for npm install, git, build commands, etc.',
+        parameters: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'The shell command to execute (e.g. "npm install", "npm run build").' }
+          },
+          required: ['command']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'dev_server_status',
+        description: 'Check whether the development server is running and on which port.',
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: []
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'dev_server_start',
+        description: 'Start the development server for the project.',
+        parameters: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'Optional command to start the server (e.g. "npm run dev").' }
+          },
+          required: []
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'dev_server_stop',
+        description: 'Stop the running development server.',
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: []
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'show_preview',
+        description: 'Open a preview panel showing the running app (if server is running).',
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: []
+        }
+      }
+    }
+  ];
+}
+
+/**
+ * Get the tool mode for a given provider. Falls back to 'custom' if unknown.
+ */
+function getToolMode(provider) {
+  const p = (provider || '').toLowerCase();
+  return PROVIDER_TOOL_MODE[p] || 'custom';
+}
+
 function parseAttrs(attrString) {
   const a = {};
   const re = /(\w+)="([^"]*)"/g;
@@ -129,6 +300,21 @@ function parseAttrs(attrString) {
 
 function parseToolCalls(content) {
   const calls = [];
+
+  // Qwen/LM Studio <tool_call> wrapper: <tool_call>inner</tool_call> or <tool_call>inner (truncated)
+  // Strip the wrapper and parse the inner content with existing parsers
+  const tcRegex = /<tool_call>\s*([\s\S]*?)(?:<\/tool_call>|$)/gi;
+  let tcMatch;
+  while ((tcMatch = tcRegex.exec(content)) !== null) {
+    const inner = tcMatch[1].trim();
+    if (inner) {
+      // Recursively parse inner content to find actual tool calls
+      const nested = parseToolCalls(inner);
+      calls.push(...nested);
+    }
+  }
+  // If we found tool calls via <tool_call> wrapper, return them
+  if (calls.length > 0) return calls;
 
   // Self-closing XML: <toolName attr="val"/>
   const selfClosingRegex = /<(\w+)((?:\s+\w+="[^"]*")*)\s*\/>/gi;
@@ -181,8 +367,113 @@ function parseToolCalls(content) {
     calls.push({ name: toolName, args, raw: xmlMatch[0] });
   }
 
+  // <invoke name="toolName">...</invoke> syntax (used by Qwen/LM Studio models)
+  const invokeRegex = /<invoke\s+name="(\w+)"[^>]*>([\s\S]*?)<\/invoke>/gi;
+  let invMatch;
+  while ((invMatch = invokeRegex.exec(content)) !== null) {
+    const toolName = invMatch[1].toLowerCase();
+    if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
+    const innerContent = invMatch[2];
+    const args = {};
+    const paramRegex = /<parameter\s+name="(\w+)"[^>]*>([\s\S]*?)<\/parameter>/gi;
+    let pMatch;
+    while ((pMatch = paramRegex.exec(innerContent)) !== null) {
+      const pName = pMatch[1];
+      const pValue = pMatch[2].trim();
+      if (pName === 'filePath' || pName === 'filepath' || pName === 'file_path') args.filePath = pValue;
+      else if (pName === 'path') args.path = pValue;
+      else if (pName === 'query') args.query = pValue;
+      else if (pName === 'command') args.command = pValue;
+      else if (pName === 'oldString' || pName === 'old_string') args.oldString = pValue;
+      else if (pName === 'newString' || pName === 'new_string') args.newString = pValue;
+      else if (pName === 'name') args.name = pValue;
+      else if (pName === 'description') args.description = pValue;
+      else if (pName === 'content') args.content = pValue;
+      else args[pName] = pValue;
+    }
+    if (args.filePath === undefined && args.path !== undefined) args.filePath = args.path;
+    const fp = args.filePath || args.path;
+    if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+    if (toolName === 'create_file' && args.content === undefined) continue;
+    if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
+    calls.push({ name: toolName, args, raw: invMatch[0] });
+  }
+
+  // Bracket syntax: [toolName arg="val"] ... [/toolName]
+  // Handles models (like Qwen) that use bracket notation instead of XML
+  // Inline: [list_dir path="."]
+  // Block:  [create_file filePath="x.txt"]\nbody\n[/create_file]
+  const bracketRegex = /\[(\w+)\s+((?:\w+=(?:"[^"]*"|'[^']*')\s*)*)\]([\s\S]*?)\[\/\1\]/gi;
+  let bMatch;
+  while ((bMatch = bracketRegex.exec(content)) !== null) {
+    const toolName = bMatch[1].toLowerCase();
+    if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
+    const args = parseAttrs(bMatch[2]);
+    const body = bMatch[3].trim();
+    if (CONTENT_TOOLS.includes(toolName)) {
+      if (toolName === 'replace_string_in_file') {
+        const findIdx = body.indexOf('===FIND===');
+        const replaceIdx = body.indexOf('===REPLACE===');
+        if (findIdx >= 0 && replaceIdx >= 0) {
+          args.oldString = body.slice(findIdx + 10, replaceIdx).trim();
+          args.newString = body.slice(replaceIdx + 13).trim();
+        }
+      } else if (body && args.content === undefined) {
+        args.content = body;
+      }
+    }
+    const fp = args.filePath || args.path;
+    if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+    if (toolName === 'create_file' && args.content === undefined) continue;
+    if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
+    calls.push({ name: toolName, args, raw: bMatch[0] });
+  }
+
+  // Inline bracket: [toolName arg="val"]  (no closing [/toolName])
+  const inlineBracketRegex = /\[(\w+)\s+((?:\w+=(?:"[^"]*"|'[^']*')\s*)*)\]/gi;
+  let ibMatch;
+  while ((ibMatch = inlineBracketRegex.exec(content)) !== null) {
+    const toolName = ibMatch[1].toLowerCase();
+    if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
+    if (CONTENT_TOOLS.includes(toolName)) continue; // Content tools need a body block
+    const args = parseAttrs(ibMatch[2]);
+    const fp = args.filePath || args.path;
+    if ((toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+    calls.push({ name: toolName, args, raw: ibMatch[0] });
+  }
+
+  // Bare tool calls: toolName arg="val"\nbody
+  // Handles models that output tool calls without any fenced code block,
+  // XML, or bracket delimiters — just plain "create_file filePath=\"x.txt\"\\ncontent"
+  const bareRegex = /^(\w+)\s+((?:\w+=(?:"[^"]*"|'[^']*')\s*)+)([\s\S]*?)(?=\n\w+\s+\w+=|$)/gm;
+  let bareMatch;
+  while ((bareMatch = bareRegex.exec(content)) !== null) {
+    const toolName = bareMatch[1].toLowerCase();
+    if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
+    const args = parseAttrs(bareMatch[2]);
+    const body = (bareMatch[3] || '').trim();
+    if (CONTENT_TOOLS.includes(toolName)) {
+      if (toolName === 'replace_string_in_file') {
+        const findIdx = body.indexOf('===FIND===');
+        const replaceIdx = body.indexOf('===REPLACE===');
+        if (findIdx >= 0 && replaceIdx >= 0) {
+          args.oldString = body.slice(findIdx + 10, replaceIdx).trim();
+          args.newString = body.slice(replaceIdx + 13).trim();
+        }
+      } else if (body && args.content === undefined) {
+        args.content = body;
+      }
+    }
+    const fp = args.filePath || args.path;
+    if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+    if (toolName === 'create_file' && args.content === undefined) continue;
+    if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
+    calls.push({ name: toolName, args, raw: bareMatch[0] });
+  }
+
   // Fenced-code-block: ```toolName arg="value"\nbody\n```
-  const regex = /```(\w+)\b\s*(.*?)```/gs;
+  // Handles both closed (with ```) and unclosed (model forgot to close) blocks
+  const regex = /```\s*(\w+)\b\s*(.*?)(?:```|$)/gs;
   let match;
   while ((match = regex.exec(content)) !== null) {
     const toolName = match[1];
@@ -224,6 +515,88 @@ function parseToolCalls(content) {
       calls.push({ name: toolName, args, raw: match[0] });
     }
   }
+
+  // ── Fallback: non-tool fenced code blocks → create_file ──────────────────
+  // Models sometimes output ```json / ```typescript blocks instead of
+  // wrapping them in proper tool call syntax. Convert these to create_file
+  // calls by extracting the file path from the preceding text or inferring
+  // it from the content structure.
+  if (calls.length === 0 && content.includes('```')) {
+    const genericBlockRegex = /```(\w+)\s*\n([\s\S]*?)```/g;
+    let gbMatch;
+    const FILE_LANGS = new Set([
+      'json', 'typescript', 'ts', 'tsx', 'js', 'jsx',
+      'css', 'scss', 'less', 'html', 'yaml', 'yml', 'toml',
+      'md', 'markdown', 'py', 'sql', 'graphql', 'gql'
+    ]);
+    // IMPORTANT: extension alternation must list longer prefixes FIRST
+    // (json before js, tsx before ts) so "package.json" doesn't match as "package.js"
+    const FILE_EXT_ALT = '(?:json|jsx|js|tsx|ts|css|scss|less|html|yaml|yml|toml|md|markdown|py|sql|graphql|gql)';
+    let lastBlockEnd = 0;
+    while ((gbMatch = genericBlockRegex.exec(content)) !== null) {
+      const lang = gbMatch[1].toLowerCase();
+      const body = gbMatch[2].trim();
+      if (!body) continue;
+      if (KNOWN_TOOL_NAMES.has(lang)) { lastBlockEnd = gbMatch.index + gbMatch[0].length; continue; }
+      if (!FILE_LANGS.has(lang)) { lastBlockEnd = gbMatch.index + gbMatch[0].length; continue; }
+
+      // Try to extract file path from text *since the last block* (not the entire document)
+      const beforeText = content.slice(lastBlockEnd, gbMatch.index);
+      let filePath = null;
+
+      const pathPatterns = [
+        // Backtick-quoted paths: Create `file.tsx`, file: `path/to/file.ts`
+        new RegExp(`(?:Create|create|Write|write|file|File|path|Path)\\s*[\`:]\s*\`([^\`]+)\``, 'g'),
+        new RegExp(`(?:Create|create|Write|write)\\s+\`([^\`]+)\``, 'g'),
+        new RegExp(`\`([^\`]+\\.${FILE_EXT_ALT})\``, 'g'),
+        // Quoted/colon paths: file: "foo.tsx", path='bar.css'
+        new RegExp(`(?:file|File|path|Path)\\s*[=:]\\s*["']([^"']+)["']`, 'g'),
+        // Bare paths in natural language: "Create package.json with ...",
+        // "Write src/app/page.tsx", "Task: create styles.css"
+        new RegExp(`(?:Create|create|Write|write|file|File|path|Path)\\s+([^\\s\`"']+\\.${FILE_EXT_ALT})`, 'gi'),
+        // Any bare filename with recognized extension near the block
+        new RegExp(`([^\\s\`"']+\\.${FILE_EXT_ALT})`, 'gi'),
+      ];
+
+      for (const pattern of pathPatterns) {
+        const matches = [...beforeText.matchAll(pattern)];
+        if (matches.length > 0) {
+          filePath = matches[matches.length - 1][1]; // Closest to block
+          break;
+        }
+      }
+
+      // If no path found, try to infer from content
+      if (!filePath) {
+        if (lang === 'json') {
+          try {
+            const parsed = JSON.parse(body);
+            if (parsed.name && (parsed.scripts || parsed.dependencies || parsed.devDependencies)) {
+              filePath = 'package.json';
+            } else if (parsed.compilerOptions !== undefined) {
+              filePath = 'tsconfig.json';
+            }
+          } catch { /* invalid JSON, skip */ }
+        } else if (lang === 'typescript' || lang === 'ts') {
+          const exportMatch = body.match(/export\s+default\s+(?:function|class)\s+(\w+)/);
+          if (exportMatch) filePath = `src/${exportMatch[1]}.ts`;
+        } else if (lang === 'tsx' || lang === 'jsx') {
+          const exportMatch = body.match(/export\s+default\s+(?:function|class)\s+(\w+)/);
+          if (exportMatch) filePath = `src/${exportMatch[1]}.tsx`;
+        }
+      }
+
+      if (filePath) {
+        calls.push({
+          name: 'create_file',
+          args: { filePath, content: body },
+          raw: gbMatch[0],
+        });
+      }
+      lastBlockEnd = gbMatch.index + gbMatch[0].length;
+    }
+  }
+
   return calls;
 }
 
@@ -249,9 +622,13 @@ async function executeToolCall(tc, wsId) {
           return { content: data.content, size: data.size };
         }
         case 'create_file': {
+          const contentStr = tc.args.content;
+          if (contentStr === undefined || contentStr === null || (typeof contentStr === 'string' && contentStr.trim() === '')) {
+            return { error: `Content is empty or missing. You MUST provide the full file content in the 'content' argument of create_file.` };
+          }
           const res = await fetch(`${base}/api/workspace/${wsId}/write`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: tc.args.filePath || tc.args.path, content: tc.args.content })
+            body: JSON.stringify({ path: tc.args.filePath || tc.args.path, content: contentStr })
           });
           const data = await res.json();
           if (data.error) return { error: data.error.message };
@@ -341,10 +718,11 @@ async function executeToolCall(tc, wsId) {
 
 function summarizeToolResult(name, args, result) {
   const fp = args.filePath || args.path || '?';
+  if (result.alreadyExists) return `ALREADY EXISTS: \`${fp}\` was already ${result.existingAction || 'created'}. SKIP — move to NEXT task.`;
   switch (name) {
     case 'read_file': return `Read \`${fp}\` (${result.size || result.content?.length || 0} bytes): ${(result.content || '').slice(0, 500)}${(result.content || '').length > 500 ? '...' : ''}`;
-    case 'create_file': return `Created \`${fp}\` successfully`;
-    case 'replace_string_in_file': return `Patched \`${fp}\` successfully`;
+    case 'create_file': return result.error ? `FAILED to create \`${fp}\`: ${result.error}` : `Created \`${fp}\` successfully`;
+    case 'replace_string_in_file': return result.error ? `FAILED to patch \`${fp}\`: ${result.error}` : `Patched \`${fp}\` successfully`;
     case 'grep_search': return `Found ${result.results?.length || 0} matches for "${args.query}": ${JSON.stringify((result.results || []).slice(0, 5))}`;
     case 'list_dir': {
       const files = result.files || [];
@@ -368,6 +746,7 @@ function loadJob(jobId) {
   if (!job) return null;
   return {
     ...job,
+    agentMode: job.agent_mode,
     plan_todos: JSON.parse(job.plan_todos || '[]'),
     conversation: JSON.parse(job.conversation || '[]'),
     file_manifest: JSON.parse(job.file_manifest || '[]'),
@@ -386,7 +765,7 @@ function saveJob(job) {
     WHERE id = ?
   `).run(
     job.status, job.model, job.provider, job.thinkingEffort || 'high',
-    job.agentMode || 'agent', job.userRequest || '', JSON.stringify(job.planTodos || []), job.planSummary || '',
+    job.agentMode || job.agent_mode || 'agent', job.userRequest || '', JSON.stringify(job.planTodos || []), job.planSummary || '',
     job.iteration || 0, JSON.stringify(job.conversation || []), JSON.stringify(job.fileManifest || []),
     JSON.stringify(job.api_keys || {}),
     job.errorMessage || '', job.id
@@ -420,54 +799,41 @@ async function saveMessageToChat(chatId, role, content, model, provider, msgId, 
 
 // ── System prompt builder (same logic as AgentPanel) ─────────────────────────
 
-/**
- * Strip echoed plan/progress lines from model output.
- * Small models (e.g. DeepSeek v4 Flash) often echo [x]/[ ] task lines
- * as part of their response text instead of just making tool calls.
- */
-function stripEchoedPlanContent(content) {
-  if (!content) return content;
-  // Only strip if there are 3+ [x]/[ ] lines — indicates the model is echoing a plan
-  if (!/^(?:\s*(?:\[x\]|\[ \])\s+.+(?:\n|$)){3,}/m.test(content)) return content;
-  let cleaned = content.replace(/^\s*(?:\[x\]|\[ \])\s+.+\n?/gm, '').trim();
-  cleaned = cleaned.replace(/={2,}\s*BUILD PLAN[\s\S]*?={2,}\n?/g, '').trim();
-  cleaned = cleaned.replace(/^(?:NEXT TASK|CRITICAL|IMPORTANT):.+\n?/gm, '').trim();
-  return cleaned || content; // fallback to original if we stripped everything
-}
-
-function buildSystemPrompt(wsId, mode = 'agent') {
+function buildSystemPrompt(wsId, mode = 'agent', provider = '') {
   if (mode === 'agent') {
-    const toolSyntax = [
-      'create_file filePath="path/file.ext"',
-      '  FILE CONTENT HERE',
-      '```',
-      'read_file filePath="path/file.ext"',
-      'list_dir path="."',
-      'replace_string_in_file filePath="path/file.ext"',
-      '  ===FIND===',
-      '  old text',
-      '  ===REPLACE===',
-      '  new text',
-      'grep_search query="pattern"',
-      'dev_server_status',
-      'dev_server_start command="npm run dev"',
-      'dev_server_stop',
-      'show_preview'
-    ].join('\n');
+    const toolMode = getToolMode(provider);
+    const isNative = toolMode === 'native';
 
     let base = 'You are in AGENT MODE — you autonomously create and modify files. '
       + 'The user can switch to Chat mode for discussion or Plan mode to generate a structured task list before execution.\n'
-      + 'If the user message contains "CONVERSATION HISTORY", that is the prior discussion from Chat/Plan modes — use it for context.\n\n' +
-      'Workspace API: /api/workspace/' + wsId + '. Use RELATIVE paths: "." is root.\n' +
-      'TOOL SYNTAX:\n' + toolSyntax + '\n' +
-      '- First step: `list_dir path="."` to see what exists.\n' +
-      '- create_file puts content INSIDE the block body, never as content="..." attribute.\n' +
-      '- Call ONE tool per response. Nothing outside the fenced block.\n' +
-      '\nTHINK-THEN-ACT — Before every action, briefly reason (1-3 lines max):\n' +
-      '1. WHAT file are you creating/modifying and WHY?\n' +
-      '2. Are your IMPORTS correct?\n' +
-      '3. Does this step have all DEPENDENCIES resolved?\n' +
-      'Output your reasoning in plain text, then the tool block.\n';
+      + 'If the user message contains "CONVERSATION HISTORY", that is the prior discussion from Chat/Plan modes — use it for context.\n\n'
+      + 'Workspace API: /api/workspace/' + wsId + '. Use RELATIVE paths: "." is root.\n\n';
+
+    if (isNative) {
+      base += 'TOOLS: You have native function calling tools. Call them directly using the function calling mechanism built into this chat. '
+        + 'Do NOT use fenced code blocks — the system handles tool execution automatically when you invoke functions.\n'
+        + 'Available tools: list_dir, read_file, grep_search, create_file, replace_string_in_file, run_in_terminal, dev_server_status, dev_server_start, dev_server_stop, show_preview.\n\n';
+    } else {
+      base += 'TOOL FORMAT — wrap EVERY tool call in a fenced code block with the tool name:\n\n'
+        + '```list_dir path="."\n```\n'
+        + '```read_file filePath="path/file.ext"\n```\n'
+        + '```grep_search query="pattern"\n```\n'
+        + '```create_file filePath="path/file.ext"\n[YOUR CONTENT HERE]\n```\n'
+        + '```replace_string_in_file filePath="path/file.ext"\n===FIND===\n[OLD TEXT]\n===REPLACE===\n[NEW TEXT]\n```\n'
+        + '```dev_server_status\n```\n'
+        + '```dev_server_start command="npm run dev"\n```\n'
+        + '```dev_server_stop\n```\n'
+        + '```show_preview\n```\n'
+        + '- create_file: put file content as the body of the code block. Replace [YOUR CONTENT HERE] with the actual content.\n'
+        + '- Nothing outside the fenced code block except a brief reasoning line.\n\n';
+    }
+
+    base += 'RULES:\n'
+      + '- First step: list_dir path="." to see what exists.\n'
+      + '- You can call MULTIPLE tools in a SINGLE response. Batch related operations together for efficiency.\n'
+      + '- Create ALL files the user requested. Do not stop until every requested file exists.\n'
+      + '- You may freely explore the workspace — read files, list directories, search — as much as you need.\n'
+      + '- When you are completely done with ALL tasks, respond with "Task complete" and NO tool calls.\n';
 
     return base;
   }
@@ -513,31 +879,11 @@ One sentence: what the user asked for + the tech stack you'll use.
 
 ## RULES
 - **Every task MUST mention at least one concrete file path.** No vague tasks.
+- **For web app projects (Next.js, React, etc.), the plan MUST include app source files (e.g., app/layout.tsx, app/page.tsx, app/globals.css) — NOT just config files like package.json or tsconfig.json. Without these the app will not build.**
 - **6-12 tasks maximum.** Keep it focused.
 - **No phases** — just a flat ordered task list.
 - **Only use read_file, list_dir, grep_search.**
 - **After outputting the plan, STOP.** The system will surface it to the user with an "Execute Plan" button.`;
-}
-
-// ── Build compact summary (for context window management) ────────────────────
-
-function buildCompactSummary(iter, fileManifest, planTodos, originalRequest, executionErrors) {
-  const doneCount = planTodos.filter(t => t.done).length;
-  const pending = planTodos.filter(t => !t.done);
-  const created = fileManifest.filter(f => f.action === 'created').map(f => f.path);
-  const modified = fileManifest.filter(f => f.action === 'modified').map(f => f.path);
-
-  let summary = `[CONTEXT SUMMARY after ${iter} iterations]\n`;
-  summary += `Progress: ${doneCount}/${planTodos.length} tasks done.\n`;
-  if (pending.length > 0) {
-    summary += `Remaining: ${pending.map(t => t.text).join('; ')}\n`;
-  }
-  if (created.length > 0) summary += `Created: ${created.join(', ')}\n`;
-  if (modified.length > 0) summary += `Modified: ${modified.join(', ')}\n`;
-  if (executionErrors.length > 0) summary += `Recent errors: ${executionErrors.slice(-3).join('; ')}\n`;
-  summary += `\nOriginal request: ${originalRequest}\n`;
-  summary += `Continue with the next pending task. Use a tool call.`;
-  return summary;
 }
 
 // ── Main agent loop ──────────────────────────────────────────────────────────
@@ -549,6 +895,12 @@ function buildCompactSummary(iter, fileManifest, planTodos, originalRequest, exe
  * @param {string} jobId - The job ID from agent_jobs table
  */
 export async function runAgentJob(jobId) {
+  // ── Concurrency guard: prevent multiple concurrent runs of the same job ──
+  if (_runningJobs.has(jobId)) {
+    console.log(`[agent-runner] Job ${jobId} is already running in this process, skipping duplicate call`);
+    return;
+  }
+
   let job = loadJob(jobId);
   if (!job) {
     console.error(`[agent-runner] Job ${jobId} not found`);
@@ -561,46 +913,44 @@ export async function runAgentJob(jobId) {
     return;
   }
 
+  _runningJobs.add(jobId);
+  try {
+    return await _runAgentJobImpl(jobId, job);
+  } finally {
+    _runningJobs.delete(jobId);
+  }
+}
+
+async function _runAgentJobImpl(jobId, job) {
   console.log(`[agent-runner] Starting job ${jobId} for workspace ${job.workspace_id} (mode: ${job.agent_mode || 'agent'})`);
   job.status = 'running';
   saveJob(job);
 
-  const MAX_ITERATIONS = 50;
+  const MAX_ITERATIONS = 100;
   const workspaceId = job.workspace_id;
   const chatId = job.chat_id;
   const model = job.model || 'gpt-4o';
   const provider = job.provider || 'openai';
   const thinkingEffort = job.thinkingEffort || job.thinking_effort || 'high';
   const agentMode = job.agentMode || job.agent_mode || 'agent';
+  const originalRequest = job.userRequest || job.user_request || '';
 
   // State
   let conversation = job.conversation || [];
   let planTodos = job.planTodos || job.plan_todos || [];
   let planSummary = job.planSummary || job.plan_summary || '';
-  let fileManifest = job.fileManifest || job.file_manifest || [];
-  const originalRequest = job.userRequest || job.user_request || '';
   let checkpointTaken = false;
-  let compactedAt = -1;
-  let noToolStreak = 0;
   let planCompleted = false;
-  let buildAttempted = false;
-  let buildVerificationRetries = 0;
-  let barrenStreak = 0;
   const executionErrors = [];
-  const recentToolCalls = [];
-  const recentToolResults = [];
 
   try {
     let startIter = job.iteration || 0;
 
-    // If resuming from interruption, reconstruct the loop position
     if (conversation.length > 0) {
       console.log(`[agent-runner] Resuming job ${jobId} at iteration ${startIter}`);
     }
 
     for (let iter = startIter; iter < MAX_ITERATIONS; iter++) {
-      const label = iter > 0 ? `Step ${iter + 1}` : null;
-
       // ── Check for cancellation before each iteration ──
       const liveJob = loadJob(jobId);
       if (!liveJob || liveJob.status === 'cancelled') {
@@ -612,57 +962,32 @@ export async function runAgentJob(jobId) {
 
       // ── LLM Call ──
       const apiKeys = job.api_keys || {};
-      const { content: rawContent, thinking } = await llmCall(conversation, model, provider, thinkingEffort, apiKeys);
+      const { content: rawContent, thinking, nativeToolCalls } = await llmCall(conversation, model, provider, thinkingEffort, apiKeys);
       const assistantId = `agent_${Date.now()}_${iter}`;
 
-      // Strip echoed plan/progress lines before saving (model may repeat [x]/[ ] tasks)
-      const cleanedContent = stripEchoedPlanContent(rawContent);
+      conversation.push({ role: 'assistant', content: rawContent });
+      await saveMessageToChat(chatId, 'assistant', rawContent, model, provider, assistantId, new Date().toISOString(), thinking);
 
-      conversation.push({ role: 'assistant', content: cleanedContent });
-
-      // Save assistant message (use cleaned content)
-      await saveMessageToChat(chatId, 'assistant', cleanedContent, model, provider, assistantId, new Date().toISOString(), thinking);
-
-      // Parse tool calls
-      const toolCalls = parseToolCalls(rawContent);
+      // ── Parse tool calls ──
+      let toolCalls = [];
+      if (nativeToolCalls && nativeToolCalls.length > 0) {
+        toolCalls = nativeToolCalls.map(ntc => ({ name: ntc.name, args: ntc.args }));
+        console.log(`[agent-runner] Using ${toolCalls.length} native tool_calls: ${toolCalls.map(tc => tc.name).join(', ')}`);
+      } else {
+        toolCalls = parseToolCalls(rawContent);
+        if (toolCalls.length > 0) {
+          console.log(`[agent-runner] Parsed ${toolCalls.length} custom-format tool calls from content`);
+        }
+      }
 
       if (toolCalls.length === 0) {
-        // ════════════════════════════════════════════════════════════════
-        // CLARIFICATION PAUSE — detect when the model asks a question
-        // and pause the job so the user can answer.
-        // ════════════════════════════════════════════════════════════════
-        if (agentMode === 'agent' && !planCompleted && fileManifest.length === 0) {
-          const questionPatterns = [
-            /\?/,                                    // Contains question mark
-            /^(before i|i need to|let me|first|should i|do you want|would you like)/i,
-            /^(which|what|how|where|who|when|can you|could you|please clarify)/i,
-            /(not sure|don't know|unclear|ambiguous|need more|more info|context)/i,
-            /^(do you|are you|is this|is that)/i,
-          ];
-          const isQuestion = questionPatterns.some(p => p.test(rawContent.trim()));
-
-          if (isQuestion) {
-            console.log(`[agent-runner] Job ${jobId}: Detected clarifying question, pausing.`);
-            job.status = 'awaiting_input';
-            job.pendingQuestion = rawContent.trim().slice(0, 1000);
-            job.planTodos = planTodos;
-            job.conversation = conversation;
-            job.iteration = iter;
-            job.fileManifest = fileManifest;
-            saveJob(job);
-            return;
-          }
-        }
-
-        // Plan mode: parse plan from response
+        // ── Plan mode: parse plan from response ──
         if (agentMode === 'plan') {
           const { todos, summary } = parsePlanTodos(rawContent);
           if (todos.length > 0) {
             planTodos = todos;
             planSummary = summary;
             planCompleted = true;
-
-            // Write PLAN.md
             try {
               const planLines = [`# Implementation Plan`, ``, `> **Request:** ${originalRequest.slice(0, 200)}`, ``, `## Tasks`, ``];
               for (const t of todos) planLines.push(`- [${t.done ? 'x' : ' '}] ${t.text}`);
@@ -675,264 +1000,136 @@ export async function runAgentJob(jobId) {
           }
         }
 
-        // No tools, pending tasks?
-        const stillPending = planTodos.filter(t => !t.done);
-        if (stillPending.length > 0) {
-          noToolStreak++;
-          if (noToolStreak >= 3) {
-            if (fileManifest.length > 0 && !buildAttempted) {
-              const bvResult = await runBuildVerification(workspaceId, fileManifest, planTodos, conversation, buildVerificationRetries);
-              buildVerificationRetries = bvResult.retries;
-              if (bvResult.built) { buildAttempted = true; break; }
-            }
-            break;
+        // ── Clarification pause: detect questions before any files are created ──
+        const hasCreatedFiles = conversation.some(m => {
+          if (m.role !== 'assistant') return false;
+          const calls = parseToolCalls(m.content || '');
+          const nativeCalls = [];
+          return calls.some(tc => tc.name === 'create_file') || nativeCalls.some(tc => tc.name === 'create_file');
+        });
+
+        if (agentMode === 'agent' && !planCompleted && !hasCreatedFiles) {
+          const questionPatterns = [
+            /\?/,
+            /^(before i|i need to|let me|first|should i|do you want|would you like)/i,
+            /^(which|what|how|where|who|when|can you|could you|please clarify)/i,
+            /(not sure|don't know|unclear|ambiguous|need more|more info|context)/i,
+            /^(do you|are you|is this|is that)/i,
+          ];
+          const isQuestion = questionPatterns.some(p => p.test(rawContent.trim()));
+          if (isQuestion) {
+            console.log(`[agent-runner] Job ${jobId}: Detected clarifying question, pausing.`);
+            job.status = 'awaiting_input';
+            job.pendingQuestion = rawContent.trim().slice(0, 1000);
+            job.planTodos = planTodos;
+            job.conversation = conversation;
+            job.iteration = iter;
+            job.fileManifest = [];
+            saveJob(job);
+            return;
           }
-          const nextTask = stillPending[0];
-          const pendingList = stillPending.map(t => `- [ ] ${t.text}`).join('\n');
-          conversation.push({
-            role: 'user',
-            content: `You stopped but tasks remain. Your NEXT task is: ${nextTask.text}\n\nAll pending tasks:\n${pendingList}\n\nComplete the NEXT task NOW with a tool call. Do NOT respond without a tool call.`
-          });
-          continue;
         }
 
-        // Build verification
-        if (fileManifest.length > 0 && !buildAttempted) {
-          const bvResult = await runBuildVerification(workspaceId, fileManifest, planTodos, conversation, buildVerificationRetries);
-          buildVerificationRetries = bvResult.retries;
-          if (bvResult.built) { buildAttempted = true; break; }
-          if (buildVerificationRetries >= 3) {
-            buildAttempted = true;
-            conversation.push({ role: 'user', content: `Build verification failed after ${buildVerificationRetries} attempts. Summarize accomplishments and respond "Task complete."` });
-            continue;
-          }
-          continue;
+        // ── Completion detection: model says it's done ──
+        const donePhrases = [
+          /^task\s*complete/i,
+          /^job\s*complete/i,
+          /all\s*(requested\s*)?(files|tasks)\s*(are|have been)\s*(created|completed|done)/i,
+          /^i('ve| have)\s*(completed|finished|done)/i,
+          /^the\s*(task|job|project)\s*is\s*(complete|done|finished)/i,
+          /^\s*✅/m,
+        ];
+        const isDone = donePhrases.some(p => p.test(rawContent.trim()));
+        if (isDone) {
+          console.log(`[agent-runner] Job ${jobId}: Model signaled completion at iteration ${iter}`);
+          break;
         }
-        break;
-      }
 
-      noToolStreak = 0;
-
-      // Checkpoint before first write
-      if (!checkpointTaken && toolCalls.some(tc => tc.name === 'create_file' || tc.name === 'replace_string_in_file')) {
-        try {
-          const base = `http://localhost:${process.env.PORT || 3000}`;
-          const res = await fetch(`${base}/api/workspace/${workspaceId}/git/commit`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: `checkpoint: agent step ${iter}` })
-          });
-          if (res.ok) checkpointTaken = true;
-        } catch {}
-      }
-
-      // Stuck detection
-      const last3 = recentToolCalls.slice(-3);
-      const stuckTools = toolCalls.filter(tc => {
-        if (['list_dir', 'read_file', 'dev_server_status'].includes(tc.name)) {
-          const fp = tc.args.filePath || tc.args.path || '';
-          const sameCount = last3.filter(l => l.name === tc.name && l.filePath === fp).length;
-          return sameCount >= 2;
-        }
-        return false;
-      });
-
-      if (stuckTools.length > 0 && last3.length >= 3) {
-        const pendingTasks = planTodos.filter(t => !t.done);
-        const nextTask = pendingTasks[0];
-        if (!nextTask && fileManifest.length > 0 && !buildAttempted) {
-          const bvResult = await runBuildVerification(workspaceId, fileManifest, planTodos, conversation, buildVerificationRetries);
-          buildVerificationRetries = bvResult.retries;
-          if (bvResult.built) { buildAttempted = true; break; }
-          continue;
-        }
-        const stuckDesc = stuckTools.map(t => `${t.name} ${t.args.filePath || t.args.path || '.'}`).join(', ');
-        const nextTaskHint = nextTask ? ` Your next task is: "${nextTask.text}". Complete it NOW.` : '';
+        // ── Gentle nudge: model stopped without acting ──
         conversation.push({
           role: 'user',
-          content: `You've called ${stuckDesc} repeatedly. The files exist — you're in a verification loop. MOVE ON.${nextTaskHint} If all tasks are done, respond "Task complete" without any tool block.`
+          content: 'Continue. What is the next step?'
         });
         continue;
       }
 
-      // Dev server anti-polling
-      const last3Results = recentToolResults.slice(-3);
-      if (last3Results.length >= 3 && last3Results.every(r => r.name === 'dev_server_status' && r.summary === 'Server not running')) {
-        conversation.push({
-          role: 'user',
-          content: `The dev server is NOT running. Use \`dev_server_start\` to START it — do NOT call \`dev_server_status\` again until you start the server.`
-        });
-        continue;
-      }
-
-      // Read-only streak
-      const last5Calls = recentToolCalls.slice(-5);
-      const READ_ONLY_TOOLS = ['list_dir', 'read_file', 'grep_search', 'dev_server_status', 'dev_server_stop'];
-      if (last5Calls.length >= 5 && last5Calls.every(tc => READ_ONLY_TOOLS.includes(tc.name))) {
-        const nextTask = planTodos.filter(t => !t.done)[0];
-        const nextTaskHint = nextTask ? ` Complete: "${nextTask.text}" with a \`create_file\` or \`replace_string_in_file\` call NOW.` : ' If all done, respond "Task complete".';
-        conversation.push({
-          role: 'user',
-          content: `You've made 5 read-only calls in a row without writing or building anything. You're stuck in analysis.${nextTaskHint}`
-        });
-        continue;
-      }
-
-      // Barren streak
-      if (barrenStreak >= 8) {
-        const nextTask = planTodos.filter(t => !t.done)[0];
-        if (!nextTask && fileManifest.length === 0) break;
-        conversation.push({
-          role: 'user',
-          content: `You've spent ${barrenStreak} iterations without creating or modifying any files. You are in a loop.${nextTask ? ` Your next pending task is: "${nextTask.text}". Complete it NOW with a tool call.` : ' If all tasks are done, respond "Task complete" with no tool block.'}`
-        });
-        barrenStreak = 0;
-        continue;
-      }
-
-      // Execute tools
+      // ── Execute tools (no manifest skip — model writes freely) ──
       for (const tc of toolCalls) {
-        recentToolCalls.push({ name: tc.name, filePath: tc.args.filePath || tc.args.path || '' });
-        if (recentToolCalls.length > 10) recentToolCalls.shift();
+        const fp = tc.args.filePath || tc.args.path || '';
 
+        // Checkpoint before first write
+        if (!checkpointTaken && (tc.name === 'create_file' || tc.name === 'replace_string_in_file')) {
+          try {
+            const base = `http://localhost:${process.env.PORT || 3000}`;
+            const res = await fetch(`${base}/api/workspace/${workspaceId}/git/commit`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: `checkpoint: agent step ${iter}` })
+            });
+            if (res.ok) checkpointTaken = true;
+          } catch {}
+        }
+
+        // Execute tool — let the model write/overwrite anything freely
         const result = await executeToolCall(tc, workspaceId);
 
-        // Track tool result
-        const resultSummaryShort = summarizeToolResult(tc.name, tc.args, result).slice(0, 80);
-        recentToolResults.push({ name: tc.name, summary: resultSummaryShort });
-        if (recentToolResults.length > 10) recentToolResults.shift();
-
-        // Track file changes
-        if (!result.error && (tc.name === 'create_file' || tc.name === 'replace_string_in_file')) {
-          const fp = tc.args.filePath || tc.args.path;
-          if (fp) {
-            barrenStreak = 0;
-            // Verify file exists after create
-            if (tc.name === 'create_file') {
-              const verifyRes = await executeToolCall({ name: 'read_file', args: { filePath: fp } }, workspaceId);
-              if (verifyRes.error) {
-                conversation.push({
-                  role: 'user',
-                  content: `⚠️ HALLUCINATION DETECTED: You claimed to create \`${fp}\` but the file does NOT exist on disk. Re-create it NOW.`
-                });
-                continue;
-              }
-            }
-            const existing = fileManifest.find(f => f.path === fp);
-            const action = tc.name === 'create_file' ? 'created' : 'modified';
-            if (existing) { existing.action = action; }
-            else { fileManifest.push({ path: fp, action, purpose: '' }); }
-
-            // Check for task completion markers
-            const checkoffRegex = /\[x\]\s*(.+)$/gm;
-            let cm;
-            while ((cm = checkoffRegex.exec(rawContent)) !== null) {
-              const checkedText = cm[1].trim().toLowerCase();
-              const updated = planTodos.map(t => {
-                if (t.done) return t;
-                const words = checkedText.split(/\s+/).filter(w => w.length > 2);
-                const taskLower = t.text.toLowerCase();
-                const matchCount = words.filter(w => taskLower.includes(w)).length;
-                if (matchCount >= Math.min(2, words.length) && matchCount > 0) {
-                  return { ...t, done: true };
-                }
-                return t;
-              });
-              if (updated.some((t, i) => t.done !== planTodos[i].done)) {
-                planTodos = updated;
-              }
-            }
+        // After create_file, verify the file actually exists on disk
+        if (!result.error && tc.name === 'create_file' && fp) {
+          const verifyRes = await executeToolCall({ name: 'read_file', args: { filePath: fp } }, workspaceId);
+          if (verifyRes.error) {
+            conversation.push({
+              role: 'user',
+              content: `⚠️ File \`${fp}\` was NOT created successfully. The write failed. Please recreate it.`
+            });
           }
-        }
-
-        // Track build attempts
-        if (!result.error && (
-          tc.name === 'show_preview' ||
-          (tc.name === 'run_in_terminal' && (tc.args.command || '').match(/npm run (?!dev)|npm start|npx next build|python|pip|bun|cargo|go run|dotnet run|uvicorn/))
-        )) {
-          buildAttempted = true;
         }
 
         if (result.error) {
-          executionErrors.push(`${tc.name} ${tc.args.filePath || tc.args.path || ''}: ${result.error}`);
+          executionErrors.push(`${tc.name} ${fp}: ${result.error}`);
         }
       }
 
-      barrenStreak++;
-
-      // Build tool result feedback
-      const resultSummary = toolCalls.map(tr => {
-        const result = recentToolResults.find(r => r.name === tr.name);
-        if (result) return `${tr.name} OK: ${result.summary}`;
-        return `${tr.name} Done`;
-      }).join('\n');
-
-      let continueMsg = `[Tool Results for Step ${iter + 1}]\n${resultSummary}`;
-      if (planTodos.length > 0) {
-        const pending = planTodos.filter(t => !t.done);
-        const doneCount = planTodos.length - pending.length;
-        if (pending.length > 0) {
-          continueMsg += `\n\nPROGRESS: ${doneCount}/${planTodos.length} tasks done. REMAINING:\n`;
-          for (const t of pending) continueMsg += `  - [ ] ${t.text}\n`;
-          continueMsg += '\nYou are NOT done. Use a TOOL CALL to complete the next remaining task.';
-        } else {
-          continueMsg += '\n\nAll tasks are now complete. Respond without using any tools.';
+      // ── Minimal feedback: just a brief tool result summary ──
+      const resultLines = toolCalls.map(tc => {
+        const name = tc.name;
+        const fp = tc.args.filePath || tc.args.path || '';
+        switch (name) {
+          case 'create_file': return `Created \`${fp}\``;
+          case 'replace_string_in_file': return `Patched \`${fp}\``;
+          case 'read_file': return `Read \`${fp}\``;
+          case 'list_dir': return `Listed \`${fp || '.'}\``;
+          case 'run_in_terminal': return `Ran: ${(tc.args.command || '').slice(0, 60)}`;
+          case 'dev_server_start': return `Started dev server`;
+          case 'dev_server_status': return `Checked dev server`;
+          default: return `${name} done`;
         }
-      } else {
-        continueMsg += '\n\nContinue. If the task is complete, respond normally WITHOUT using any tools.';
-      }
-      conversation.push({ role: 'user', content: continueMsg });
+      }).join('; ');
 
-      // ── Token-aware compaction ──
-      if (iter > 5 && iter - compactedAt >= 6) {
-        const totalChars = conversation.reduce((sum, m) => sum + (m.content || '').length, 0);
-        const estimatedTokens = Math.ceil(totalChars / 2.5);
-        const contextWindow = getContextWindow(model, provider);
-        const threshold = Math.floor(contextWindow * 0.75);
-        if (estimatedTokens > threshold) {
-          const compactSummary = buildCompactSummary(iter, fileManifest, planTodos, originalRequest, executionErrors);
-          const systemMsg = conversation[0];
-          const originalUserMsg = conversation.find(m => m.role === 'user' && !m.content.startsWith('[Tool Results') && !m.content.startsWith('[CONTEXT SUMMARY'));
-          const recentMessages = conversation.slice(-6);
-          conversation = [systemMsg, ...(originalUserMsg ? [originalUserMsg] : []), { role: 'user', content: compactSummary }, ...recentMessages];
-          compactedAt = iter;
-        }
-      }
+      conversation.push({
+        role: 'user',
+        content: `[Step ${iter + 1}] ${resultLines}`
+      });
 
       // ── Persist progress ──
       job.iteration = iter + 1;
       job.planTodos = planTodos;
       job.planSummary = planSummary;
       job.conversation = conversation;
-      job.fileManifest = fileManifest;
+      job.fileManifest = [];
       saveJob(job);
     }
 
     // ── Post-loop summary ──
     if (!planCompleted) {
-      const doneCount = planTodos.filter(t => t.done).length;
-      const createdFiles = fileManifest.filter(f => f.action === 'created');
-      const modifiedFiles = fileManifest.filter(f => f.action === 'modified');
+      let summary = 'Task complete.';
 
-      let buildStatusLine = '⚪ No build attempted';
       try {
         const base = `http://localhost:${process.env.PORT || 3000}`;
         const devRes = await fetch(`${base}/api/workspace/${workspaceId}/dev-server`, { method: 'GET' });
         const devData = devRes.ok ? await devRes.json() : null;
         if (devData?.running) {
-          buildStatusLine = `🟢 Dev server running on port ${devData.port}`;
-        } else if (buildAttempted) {
-          buildStatusLine = `🟡 Build attempted but server not running`;
+          summary = `✅ Task complete. Dev server is running on port ${devData.port}.`;
         }
       } catch {}
-
-      let summary = '';
-      if (planTodos.length > 0 && doneCount === planTodos.length) {
-        summary = `✅ All ${planTodos.length} tasks complete.\n\n${buildStatusLine}`;
-      } else if (createdFiles.length + modifiedFiles.length > 0) {
-        summary = `✅ **Files affected**: ${[...createdFiles.map(f => `created \`${f.path}\``), ...modifiedFiles.map(f => `modified \`${f.path}\``)].join(', ')}\n\n${buildStatusLine}\n\nTask complete.`;
-      } else {
-        summary = `Task complete.\n\n${buildStatusLine}`;
-      }
 
       const summaryId = `agent_summary_${Date.now()}`;
       await saveMessageToChat(chatId, 'assistant', summary, model, provider, summaryId, new Date().toISOString());
@@ -942,8 +1139,8 @@ export async function runAgentJob(jobId) {
     job.status = 'completed';
     job.planTodos = planTodos;
     job.conversation = conversation;
-    job.fileManifest = fileManifest;
-    job.iteration = MAX_ITERATIONS; // signal completion
+    job.fileManifest = [];
+    job.iteration = MAX_ITERATIONS;
     saveJob(job);
     console.log(`[agent-runner] Job ${jobId} completed successfully`);
 
@@ -967,6 +1164,13 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys) {
   if (provider === 'deepseek' && thinkingEffort === 'high') {
     extraParams.reasoning_effort = thinkingEffort;
     extraParams.thinking_type = 'enabled';
+  }
+
+  // Native tool calling: add tools + tool_choice for providers that support it
+  const toolMode = getToolMode(provider);
+  if (toolMode === 'native') {
+    extraParams.tools = buildNativeTools();
+    extraParams.tool_choice = 'auto';
   }
 
   const bodyObj = {
@@ -999,72 +1203,46 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys) {
   const choice = data.choices?.[0] || {};
   const content = choice.message?.content || '';
   const thinking = choice.message?.reasoning_content || choice.message?.thinking || data.reasoning_content || data.thinking || '';
+  const finishReason = choice.finish_reason || '(none)';
 
-  return { content, thinking };
-}
-
-// ── Build verification ──────────────────────────────────────────────────────
-
-async function runBuildVerification(workspaceId, fileManifest, planTodos, conversation, retries) {
-  retries++;
-  if (retries >= 3) return { built: false, retries };
-
-  let hasPackageJson = false;
-  let allFiles = [];
-  try {
-    const base = `http://localhost:${process.env.PORT || 3000}`;
-    const treeRes = await fetch(`${base}/api/workspace/${workspaceId}/tree?depth=3`);
-    const treeData = treeRes.ok ? await treeRes.json() : null;
-    allFiles = treeData?.tree ? flattenTree(treeData.tree) : [];
-    hasPackageJson = allFiles.some(f => (f.name || f) === 'package.json');
-  } catch {}
-
-  if (!hasPackageJson) {
-    // Static project — try starting dev server
-    try {
-      await executeToolCall({ name: 'dev_server_start', args: { command: 'npx serve .' } }, workspaceId);
-    } catch {}
-    return { built: true, retries };
-  }
-
-  // Run npm install
-  let buildLog = '';
-  try {
-    const ir = await executeToolCall({ name: 'run_in_terminal', args: { command: 'npm install --legacy-peer-deps' } }, workspaceId);
-    if (!ir.success) buildLog += `[npm install] FAILED:\n${ir.stderr || ir.stdout || 'Unknown'}\n`;
-  } catch (err) { buildLog += `[npm install] Error: ${err.message}\n`; }
-
-  if (!buildLog) {
-    try {
-      let buildCmd = 'npm run build';
-      const fileNames = allFiles.map(f => f.name || f);
-      if (fileNames.some(n => n === 'next.config.js' || n === 'next.config.mjs' || n === 'next.config.ts')) {
-        buildCmd = 'npx next build';
-      } else if (fileNames.some(n => n === 'vite.config.js' || n === 'vite.config.ts')) {
-        buildCmd = 'npx vite build';
+  // Parse native tool_calls from the response (OpenAI format)
+  const nativeToolCalls = [];
+  if (choice.message?.tool_calls && Array.isArray(choice.message.tool_calls)) {
+    for (const tc of choice.message.tool_calls) {
+      if (tc.type === 'function' && tc.function) {
+        let args = {};
+        try {
+          args = typeof tc.function.arguments === 'string'
+            ? JSON.parse(tc.function.arguments)
+            : tc.function.arguments || {};
+        } catch {
+          args = {};
+        }
+        // Normalize filePath/path
+        if (args.filePath === undefined && args.path !== undefined) args.filePath = args.path;
+        if (args.path === undefined && args.filePath !== undefined) args.path = args.filePath;
+        nativeToolCalls.push({ name: tc.function.name, args, id: tc.id });
       }
-      const br = await executeToolCall({ name: 'run_in_terminal', args: { command: buildCmd } }, workspaceId);
-      if (!br.success) buildLog += `[${buildCmd}] FAILED:\n${(br.stderr || br.stdout || '').slice(0, 2000)}\n`;
-    } catch (err) { buildLog += `[build] Error: ${err.message}\n`; }
+    }
   }
 
-  if (buildLog) {
-    conversation.push({
-      role: 'user',
-      content: `BUILD FAILED (attempt ${retries}/3). Fix these errors with tools, then respond without tool calls to retry:\n\n${buildLog}`
-    });
-    return { built: false, retries };
+  console.log(`[agent-runner] LLM response: content=${content.length} chars, finish_reason=${finishReason}, thinking=${thinking.length} chars, native_tool_calls=${nativeToolCalls.length}`);
+
+  // DEBUG: Log content when we have create_file tool calls with empty content
+  if (content.length > 0) {
+    console.log(`[agent-runner] LLM message content (first 500 chars): ${content.slice(0, 500)}`);
+  }
+  if (nativeToolCalls.length > 0) {
+    for (const tc of nativeToolCalls) {
+      const argsSummary = JSON.stringify(tc.args);
+      console.log(`[agent-runner] native tool call: name=${tc.name}, args=${argsSummary.slice(0, 300)}`);
+    }
   }
 
-  // Build passed — start dev server
-  try {
-    await executeToolCall({ name: 'dev_server_start', args: { command: '' } }, workspaceId);
-    conversation.push({ role: 'user', content: `✅ Build passed. Dev server started. Summarize what was built and respond "Task complete."` });
-  } catch (err) {
-    conversation.push({ role: 'user', content: `✅ Build passed but server start failed. Try \`dev_server_start\`, then respond "Task complete."` });
-  }
-  return { built: true, retries };
+  return { content, thinking, finishReason, nativeToolCalls };
 }
+
+// ── Build verification removed — the model handles builds itself via run_in_terminal
 
 // ── Start a new job ──────────────────────────────────────────────────────────
 
@@ -1139,7 +1317,7 @@ export function startAgentJob({ workspaceId, chatId, userContent, model, provide
   }
 
   // Build initial conversation
-  let systemPromptFinal = systemPrompt || buildSystemPrompt(workspaceId, effectiveMode);
+  let systemPromptFinal = systemPrompt || buildSystemPrompt(workspaceId, effectiveMode, provider);
   const frameworkKeywords = /\b(next\.?js|nextjs|react|vue|angular|svelte|express|django|flask|fastapi|rails|laravel|static html|plain html|html only|vanilla js|python|go|rust|sveltekit|nuxt|remix|astro|gatsby|vite)\b/i;
   const frameworkHint = frameworkKeywords.test(userContent) ? '' : '\n\nTECH STACK: Build this as a Next.js 16 + TypeScript + Tailwind CSS v3 project. Create files in the app/ directory (App Router). Do NOT use plain HTML.';
 
@@ -1171,7 +1349,7 @@ export function startAgentJob({ workspaceId, chatId, userContent, model, provide
       }
       agentContext += '=== END CONVERSATION HISTORY ===\n\n';
     }
-    effectiveUserContent = `${agentContext}USER REQUEST: ${userContent}${frameworkHint}\n\nIMPORTANT: You are in AGENT MODE. DO NOT describe what you'll do. DO NOT ask questions. DO NOT explain your plan. ACT NOW. Use a TOOL CALL immediately. The workspace may be empty — create ALL needed files yourself. If you need to see what exists, use list_dir first.`;
+    effectiveUserContent = `${agentContext}USER REQUEST: ${userContent}${frameworkHint}\n\nYou are in AGENT MODE. Act immediately with a tool call. Start with list_dir if you need to see the workspace.`;
   }
 
   const conversation = [
@@ -1230,12 +1408,20 @@ export function cancelWorkspaceJobs(workspaceId) {
  * Get the current status of an active job for a workspace.
  * Returns null if no active job exists.
  */
-export function getJobStatus(workspaceId) {
+export function getJobStatus(workspaceId, jobId = null) {
   runMigrations();
   const db = getDb();
-  const job = db.prepare(
-    "SELECT * FROM agent_jobs WHERE workspace_id = ? AND status IN ('running', 'interrupted', 'awaiting_input') ORDER BY created_at DESC LIMIT 1"
-  ).get(workspaceId);
+  
+  let job;
+  if (jobId) {
+    job = db.prepare(
+      "SELECT * FROM agent_jobs WHERE id = ?"
+    ).get(jobId);
+  } else {
+    job = db.prepare(
+      "SELECT * FROM agent_jobs WHERE workspace_id = ? AND status IN ('running', 'interrupted', 'awaiting_input') ORDER BY created_at DESC LIMIT 1"
+    ).get(workspaceId);
+  }
 
   if (!job) return null;
 
@@ -1269,6 +1455,11 @@ export function resumeInterruptedJob(workspaceId) {
   ).get(workspaceId);
 
   if (!job) return null;
+
+  // Mark as running BEFORE starting the async job to prevent double-resume
+  db.prepare(
+    "UPDATE agent_jobs SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status = 'interrupted'"
+  ).run(job.id);
 
   console.log(`[agent-runner] Resuming interrupted job ${job.id} for workspace ${workspaceId}`);
   runAgentJob(job.id).catch(err => {

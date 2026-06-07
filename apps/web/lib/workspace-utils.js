@@ -90,7 +90,6 @@ export function walkDirectory(dirPath, maxDepth = 4, currentDepth = 0) {
     
     for (const entry of entries) {
       if (IGNORE_PATTERNS.includes(entry.name)) continue;
-      if (entry.name.startsWith('.')) continue;
       
       const fullPath = path.join(dirPath, entry.name);
       const relativePath = path.relative(getWorkspacesDir(), fullPath);

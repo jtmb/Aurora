@@ -1164,17 +1164,17 @@ export default function AgentPanel({
       const pending = todos.filter(t => !t.done);
       const nextTask = pending[0];
 
-      let planBlock = `\n\n=== BUILD PLAN (INTERNAL REFERENCE — DO NOT REPEAT IN OUTPUT) (${doneCount}/${todos.length} done) ===\n`;
+      let planBlock = `\n\nDONE: ${doneCount}/${todos.length} | NEXT: `;
+      if (nextTask) {
+        planBlock += `${nextTask.text}`;
+      } else {
+        planBlock += `ALL DONE — respond "Task complete"`;
+      }
+      planBlock += `\n`;
       for (const t of todos) {
         planBlock += `${t.done ? '[x]' : '[ ]'} ${t.text}\n`;
       }
-      planBlock += `\nIMPORTANT: This plan is for YOUR internal tracking only. NEVER repeat or output these [x]/[ ] task lines in your response. Just execute the next task silently.\n`;
-      if (nextTask) {
-        planBlock += `NEXT TASK: ${nextTask.text}\n`;
-        planBlock += `You MUST complete THIS task before any other. Use a tool call NOW.\n`;
-      }
-      planBlock += `CRITICAL: Work on tasks IN ORDER. Do NOT skip or reorder.\n`;
-      planBlock += `Do NOT stop until ALL tasks show [x]. If you think you're done but tasks remain, you are WRONG — keep going.\n`;
+      planBlock += `\nWork on the NEXT task above. Use a tool call NOW.`;
       systemPrompt = systemPrompt + planBlock;
     }
 
@@ -1507,9 +1507,113 @@ export default function AgentPanel({
       calls.push({ name: toolName, args, raw: xmlMatch[0] });
     }
 
+    // <invoke name="toolName">...</invoke> syntax (used by Qwen/LM Studio models)
+    const invokeRegex = /<invoke\s+name="(\w+)"[^>]*>([\s\S]*?)<\/invoke>/gi;
+    let invMatch;
+    while ((invMatch = invokeRegex.exec(content)) !== null) {
+      const toolName = invMatch[1].toLowerCase();
+      if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
+      const innerContent = invMatch[2];
+      const args = {};
+      const paramRegex = /<parameter\s+name="(\w+)"[^>]*>([\s\S]*?)<\/parameter>/gi;
+      let pMatch;
+      while ((pMatch = paramRegex.exec(innerContent)) !== null) {
+        const pName = pMatch[1];
+        const pValue = pMatch[2].trim();
+        if (pName === 'filePath' || pName === 'filepath' || pName === 'file_path') args.filePath = pValue;
+        else if (pName === 'path') args.path = pValue;
+        else if (pName === 'query') args.query = pValue;
+        else if (pName === 'command') args.command = pValue;
+        else if (pName === 'oldString' || pName === 'old_string') args.oldString = pValue;
+        else if (pName === 'newString' || pName === 'new_string') args.newString = pValue;
+        else if (pName === 'name') args.name = pValue;
+        else if (pName === 'description') args.description = pValue;
+        else if (pName === 'content') args.content = pValue;
+        else args[pName] = pValue;
+      }
+      if (args.filePath === undefined && args.path !== undefined) args.filePath = args.path;
+      const fp = args.filePath || args.path;
+      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      if (toolName === 'create_file' && args.content === undefined) continue;
+      if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
+      calls.push({ name: toolName, args, raw: invMatch[0] });
+    }
+
+    // ── Bracket syntax: [toolName arg="val"] ... [/toolName] ──
+    // Handles models (like Qwen) that use bracket notation instead of XML
+    // Inline: [list_dir path="."]
+    // Block:  [create_file filePath="x.txt"]\nbody\n[/create_file]
+    const bracketRegex = /\[(\w+)\s+((?:\w+=(?:"[^"]*"|'[^']*')\s*)*)\]([\s\S]*?)\[\/\1\]/gi;
+    let bMatch;
+    while ((bMatch = bracketRegex.exec(content)) !== null) {
+      const toolName = bMatch[1].toLowerCase();
+      if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
+      const args = parseAttrs(bMatch[2]);
+      const body = bMatch[3].trim();
+      if (CONTENT_TOOLS.includes(toolName)) {
+        if (toolName === 'replace_string_in_file') {
+          const findIdx = body.indexOf('===FIND===');
+          const replaceIdx = body.indexOf('===REPLACE===');
+          if (findIdx >= 0 && replaceIdx >= 0) {
+            args.oldString = body.slice(findIdx + 10, replaceIdx).trim();
+            args.newString = body.slice(replaceIdx + 13).trim();
+          }
+        } else if (body && args.content === undefined) {
+          args.content = body;
+        }
+      }
+      const fp = args.filePath || args.path;
+      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      if (toolName === 'create_file' && args.content === undefined) continue;
+      if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
+      calls.push({ name: toolName, args, raw: bMatch[0] });
+    }
+
+    // Inline bracket: [toolName arg="val"]  (no closing [/toolName])
+    const inlineBracketRegex = /\[(\w+)\s+((?:\w+=(?:"[^"]*"|'[^']*')\s*)*)\]/gi;
+    let ibMatch;
+    while ((ibMatch = inlineBracketRegex.exec(content)) !== null) {
+      const toolName = ibMatch[1].toLowerCase();
+      if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
+      if (CONTENT_TOOLS.includes(toolName)) continue; // Content tools need a body block
+      const args = parseAttrs(ibMatch[2]);
+      const fp = args.filePath || args.path;
+      if ((toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      calls.push({ name: toolName, args, raw: ibMatch[0] });
+    }
+
+    // ── Bare tool calls: toolName arg="val"\nbody ──
+    // Handles models that output tool calls without any fenced code block,
+    // XML, or bracket delimiters — just plain "create_file filePath=\"x.txt\"\\ncontent"
+    const bareRegex = /^(\w+)\s+((?:\w+=(?:"[^"]*"|'[^']*')\s*)+)([\s\S]*?)(?=\n\w+\s+\w+=|$)/gm;
+    let bareMatch;
+    while ((bareMatch = bareRegex.exec(content)) !== null) {
+      const toolName = bareMatch[1].toLowerCase();
+      if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
+      const args = parseAttrs(bareMatch[2]);
+      const body = (bareMatch[3] || '').trim();
+      if (CONTENT_TOOLS.includes(toolName)) {
+        if (toolName === 'replace_string_in_file') {
+          const findIdx = body.indexOf('===FIND===');
+          const replaceIdx = body.indexOf('===REPLACE===');
+          if (findIdx >= 0 && replaceIdx >= 0) {
+            args.oldString = body.slice(findIdx + 10, replaceIdx).trim();
+            args.newString = body.slice(replaceIdx + 13).trim();
+          }
+        } else if (body && args.content === undefined) {
+          args.content = body;
+        }
+      }
+      const fp = args.filePath || args.path;
+      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      if (toolName === 'create_file' && args.content === undefined) continue;
+      if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
+      calls.push({ name: toolName, args, raw: bareMatch[0] });
+    }
+
     // ── Fenced-code-block tool calls: ```toolName arg="value"\nbody\n``` ──
     // Match entire tool block: ```toolName...``` — handles both inline (same-line body) and multi-line
-    const regex = /```(\w+)\b\s*(.*?)```/gs;
+    const regex = /```\s*(\w+)\b\s*(.*?)```/gs;
     let match;
     while ((match = regex.exec(content)) !== null) {
       const toolName = match[1];
@@ -2443,45 +2547,47 @@ TESTING WORKFLOW — After creating/modifying project files:
     return colors[(lang || '').toLowerCase()] || 'text-zinc-500';
   };
 
-  // Render message content with syntax highlighting + ReactMarkdown for rich text
-  const renderMessageContent = (msg) => {
-    if (msg.isError) {
-      return <div className="text-red-400 text-xs">{msg.content}</div>;
-    }
-    // Plan result messages: don't show raw content, only the structured plan UI
-    if (msg.isPlanResult) return null;
+  // Decode HTML entities (e.g. &lt; → <, &gt; → >, &amp; → &)
+  const decodeHTMLEntities = (text) => {
+    if (!text) return text;
+    return text
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#x2F;/g, '/');
+  };
 
-    // Remove tool call fenced blocks AND XML-format tool tags from displayed content
-    const toolBlockRegex = /```(create_file|replace_string_in_file|read_file|list_dir|grep_search|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)\b[\s\S]*?\n```/g;
-    const xmlToolRegex = /<(read_file|list_dir|grep_search|create_file|replace_string_in_file|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)(\s+[^>]*)?\/?>[\s\S]*?<\/\1>|<(read_file|list_dir|grep_search|create_file|replace_string_in_file|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)(\s+[^>]*)?\s*\/>/gi;
-    let cleanContent = msg.content ? msg.content.replace(toolBlockRegex, '').replace(xmlToolRegex, '').trim() : '';
-    // Also strip leftover self-closing tags and empty fenced code blocks (info-string-only blocks with no body)
-    cleanContent = cleanContent.replace(/<\w+(\s+\w+="[^"]*")*\s*\/>/g, '').replace(/```[^\n]+\n\s*```/g, '').trim();
+  // Shared code-block-aware text renderer — parses fenced code blocks and renders
+  // with SyntaxHighlighter + ReactMarkdown. Used for both message content and thinking.
+  const renderCodeAwareText = (text, opts = {}) => {
+    if (!text || !text.trim()) return null;
+    const { fontSize = 'text-xs', showApply = false, compact = false } = opts;
 
-    // If there's nothing to display, return null.
-    if (!cleanContent) return null;
+    // Decode HTML entities first so code renders correctly
+    const decoded = decodeHTMLEntities(text);
 
-    // Parse fenced code blocks — use SyntaxHighlighter for code, ReactMarkdown for text
-    const parts = cleanContent.split(/(```[^\n]*\n[\s\S]*?\n```)/g);
+    // Parse fenced code blocks
+    const parts = decoded.split(/(```[^\n]*\n[\s\S]*?\n```)/g);
 
     return (
-      <div className="text-xs leading-relaxed text-zinc-300">
+      <div className={fontSize}>
         {parts.map((part, i) => {
           const codeMatch = part.match(/```(\w*)[^\n]*\n([\s\S]*?)\n```/);
           if (codeMatch) {
             const lang = codeMatch[1] || 'text';
             const code = codeMatch[2];
-            // Skip empty code blocks (e.g. `\`\`\`npm install\n\`\`\`` where all text is info-string)
             if (!code.trim()) return null;
             return (
-              <div key={i} className="relative my-2 group">
+              <div key={i} className={`relative ${compact ? 'my-1' : 'my-2'} group`}>
                 <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800/80 rounded-t-lg border border-zinc-700/30 border-b-0">
                   <div className="flex items-center gap-1.5">
                     <span className={`w-1.5 h-1.5 rounded-full ${getLangColor(lang).replace('text-', 'bg-')}`} />
                     <span className={`text-[10px] uppercase font-medium ${getLangColor(lang)}`}>{lang}</span>
                   </div>
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {msg.role === 'assistant' && onFileEdit && activeFilePath && (
+                    {showApply && onFileEdit && activeFilePath && (
                       <button
                         onClick={() => handleApplyEdit(activeFilePath, code)}
                         className="text-[10px] text-zinc-500 hover:text-indigo-400 transition-colors px-1"
@@ -2511,7 +2617,7 @@ TESTING WORKFLOW — After creating/modifying project files:
                     borderBottomRightRadius: '0.5rem',
                     border: '1px solid rgba(39,39,42,0.3)',
                     borderTop: 'none',
-                    fontSize: '11px',
+                    fontSize: compact ? '10px' : '11px',
                     lineHeight: 1.5,
                     background: '#0d0d0d',
                   }}
@@ -2534,6 +2640,33 @@ TESTING WORKFLOW — After creating/modifying project files:
         })}
       </div>
     );
+  };
+
+  // Render message content with syntax highlighting + ReactMarkdown for rich text
+  const renderMessageContent = (msg) => {
+    if (msg.isError) {
+      return <div className="text-red-400 text-xs">{msg.content}</div>;
+    }
+    // Plan result messages: don't show raw content, only the structured plan UI
+    if (msg.isPlanResult) return null;
+
+    // Remove tool call fenced blocks AND XML-format tool tags from displayed content
+    const toolBlockRegex = /```(create_file|replace_string_in_file|read_file|list_dir|grep_search|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)\b[\s\S]*?\n```/g;
+    const xmlToolRegex = /<(read_file|list_dir|grep_search|create_file|replace_string_in_file|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)(\s+[^>]*)?\/?>[\s\S]*?<\/\1>|<(read_file|list_dir|grep_search|create_file|replace_string_in_file|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)(\s+[^>]*)?\s*\/>/gi;
+    let cleanContent = msg.content ? msg.content.replace(toolBlockRegex, '').replace(xmlToolRegex, '').trim() : '';
+    // Also strip leftover self-closing tags and empty fenced code blocks (info-string-only blocks with no body)
+    cleanContent = cleanContent.replace(/<\w+(\s+\w+="[^"]*")*\s*\/>/g, '').replace(/```[^\n]+\n\s*```/g, '').trim();
+    // Strip [x] progress/task lines that LLMs output following the system prompt
+    // (catches both streaming and history-loaded/db-persisted messages)
+    cleanContent = cleanContent.replace(/^\s*\[x\]\s+(?:PROGRESS|Task|task)\b[^\n]*\n?/gmi, '').trim();
+
+    // If there's nothing to display, return null.
+    if (!cleanContent) return null;
+
+    return renderCodeAwareText(cleanContent, {
+      showApply: msg.role === 'assistant',
+      fontSize: 'text-xs',
+    });
   };
 
   // Render an individual tool call card (expandable)
@@ -2664,23 +2797,27 @@ TESTING WORKFLOW — After creating/modifying project files:
           </div>
         </div>
         <div className="flex items-center gap-1">
-          {onToggleMode && (
+          {onToggleMode && codeMode === 'vibe' ? (
             <button
               onClick={onToggleMode}
-              className={`p-1 rounded transition-colors ${codeMode === 'vibe' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-500 hover:text-purple-400'}`}
-              title={codeMode === 'vibe' ? 'Switch to Full Workspace' : 'Switch to Vibe Code'}
+              className="p-1 rounded text-zinc-500 hover:text-purple-400 transition-colors"
+              title="Switch to Full Workspace"
             >
-              {codeMode === 'vibe' ? (
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                </svg>
-              ) : (
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
-                </svg>
-              )}
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
             </button>
-          )}
+          ) : onToggleMode ? (
+            <button
+              onClick={onToggleMode}
+              className="p-1 rounded text-zinc-500 hover:text-purple-400 transition-colors"
+              title="Switch to Vibe Code"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+              </svg>
+            </button>
+          ) : null}
           {messages.length > 0 && (
             <button
               onClick={() => setMessages([])}
@@ -2824,14 +2961,9 @@ TESTING WORKFLOW — After creating/modifying project files:
                       localStorage.setItem('aurora_agent_mode', 'agent');
 
                       // Build plan execution message from flat todos
-                      let planMsg = 'Execute the following plan step by step:\n\n';
-                      planMsg += `## Summary\n${planSummary || 'Build as specified'}\n\n`;
-                      planMsg += '## Tasks\n';
-                      for (const t of planTodos) {
-                        const dep = t.dependsOn ? ` (depends on: ${t.dependsOn})` : '';
-                        planMsg += `- [ ] ${t.text}${dep}\n`;
-                      }
-                      planMsg += '\nWork through tasks IN ORDER. Mark each task [x] when completed. Start with task 1 NOW.';
+                      let planMsg = 'Build this step by step:\n\n';
+                      planMsg += `NEXT: ${planTodos.filter(t => !t.done).map(t => t.text).join(' | ')}\n\n`;
+                      planMsg += 'Mark each [x] when done. Start NOW with the first task.';
 
                       setInput(planMsg);
                       // Submit the form after React flushes the input state
@@ -3009,10 +3141,10 @@ TESTING WORKFLOW — After creating/modifying project files:
                           )}
                           <div
                             ref={isStreamingThis ? thinkingContainerRef : undefined}
-                            className="text-[11px] text-zinc-500 leading-relaxed whitespace-pre-wrap font-mono max-h-32 overflow-y-auto"
+                            className="min-h-[8rem] max-h-48 overflow-y-auto"
                             style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}
                           >
-                            {msg.thinking}
+                            {renderCodeAwareText(msg.thinking, { compact: true, fontSize: 'text-[11px]' })}
                           </div>
                         </div>
                       )}

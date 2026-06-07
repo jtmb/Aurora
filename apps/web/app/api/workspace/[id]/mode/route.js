@@ -7,7 +7,7 @@ import { getWorkspaceDir } from '../../../../../lib/workspace-utils';
 
 export async function PATCH(request, { params }) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const body = await request.json().catch(() => ({}));
     const { codeMode } = body;
 
@@ -19,7 +19,7 @@ export async function PATCH(request, { params }) {
     }
 
     const wsDir = getWorkspaceDir(id);
-    const metaPath = path.join(wsDir, '.aurora-workspace.json');
+    const metaPath = path.join(wsDir, '.aurora', 'workspace.json');
 
     if (!fs.existsSync(metaPath)) {
       return NextResponse.json(

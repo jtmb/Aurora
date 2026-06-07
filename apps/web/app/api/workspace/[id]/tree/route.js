@@ -15,7 +15,7 @@ export async function GET(request, { params }) {
     }
     
     // Update last opened timestamp
-    const metaPath = path.join(wsDir, '.aurora-workspace.json');
+    const metaPath = path.join(wsDir, '.aurora', 'workspace.json');
     if (fs.existsSync(metaPath)) {
       try {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));

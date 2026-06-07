@@ -9,6 +9,7 @@ import MonacoEditor from './MonacoEditor';
 import FileTabs from './FileTabs';
 import AgentPanel from './AgentPanel';
 import PreviewPanel from './PreviewPanel';
+import GitPanel from './GitPanel';
 
 // xterm.js uses browser APIs, must be client-only
 const TerminalPanel = dynamic(() => import('./TerminalPanel'), { ssr: false });
@@ -28,7 +29,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
   const [error, setError] = useState('');
   const [creationStep, setCreationStep] = useState(null); // null | 'select' | 'form'
   const [creationMode, setCreationMode] = useState('full'); // 'full' | 'vibe'
-  const [codeMode, setCodeMode] = useState('full'); // active workspace's mode
+  const [codeMode, setCodeMode] = useState(() => pendingWorkspace?.codeMode || 'full'); // active workspace's mode
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneName, setCloneName] = useState('');
   const [cloneLoading, setCloneLoading] = useState(false);
@@ -39,6 +40,8 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
   const [terminalCommand, setTerminalCommand] = useState('');
   const [workspaceChatId, setWorkspaceChatId] = useState(null);
   const [workspaceMessages, setWorkspaceMessages] = useState(null);
+  const [leftPanelView, setLeftPanelView] = useState('explorer'); // 'explorer' | 'git'
+  const [gitStatus, setGitStatus] = useState(null);
 
   // === Resizable pane state ===
   const MIN_LEFT = 200;     // minimum file tree width
@@ -109,14 +112,29 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     try {
       const res = await fetch('/api/workspace/list');
       const data = await res.json();
-      setWorkspaces(data.workspaces || []);
+      const list = data.workspaces || [];
+      setWorkspaces(list);
       setWorkspacePage(1);
+      // Cache metadata for URL param handler (sync codeMode reads)
+      try {
+        const cache = {};
+        for (const w of list) {
+          cache[w.id] = { id: w.id, name: w.name, codeMode: w.codeMode, type: w.type, primaryLanguage: w.primaryLanguage, isGitRepo: w.isGitRepo };
+        }
+        localStorage.setItem('aurora_ws_meta_cache', JSON.stringify(cache));
+      } catch {}
     } catch (err) {
       console.error('Load workspaces error:', err);
     }
   };
 
   const openWorkspace = async (ws) => {
+    // Skip full load if metadata hasn't arrived yet (cold cache sentinel)
+    if (ws.codeMode === '_loading') {
+      setActiveWorkspace(ws);
+      setCodeMode('_loading');
+      return;
+    }
     setActiveWorkspace(ws);
     setIsLoading(true);
     setError('');
@@ -130,102 +148,153 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     setWorkspaceChatId(null);
     setWorkspaceMessages(null);
     setCodeMode(ws.codeMode || 'full');
+    setLeftPanelView('explorer');
+    setGitStatus(null);
 
-    try {
-      const res = await fetch(`/api/workspace/${ws.id}/tree`);
-      const data = await res.json();
-      if (data.error) {
-        setError(data.error.message);
-      } else {
-        setFileTree(data.tree || []);
-      }
-    } catch (err) {
-      setError('Failed to load workspace');
-    } finally {
-      setIsLoading(false);
+    // Parallelize ALL fetches: file tree + git + preview + chat messages
+    // This prevents chat messages from loading sequentially after the file tree
+    const [treeResult, chatResult] = await Promise.allSettled([
+      // 1. File tree
+      (async () => {
+        const res = await fetch(`/api/workspace/${ws.id}/tree`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        return data.tree || [];
+      })(),
+      // 2. Workspace chat messages (load in parallel with tree)
+      loadWorkspaceChatData(ws),
+    ]);
+
+    // Process file tree result
+    if (treeResult.status === 'fulfilled') {
+      setFileTree(treeResult.value);
+    } else {
+      setError(treeResult.reason?.message || 'Failed to load workspace');
     }
 
-    // Fetch preview info
-    try {
-      const previewRes = await fetch(`/api/workspace/${ws.id}/preview-info`);
-      const previewData = await previewRes.json();
-      if (!previewData.error) {
-        setPreviewInfo(previewData);
-      }
-    } catch {}
+    // Process chat result (loaded in parallel with tree)
+    if (chatResult.status === 'fulfilled' && chatResult.value) {
+      if (chatResult.value.chatId) setWorkspaceChatId(chatResult.value.chatId);
+      setWorkspaceMessages(chatResult.value.messages || []);
+    }
 
-    // Load or create workspace chat
-    await loadWorkspaceChat(ws);
+    // Fire-and-forget: git status (non-blocking)
+    fetch(`/api/workspace/${ws.id}/git/status`)
+      .then(r => r.json())
+      .then(d => { if (!d.error) setGitStatus(d); })
+      .catch(() => {});
+
+    // Fire-and-forget: preview info (non-blocking)
+    fetch(`/api/workspace/${ws.id}/preview-info`)
+      .then(r => r.json())
+      .then(d => { if (!d.error) setPreviewInfo(d); })
+      .catch(() => {});
+
+    setIsLoading(false);
   };
 
-  // Load or create a chat for the given workspace, then load its messages
-  const loadWorkspaceChat = async (ws) => {
+  // Fetch workspace chat data (returns {chatId, messages}) — used in parallel with tree fetch
+  const loadWorkspaceChatData = async (ws) => {
     const token = localStorage.getItem('auth_token');
-    if (!token) return;
+    if (!token) return { chatId: null, messages: [] };
 
-    try {
-      // Check localStorage for existing workspace→chat mapping
-      const wsChats = JSON.parse(localStorage.getItem('aurora_ws_chats') || '{}');
-      let chatId = wsChats[ws.id];
+    // Check localStorage for existing workspace→chat mapping
+    const wsChats = JSON.parse(localStorage.getItem('aurora_ws_chats') || '{}');
+    let chatId = wsChats[ws.id];
 
-      // If we have a chatId, verify it still exists and load messages
-      if (chatId) {
+    // If we have a chatId, verify it still exists and load messages
+    if (chatId) {
+      const chatRes = await fetch(`/api/chats/${chatId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (chatRes.ok) {
+        const chatData = await chatRes.json();
+        return { chatId, messages: chatData.messages || [] };
+      }
+      // Chat was deleted — remove stale mapping
+      delete wsChats[ws.id];
+      localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
+    }
+
+    // No localStorage mapping — query server for chats by workspace_id
+    const listRes = await fetch(`/api/chats?workspaceId=${encodeURIComponent(ws.id)}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (listRes.ok) {
+      const listData = await listRes.json();
+      const existingChats = listData.chats || [];
+      if (existingChats.length > 0) {
+        chatId = existingChats[0].id;
+        wsChats[ws.id] = chatId;
+        localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
+
         const chatRes = await fetch(`/api/chats/${chatId}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (chatRes.ok) {
           const chatData = await chatRes.json();
-          setWorkspaceChatId(chatId);
-          setWorkspaceMessages(chatData.messages || []);
-          return;
-        }
-        // Chat was deleted — remove stale mapping and create new
-        delete wsChats[ws.id];
-        localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
-      }
-
-      // No localStorage mapping — query server for chats by workspace_id
-      const listRes = await fetch(`/api/chats?workspaceId=${encodeURIComponent(ws.id)}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (listRes.ok) {
-        const listData = await listRes.json();
-        const existingChats = listData.chats || [];
-        if (existingChats.length > 0) {
-          // Found an existing chat for this workspace — use the newest one
-          chatId = existingChats[0].id;
-          wsChats[ws.id] = chatId;
-          localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
-          setWorkspaceChatId(chatId);
-
-          // Load its messages
-          const chatRes = await fetch(`/api/chats/${chatId}`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-          });
-          if (chatRes.ok) {
-            const chatData = await chatRes.json();
-            setWorkspaceMessages(chatData.messages || []);
-            return;
-          }
+          return { chatId, messages: chatData.messages || [] };
         }
       }
+    }
 
-      // Create a new chat for this workspace
-      const createRes = await fetch('/api/chats', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: `Workspace: ${ws.name}`, workspaceId: ws.id })
-      });
-      if (createRes.ok) {
-        const createData = await createRes.json();
-        chatId = createData.id;
-        wsChats[ws.id] = chatId;
-        localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
-        setWorkspaceChatId(chatId);
-        setWorkspaceMessages([]);
-      }
+    // Create a new chat for this workspace
+    const createRes = await fetch('/api/chats', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: `Workspace: ${ws.name}`, workspaceId: ws.id })
+    });
+    if (createRes.ok) {
+      const createData = await createRes.json();
+      chatId = createData.id;
+      wsChats[ws.id] = chatId;
+      localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
+      return { chatId, messages: [] };
+    }
+
+    return { chatId: null, messages: [] };
+  };
+
+  // Load or create a chat for the given workspace, then update state
+  const loadWorkspaceChat = async (ws) => {
+    try {
+      const { chatId, messages } = await loadWorkspaceChatData(ws);
+      if (chatId) setWorkspaceChatId(chatId);
+      if (messages) setWorkspaceMessages(messages);
     } catch (err) {
       console.error('Load workspace chat error:', err);
+    }
+  };
+
+  // Called when a file is clicked in the GitPanel (opens diff vs working tree)
+  const handleGitFileClick = async (filePath, staged) => {
+    if (!activeWorkspace) return;
+    setActiveFile(filePath);
+    // Open in editor if not already
+    if (!openFiles.find(f => f.path === filePath)) {
+      const fileName = filePath.split('/').pop();
+      const ext = fileName.includes('.') ? fileName.split('.').pop() : '';
+      setOpenFiles(prev => [...prev, { path: filePath, name: fileName, language: ext }]);
+    }
+    try {
+      const diffRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/diff?path=${encodeURIComponent(filePath)}&staged=${staged ? 'true' : 'false'}`);
+      const diffData = await diffRes.json();
+      if (!diffData.error) {
+        setFileContents(prev => ({ ...prev, [filePath]: diffData.diff || '(no changes)' }));
+      } else {
+        // Fallback: read the file normally
+        const readRes = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: filePath })
+        });
+        const readData = await readRes.json();
+        if (!readData.error) {
+          setFileContents(prev => ({ ...prev, [filePath]: readData.content }));
+        }
+      }
+    } catch (err) {
+      console.error('Git diff read error:', err);
     }
   };
 
@@ -448,6 +517,14 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
         body: JSON.stringify({ codeMode: newMode })
       });
       setCodeMode(newMode);
+      // Update localStorage cache so URL loads pick up new mode
+      try {
+        const cache = JSON.parse(localStorage.getItem('aurora_ws_meta_cache') || '{}');
+        if (cache[activeWorkspace.id]) {
+          cache[activeWorkspace.id].codeMode = newMode;
+          localStorage.setItem('aurora_ws_meta_cache', JSON.stringify(cache));
+        }
+      } catch {}
       // When switching to full mode, reload the file tree and preview info
       if (newMode === 'full') {
         try {
@@ -797,7 +874,22 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     );
   }
 
+  // Computed for Git badge
+  const changedCount = gitStatus?.files?.length || 0;
+
   // IDE layout — Vibe Code or Full Workspace
+  if (codeMode === '_loading') {
+    // Cold cache — waiting for API to return workspace metadata
+    return (
+      <div className="flex-1 flex items-center justify-center bg-zinc-950">
+        <div className="flex items-center gap-3 text-zinc-500">
+          <div className="w-5 h-5 border-2 border-zinc-600 border-t-indigo-500 rounded-full animate-spin" />
+          <span className="text-sm">Loading workspace…</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {codeMode === 'vibe' ? (
@@ -970,13 +1062,70 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 </button>
               </div>
             </div>
-            <FileTree
-              tree={fileTree}
-              onFileClick={handleFileClick}
-              activeFile={activeFile}
-              searchQuery={treeSearch}
-              onSearchChange={setTreeSearch}
-            />
+            {/* Tab bar: Explorer / Source Control */}
+            <div className="flex items-center border-b border-zinc-800/40">
+              <button
+                onClick={() => setLeftPanelView('explorer')}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[10px] font-medium uppercase tracking-wide transition-colors ${
+                  leftPanelView === 'explorer'
+                    ? 'text-indigo-400 border-b-2 border-indigo-500'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+                title="Explorer"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                </svg>
+                Files
+              </button>
+              <button
+                onClick={() => setLeftPanelView('git')}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[10px] font-medium uppercase tracking-wide transition-colors ${
+                  leftPanelView === 'git'
+                    ? 'text-indigo-400 border-b-2 border-indigo-500'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+                title="Source Control"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                </svg>
+                Git
+                {changedCount > 0 && (
+                  <span className="px-1 py-0.5 min-w-[14px] text-center rounded text-[9px] font-semibold leading-none text-amber-400 bg-amber-400/10">
+                    {changedCount}
+                  </span>
+                )}
+              </button>
+            </div>
+            {leftPanelView === 'explorer' ? (
+              <FileTree
+                tree={fileTree}
+                onFileClick={handleFileClick}
+                activeFile={activeFile}
+                searchQuery={treeSearch}
+                onSearchChange={setTreeSearch}
+                gitStatus={gitStatus}
+              />
+            ) : (
+              <GitPanel
+                workspaceId={activeWorkspace.id}
+                onFileClick={handleGitFileClick}
+                onRefreshTree={async () => {
+                  // Refresh git status BEFORE tree (tree dirties .aurora/workspace.json)
+                  try {
+                    const gitRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/status`);
+                    const gitData = await gitRes.json();
+                    if (!gitData.error) setGitStatus(gitData);
+                  } catch {}
+                  try {
+                    const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+                    const data = await res.json();
+                    if (data.tree) setFileTree(data.tree);
+                  } catch {}
+                }}
+              />
+            )}
             {/* Left resize sash — absolute overlay, VS Code style */}
             <div
               className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
@@ -1021,11 +1170,6 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                   />
                 </div>
               </div>
-              {/* Git status bar */}
-              {activeWorkspace?.isGitRepo && (
-                <GitStatusBar workspaceId={activeWorkspace.id} />
-              )}
-
               {/* Terminal (inside editor column — only spans middle pane) */}
               {showTerminal && activeWorkspace && (
                 <div className="flex-shrink-0 relative" style={{ height: terminalHeight }}>
@@ -1097,47 +1241,213 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
           </div>
         </div>
       )}
+      {/* Bottom status bar — always visible, VS Code style */}
+      <StatusBar
+        workspaceId={activeWorkspace.id}
+        isGitRepo={activeWorkspace?.isGitRepo}
+        activeFile={activeFile}
+        openFiles={openFiles}
+        onRefreshTree={async () => {
+          try {
+            const gitRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/status`);
+            const gitData = await gitRes.json();
+            if (!gitData.error) setGitStatus(gitData);
+          } catch {}
+          try {
+            const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+            const data = await res.json();
+            if (data.tree) setFileTree(data.tree);
+          } catch {}
+        }}
+      />
     </div>
   );
 }
 
-// Git status bar component
-function GitStatusBar({ workspaceId }) {
-  const [status, setStatus] = useState(null);
+// VS Code-style bottom status bar with branch switching
+function StatusBar({ workspaceId, isGitRepo, activeFile, openFiles, onRefreshTree }) {
+  const [gitStatus, setGitStatus] = useState(null);
+  const [branches, setBranches] = useState([]);
+  const [showBranchDropdown, setShowBranchDropdown] = useState(false);
+  const [newBranchName, setNewBranchName] = useState('');
+  const [showNewBranchInput, setShowNewBranchInput] = useState(false);
+  const [switchError, setSwitchError] = useState('');
 
+  // Always fetch git status — detect isGitRepo from the response itself
   useEffect(() => {
+    let cancelled = false;
     const fetchStatus = async () => {
       try {
         const res = await fetch(`/api/workspace/${workspaceId}/git/status`);
         const data = await res.json();
-        if (!data.error) setStatus(data);
+        if (!cancelled && !data.error) setGitStatus(data);
       } catch {}
     };
     fetchStatus();
     const interval = setInterval(fetchStatus, 30000);
-    return () => clearInterval(interval);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [workspaceId]);
 
-  if (!status || !status.isGitRepo) return null;
+  // Fetch branches when dropdown opens
+  const fetchBranches = async () => {
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/git/branches`);
+      const data = await res.json();
+      if (!data.error) setBranches(data.branches || []);
+    } catch {}
+  };
 
-  const changedCount = (status.modified?.length || 0) + (status.created?.length || 0) + (status.deleted?.length || 0);
+  const handleSwitchBranch = async (branchName) => {
+    setSwitchError('');
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/git/branches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'switch', branchName })
+      });
+      const data = await res.json();
+      if (data.error) {
+        setSwitchError(data.error.message);
+      } else {
+        setShowBranchDropdown(false);
+        onRefreshTree?.();
+      }
+    } catch (err) {
+      setSwitchError('Failed to switch branch');
+    }
+  };
+
+  const handleCreateBranch = async (e) => {
+    e.preventDefault();
+    if (!newBranchName.trim()) return;
+    setSwitchError('');
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/git/branches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create', newBranchName: newBranchName.trim() })
+      });
+      const data = await res.json();
+      if (data.error) {
+        setSwitchError(data.error.message);
+      } else {
+        setNewBranchName('');
+        setShowNewBranchInput(false);
+        setShowBranchDropdown(false);
+        onRefreshTree?.();
+      }
+    } catch (err) {
+      setSwitchError('Failed to create branch');
+    }
+  };
+
+  const currentBranch = gitStatus?.branch || (gitStatus?.isGitRepo ? 'main' : null);
+  const currentFile = openFiles?.find(f => f.path === activeFile);
+  const langLabel = currentFile?.language || 'plaintext';
+  const changedCount = gitStatus?.files?.length || 0;
+  const repoDetected = gitStatus?.isGitRepo;
 
   return (
-    <div className="h-7 flex items-center justify-between px-3 bg-zinc-900 border-t border-zinc-800/40 text-[10px] text-zinc-500">
+    <div className="h-7 flex items-center justify-between px-3 bg-zinc-900 border-t border-zinc-800/40 text-[10px] text-zinc-500 select-none flex-shrink-0">
+      {/* Left: Branch (like VS Code) */}
       <div className="flex items-center gap-3">
-        <span className="flex items-center gap-1">
-          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z" />
-          </svg>
-          {status.branch}
-        </span>
-        {changedCount > 0 && (
-          <span className="text-amber-400">{changedCount} changed</span>
+        {repoDetected && currentBranch ? (
+          <div className="relative">
+            <button
+              onClick={() => { setShowBranchDropdown(!showBranchDropdown); if (!showBranchDropdown) fetchBranches(); }}
+              className="flex items-center gap-1 hover:text-zinc-300 transition-colors cursor-pointer"
+              title="Switch branch"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+              </svg>
+              <span>{currentBranch}</span>
+              <svg className={`w-2.5 h-2.5 transition-transform ${showBranchDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {/* Error */}
+            {switchError && (
+              <div className="absolute bottom-full left-0 mb-1 px-2 py-1 bg-red-950/90 border border-red-900/40 rounded text-[9px] text-red-400 whitespace-nowrap z-30">
+                {switchError}
+              </div>
+            )}
+            {/* Branch dropdown — opens upward from bottom-left */}
+            {showBranchDropdown && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setShowBranchDropdown(false)} />
+                <div className="absolute bottom-full left-0 mb-1 z-20 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl overflow-hidden max-h-48 overflow-y-auto min-w-[180px]">
+                  {branches.map((b) => (
+                    <button
+                      key={b.name}
+                      onClick={() => handleSwitchBranch(b.name)}
+                      className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left transition-colors ${
+                        b.current
+                          ? 'bg-indigo-600/20 text-indigo-300'
+                          : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/50'
+                      }`}
+                    >
+                      <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                      </svg>
+                      <span className="truncate">{b.name}</span>
+                      {b.current && <span className="text-[9px] text-indigo-400 ml-auto">HEAD</span>}
+                    </button>
+                  ))}
+                  <div className="border-t border-zinc-700/40 mt-0.5 pt-0.5">
+                    {showNewBranchInput ? (
+                      <form onSubmit={handleCreateBranch} className="flex items-center gap-1 px-2 py-1">
+                        <input
+                          autoFocus
+                          value={newBranchName}
+                          onChange={(e) => setNewBranchName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.preventDefault(); handleCreateBranch(e); }
+                            else if (e.key === 'Escape') { setNewBranchName(''); setShowNewBranchInput(false); }
+                          }}
+                          placeholder="Branch name..."
+                          className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                          onBlur={() => { if (!newBranchName.trim()) setShowNewBranchInput(false); }}
+                        />
+                        <button type="submit" className="flex-shrink-0 p-1 rounded text-indigo-400 hover:bg-indigo-600/20 transition-colors" title="Create branch">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        </button>
+                      </form>
+                    ) : (
+                      <button
+                        onClick={() => { setShowNewBranchInput(true); setNewBranchName(''); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/50 transition-colors"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        </svg>
+                        Create new branch...
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        ) : (
+          <span className="flex items-center gap-1" title="Not a git repository">
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+          </span>
         )}
-        {status.ahead > 0 && <span className="text-sky-400">↑{status.ahead}</span>}
-        {status.behind > 0 && <span className="text-orange-400">↓{status.behind}</span>}
+        {gitStatus?.ahead > 0 && <span className="text-sky-400">↑{gitStatus.ahead}</span>}
+        {gitStatus?.behind > 0 && <span className="text-orange-400">↓{gitStatus.behind}</span>}
+        {changedCount > 0 && <span className="text-amber-400">{changedCount} changed</span>}
       </div>
-      <div className="flex items-center gap-2">
+
+      {/* Right: File info */}
+      <div className="flex items-center gap-3">
+        {activeFile && (
+          <span className="hover:text-zinc-300 cursor-default">{langLabel}</span>
+        )}
         <span>UTF-8</span>
         <span>Spaces: 2</span>
       </div>

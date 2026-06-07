@@ -25,7 +25,7 @@ export async function GET(request, { params }) {
     }
     
     const status = await git.status();
-    const branch = await git.revparse(['--abbrev-ref', 'HEAD']).catch(() => 'unknown');
+    const branch = await git.revparse(['--abbrev-ref', 'HEAD']).catch(() => 'main');
     
     // Get branch tracking info
     let ahead = 0, behind = 0;
@@ -43,15 +43,17 @@ export async function GET(request, { params }) {
       branch: branch.trim(),
       ahead,
       behind,
-      files: status.files.map(f => ({
-        path: f.path,
-        index: f.index,      // staged status
-        workingDir: f.working_dir  // unstaged status
-      })),
-      modified: status.modified || [],
-      created: status.created || [],
-      deleted: status.deleted || [],
-      staged: status.staged || [],
+      files: (status.files || [])
+        .filter(f => !f.path.startsWith('.aurora/'))
+        .map(f => ({
+          path: f.path,
+          index: f.index,
+          workingDir: f.working_dir
+        })),
+      modified: (status.modified || []).filter(f => !f.startsWith('.aurora/')),
+      created: (status.created || []).filter(f => !f.startsWith('.aurora/')),
+      deleted: (status.deleted || []).filter(f => !f.startsWith('.aurora/')),
+      staged: (status.staged || []).filter(f => !f.startsWith('.aurora/')),
       recentCommits: log.all.slice(0, 5).map(c => ({
         hash: c.hash?.slice(0, 7),
         message: c.message,

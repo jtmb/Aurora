@@ -318,7 +318,21 @@ export async function POST(request, { params }) {
     if (portChanged) {
       console.log(`[workspace/dev-server] Port ${preferredPort} in use — using ${assignedPort} instead`);
     }
-    
+
+    // CLEANUP: Remove stale Next.js dev lock files that may cause "Another next dev
+    // server is already running" errors. Next.js 15+ uses a PID-based lock in
+    // .next/dev/ and also checks the port range. After a crash (SIGKILL, SIGTERM
+    // from browser refresh), these lock files persist and block restarts.
+    const nextDevDir = path.join(wsDir, '.next', 'dev');
+    if (fs.existsSync(nextDevDir)) {
+      try {
+        fs.rmSync(nextDevDir, { recursive: true, force: true });
+        console.log(`[workspace/dev-server] Cleaned stale Next.js dev lock: ${nextDevDir}`);
+      } catch (e) {
+        console.warn(`[workspace/dev-server] Could not clean ${nextDevDir}:`, e.message);
+      }
+    }
+
     // Set up environment with the dynamically assigned port
     const env = { ...process.env };
     env.PORT = String(assignedPort);

@@ -4,7 +4,16 @@
 
 import { useState, useMemo } from 'react';
 
-export default function FileTree({ tree, onFileClick, activeFile, searchQuery, onSearchChange }) {
+const STATUS_COLORS = {
+  'M': 'text-amber-400',
+  'A': 'text-green-400',
+  'D': 'text-red-400',
+  'R': 'text-purple-400',
+  '?': 'text-emerald-400',
+  'U': 'text-emerald-400',
+};
+
+export default function FileTree({ tree, onFileClick, activeFile, searchQuery, onSearchChange, gitStatus }) {
   const [expandedFolders, setExpandedFolders] = useState(new Set());
 
   const toggleFolder = (folderPath) => {
@@ -103,17 +112,63 @@ export default function FileTree({ tree, onFileClick, activeFile, searchQuery, o
     );
   };
 
+  // Build git status lookup map: path -> status letter
+  const gitStatusMap = useMemo(() => {
+    if (!gitStatus?.files) return {};
+    const map = {};
+    for (const f of gitStatus.files) {
+      const idx = f.index || ' ';
+      const wd = f.workingDir || ' ';
+      // Priority: staged status > working dir status
+      if (idx !== ' ' && idx !== '?') {
+        map[f.path] = idx;
+      } else if (wd !== ' ' && wd !== '?') {
+        map[f.path] = wd;
+      } else if (idx === '?' || wd === '?') {
+        map[f.path] = '?';
+      }
+    }
+    return map;
+  }, [gitStatus]);
+
+  // Check if any descendant of a directory has git changes
+  const hasChangedChildren = useMemo(() => {
+    const check = (nodes) => {
+      const set = new Set();
+      for (const node of nodes) {
+        if (node.type === 'directory' && node.children) {
+          const childResults = check(node.children);
+          if (childResults.has(node.path) || childResults.size > 0) {
+            set.add(node.path);
+            for (const r of childResults) set.add(r);
+          }
+        } else if (gitStatusMap[node.path]) {
+          // Find all ancestor paths
+          const parts = node.path.split('/');
+          for (let i = 0; i < parts.length; i++) {
+            set.add(parts.slice(0, i + 1).join('/'));
+          }
+        }
+      }
+      return set;
+    };
+    return check(tree);
+  }, [tree, gitStatusMap]);
+
   const renderNode = (node, depth = 0) => {
     const isExpanded = expandedFolders.has(node.path);
     const isActive = activeFile === node.path;
     const paddingLeft = depth * 16 + 8;
 
     if (node.type === 'directory') {
+      const hasChanges = hasChangedChildren.has(node.path);
       return (
         <div key={node.path}>
           <div
             onClick={() => toggleFolder(node.path)}
-            className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-zinc-800/60 text-zinc-400 hover:text-zinc-200 text-xs transition-colors select-none"
+            className={`flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-zinc-800/60 text-xs transition-colors select-none ${
+              hasChanges ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-400 hover:text-zinc-200'
+            }`}
             style={{ paddingLeft: `${paddingLeft}px` }}
           >
             <svg className={`w-3 h-3 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -139,6 +194,12 @@ export default function FileTree({ tree, onFileClick, activeFile, searchQuery, o
         style={{ paddingLeft: `${paddingLeft}px` }}
       >
         {getFileIcon(node)}
+        {/* Git status badge */}
+        {gitStatusMap[node.path] && (
+          <span className={`w-3 text-center font-mono text-[9px] font-bold ${STATUS_COLORS[gitStatusMap[node.path]] || 'text-zinc-400'}`}>
+            {gitStatusMap[node.path] === '?' ? 'U' : gitStatusMap[node.path]}
+          </span>
+        )}
         <span className="truncate">{node.name}</span>
       </div>
     );

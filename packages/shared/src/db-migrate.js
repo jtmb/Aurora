@@ -3,6 +3,11 @@
 
 import { getDb } from './db-client.js';
 
+// Guard: only run startup-time marking once per process lifetime.
+// runMigrations() is called on every API request, but marking running→interrupted
+// should only happen once on server boot.
+let _startupMarkDone = false;
+
 const SCHEMA = {
   users: `
     CREATE TABLE IF NOT EXISTS users (
@@ -228,20 +233,25 @@ export function runMigrations() {
     )
   `).run();
 
-  // Auto-restart: mark running jobs as 'interrupted' so they can be resumed
-  // The actual restart happens lazily when the workspace is loaded
-  try {
-    const runningJobs = db.prepare(
-      "SELECT id, workspace_id FROM agent_jobs WHERE status = 'running'"
-    ).all();
-    if (runningJobs.length > 0) {
-      console.log(`[SQLite] Found ${runningJobs.length} interrupted agent job(s) — marking for restart`);
-      db.prepare(
-        "UPDATE agent_jobs SET status = 'interrupted', updated_at = datetime('now') WHERE status = 'running'"
-      ).run();
+  // Auto-restart: mark OLD running jobs as 'interrupted' so they can be resumed.
+  // Only mark jobs that haven't been updated in the last 60 seconds —
+  // this prevents killing jobs that were just started (e.g., during tests).
+  // Only runs ONCE per process lifetime.
+  if (!_startupMarkDone) {
+    _startupMarkDone = true;
+    try {
+      const staleJobs = db.prepare(
+        "SELECT id, workspace_id FROM agent_jobs WHERE status = 'running' AND updated_at < datetime('now', '-60 seconds')"
+      ).all();
+      if (staleJobs.length > 0) {
+        console.log(`[SQLite] Found ${staleJobs.length} stale agent job(s) — marking interrupted for restart`);
+        db.prepare(
+          "UPDATE agent_jobs SET status = 'interrupted', updated_at = datetime('now') WHERE status = 'running' AND updated_at < datetime('now', '-60 seconds')"
+        ).run();
+      }
+    } catch {
+      // agent_jobs table might not exist yet — safe to ignore
     }
-  } catch {
-    // agent_jobs table might not exist yet — safe to ignore
   }
   try {
     db.exec(`ALTER TABLE agent_jobs ADD COLUMN api_keys TEXT DEFAULT '{}'`);

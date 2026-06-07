@@ -27,26 +27,30 @@ export async function POST(request, { params }) {
       return NextResponse.json({ error: { message: 'Commit message is required' } }, { status: 400 });
     }
     
-    // Stage files
+    // Stage files. If no files provided, stage everything.
     if (files && Array.isArray(files) && files.length > 0) {
+      // Files may already be staged — just ensure the index is up to date
       for (const file of files) {
         const safePath = resolveSafePath(wsDir, file);
         if (safePath) {
           await git.add(file).catch(() => {});
         }
       }
-    } else {
-      // Stage all changes
-      await git.add('.').catch(() => {});
     }
     
-    // Check if there's anything to commit
-    const status = await git.status();
-    if (status.staged.length === 0 && status.created.length === 0 && status.deleted.length === 0) {
-      return NextResponse.json({ error: { message: 'No changes to commit' } }, { status: 400 });
-    }
-    
-    const commitResult = await git.commit(message.trim());
+    // Commit whatever is staged (after add, or whatever was already staged)
+    const commitResult = await git.commit(message.trim()).catch(async (err) => {
+      // If nothing was staged, try staging everything and commit
+      if (err.message?.includes('nothing to commit') || err.message?.includes('nothing added to commit')) {
+        await git.add('.').catch(() => {});
+        const s2 = await git.status();
+        if (s2.staged.length === 0 && s2.created.length === 0 && s2.deleted.length === 0) {
+          throw new Error('No changes to commit');
+        }
+        return git.commit(message.trim());
+      }
+      throw err;
+    });
     
     return NextResponse.json({
       success: true,

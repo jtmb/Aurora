@@ -18,7 +18,7 @@ export async function GET() {
       
       // Read metadata if available
       let metadata = {};
-      const metaPath = path.join(wsPath, '.aurora-workspace.json');
+      const metaPath = path.join(wsPath, '.aurora', 'workspace.json');
       if (fs.existsSync(metaPath)) {
         try {
           metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));

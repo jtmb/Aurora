@@ -327,7 +327,26 @@ export default function Home() {
       const workspaceId = params.get('workspace');
       if (workspaceId) {
         setAppMode('workspace');
-        setPendingWorkspace({ id: workspaceId });
+        // Try to read codeMode from localStorage cache (set by sidebar load)
+        let ws = null;
+        try {
+          const cache = JSON.parse(localStorage.getItem('aurora_ws_meta_cache') || '{}');
+          if (cache[workspaceId]) ws = cache[workspaceId];
+        } catch {}
+        // If cache miss, use _loading sentinel so WorkspaceMode waits instead of defaulting to full
+        setPendingWorkspace(ws || { id: workspaceId, codeMode: '_loading' });
+        // Always refresh from API in background to keep cache current
+        fetch(`/api/workspace/list`).then(r => r.json()).then(data => {
+          const fresh = (data.workspaces || []).find(w => w.id === workspaceId);
+          if (fresh) {
+            try {
+              const cache = JSON.parse(localStorage.getItem('aurora_ws_meta_cache') || '{}');
+              cache[workspaceId] = fresh;
+              localStorage.setItem('aurora_ws_meta_cache', JSON.stringify(cache));
+            } catch {}
+            setPendingWorkspace(fresh);
+          }
+        }).catch(() => {});
       }
     } catch {}
   }, []);
@@ -497,6 +516,13 @@ export default function Home() {
     // Decode JWT to extract user info from the token payload
     try {
       const payload = JSON.parse(atob(token.split('.')[1]));
+      // Check token expiration — JWT tokens are valid for 24h
+      if (payload.exp && (payload.exp * 1000) < Date.now()) {
+        console.debug('JWT token expired, redirecting to login');
+        localStorage.removeItem('auth_token');
+        window.location.href = '/login';
+        return;
+      }
       setUser({ id: payload.userId, email: payload.email, name: payload.sub });
       // Hydrate localStorage with provider keys from server (SQLite)
       await hydrateKeysFromServer(token);
@@ -581,7 +607,16 @@ export default function Home() {
       });
       if (res.ok) {
         const data = await res.json();
-        setWorkspaceList(data.workspaces || []);
+        const list = data.workspaces || [];
+        setWorkspaceList(list);
+        // Cache metadata so URL param handler can read codeMode synchronously
+        try {
+          const cache = {};
+          for (const ws of list) {
+            cache[ws.id] = { id: ws.id, name: ws.name, codeMode: ws.codeMode, type: ws.type, primaryLanguage: ws.primaryLanguage, isGitRepo: ws.isGitRepo };
+          }
+          localStorage.setItem('aurora_ws_meta_cache', JSON.stringify(cache));
+        } catch {}
       }
     } catch (e) {
       console.debug('Load workspaces for sidebar error:', e.message);
@@ -627,6 +662,10 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json();
         setChatList(data.chats || []);
+      } else if (res.status === 401) {
+        // Token expired or invalid — clear and redirect
+        localStorage.removeItem('auth_token');
+        window.location.href = '/login';
       }
     } catch (e) {
       console.debug('Load chats error:', e.message);
@@ -1552,10 +1591,10 @@ export default function Home() {
               {appMode === 'chat' ? (
                 /* --- Chat List --- */
                 <nav className="space-y-[calc(0.75rem+3px)]">
-                  {chatList.length === 0 ? (
+                  {chatList.filter(chat => !chat.workspace_id).length === 0 ? (
                     <p className="px-4 py-2 text-xs text-zinc-600">No chats yet. Start a conversation!</p>
                   ) : (
-                    chatList.map((chat) => (
+                    chatList.filter(chat => !chat.workspace_id).map((chat) => (
                       <div
                         key={chat.id}
                         className="relative group"

@@ -39,7 +39,7 @@ export async function POST(request, { params }) {
         timeout: 30000,
         maxBuffer: 1024 * 1024, // 1MB
         encoding: 'utf-8',
-        env: { ...process.env, CI: 'true', FORCE_COLOR: '0' }
+        env: { ...process.env, CI: 'true', FORCE_COLOR: '0', NODE_ENV: 'production' }
       });
       
       return NextResponse.json({

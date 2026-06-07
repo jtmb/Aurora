@@ -147,6 +147,19 @@ If you need to remove a skill, delete its \`.md\` file.
       fs.writeFileSync(path.join(skillsDir, 'README.md'), skillsReadme);
     }
     
+    // Ensure .aurora/ is in .gitignore so internal metadata never shows as git changes
+    const gitignorePath = path.join(wsDir, '.gitignore');
+    const existingGitignore = fs.existsSync(gitignorePath)
+      ? fs.readFileSync(gitignorePath, 'utf-8')
+      : '';
+    const gitignoreLines = existingGitignore.split('\n').map(l => l.trim());
+    if (!gitignoreLines.includes('.aurora/') && !gitignoreLines.includes('.aurora')) {
+      const newContent = existingGitignore
+        ? (existingGitignore.endsWith('\n') ? existingGitignore : existingGitignore + '\n') + '.aurora/\n'
+        : '.aurora/\n';
+      fs.writeFileSync(gitignorePath, newContent);
+    }
+
     // Write metadata
     const metadata = {
       name: name.trim(),
@@ -157,7 +170,7 @@ If you need to remove a skill, delete its \`.md\` file.
       lastOpened: createdAt
     };
     
-    fs.writeFileSync(path.join(wsDir, '.aurora-workspace.json'), JSON.stringify(metadata, null, 2));
+    fs.writeFileSync(path.join(wsDir, '.aurora', 'workspace.json'), JSON.stringify(metadata, null, 2));
     
     return NextResponse.json({
       id: safeName,

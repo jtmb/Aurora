@@ -35,9 +35,9 @@ export async function GET(request) {
         SELECT * FROM chats WHERE user_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 50
       `).all(userId, workspaceId);
     } else {
-      // Chat mode: only return non-workspace chats (workspace_id is empty string)
+      // Return ALL user chats (both workspace and non-workspace) so they survive cache clears
       chats = db.prepare(`
-        SELECT * FROM chats WHERE user_id = ? AND workspace_id = '' ORDER BY created_at DESC LIMIT 50
+        SELECT * FROM chats WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
       `).all(userId);
     }
 

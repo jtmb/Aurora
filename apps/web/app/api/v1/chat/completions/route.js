@@ -52,9 +52,36 @@ const loadUserKeysFromStorage = async (userId) => {
 };
 
 /**
+ * Load user-scoped API keys from provider_settings DB table (survives cache clears)
+ */
+const loadProviderSettingsFromDb = (userId) => {
+  if (!userId) return {};
+  try {
+    runMigrations();
+    const db = getDb();
+    const row = db.prepare('SELECT settings_json FROM provider_settings WHERE user_id = ?').get(userId);
+    if (!row) return {};
+    const s = JSON.parse(row.settings_json);
+    const result = {};
+    if (s.deepseek) result.deepseek = s.deepseek;
+    if (s.lmStudioUrl) result.lmStudioUrl = s.lmStudioUrl;
+    if (!result.lmStudioUrl && s.lmStudioHost && s.lmStudioPort) {
+      result.lmStudioUrl = `http://${s.lmStudioHost}:${s.lmStudioPort}/v1`;
+    }
+    if (s.lmStudioHost) result.lmStudioHost = String(s.lmStudioHost);
+    if (s.lmStudioPort) result.lmStudioPort = String(s.lmStudioPort);
+    if (s.lmStudioApiKey) result.lmStudioApiKey = s.lmStudioApiKey;
+    return result;
+  } catch (err) {
+    console.error('[Aurora] Failed to load provider_settings from DB:', err.message);
+    return {};
+  }
+};
+
+/**
  * Extract API keys from request headers (sent by frontend from localStorage)
- * Falls back to environment variables for production deployments.
- * User-scoped keys from SQLite take priority over header/env keys when JWT is present.
+ * Falls back to: user-scoped keys (api_keys table) → provider_settings DB → environment variables
+ * Provider_settings DB ensures keys survive browser cache clears.
  */
 const extractKeysFromHeaders = async (request) => {
   const headerKeys = {
@@ -65,12 +92,49 @@ const extractKeysFromHeaders = async (request) => {
     deepseek: request.headers.get('x-deepseek-key') || '',
   };
 
-  // If user is authenticated, merge user-scoped keys (they take priority)
   const userId = getUserId(request);
-  if (userId) {
-    const userKeys = await loadUserKeysFromStorage(userId);
-    if (userKeys.lmStudioUrl) headerKeys.lmStudioUrl = userKeys.lmStudioUrl;
-    if (userKeys.deepseek) headerKeys.deepseek = userKeys.deepseek;
+
+  // If no userId (no JWT), try to read keys from provider_settings DB anyway
+  // This supports server-side callers like agent-runner that don't have auth tokens
+  if (!userId && !headerKeys.deepseek && !headerKeys.lmStudioUrl) {
+    try {
+      runMigrations();
+      const db = getDb();
+      // Get the first available provider_settings row (single-user setups)
+      const row = db.prepare('SELECT settings_json FROM provider_settings LIMIT 1').get();
+      if (row) {
+        const s = JSON.parse(row.settings_json);
+        if (s.deepseek && !headerKeys.deepseek) headerKeys.deepseek = s.deepseek;
+        if (s.lmStudioUrl && !headerKeys.lmStudioUrl) headerKeys.lmStudioUrl = s.lmStudioUrl;
+        if (!headerKeys.lmStudioUrl && s.lmStudioHost && s.lmStudioPort) {
+          headerKeys.lmStudioUrl = `http://${s.lmStudioHost}:${s.lmStudioPort}/v1`;
+        }
+        if (s.lmStudioHost && !headerKeys.lmStudioHost) headerKeys.lmStudioHost = String(s.lmStudioHost);
+        if (s.lmStudioPort && !headerKeys.lmStudioPort) headerKeys.lmStudioPort = String(s.lmStudioPort);
+        if (s.lmStudioApiKey && !headerKeys.lmStudioApiKey) headerKeys.lmStudioApiKey = s.lmStudioApiKey;
+      }
+    } catch (err) {
+      console.error('[Aurora] DB fallback (no-auth) failed:', err.message);
+    }
+    return headerKeys;
+  }
+
+  if (!userId) return headerKeys;
+
+  // Fallback 1: API keys table (legacy)
+  const userKeys = await loadUserKeysFromStorage(userId);
+  if (userKeys.lmStudioUrl && !headerKeys.lmStudioUrl) headerKeys.lmStudioUrl = userKeys.lmStudioUrl;
+  if (userKeys.deepseek && !headerKeys.deepseek) headerKeys.deepseek = userKeys.deepseek;
+
+  // Fallback 2: provider_settings DB (survives cache clears)
+  // Check per-key fallback — only read DB for keys still missing after headers + api_keys table
+  if (!headerKeys.deepseek || !headerKeys.lmStudioUrl) {
+    const dbKeys = loadProviderSettingsFromDb(userId);
+    if (!headerKeys.deepseek && dbKeys.deepseek) headerKeys.deepseek = dbKeys.deepseek;
+    if (!headerKeys.lmStudioUrl && dbKeys.lmStudioUrl) headerKeys.lmStudioUrl = dbKeys.lmStudioUrl;
+    if (!headerKeys.lmStudioHost && dbKeys.lmStudioHost) headerKeys.lmStudioHost = dbKeys.lmStudioHost;
+    if (!headerKeys.lmStudioPort && dbKeys.lmStudioPort) headerKeys.lmStudioPort = dbKeys.lmStudioPort;
+    if (!headerKeys.lmStudioApiKey && dbKeys.lmStudioApiKey) headerKeys.lmStudioApiKey = dbKeys.lmStudioApiKey;
   }
 
   return headerKeys;
@@ -243,6 +307,11 @@ export async function POST(request) {
     // OpenAI-format thinking (DeepSeek): reasoning_effort + thinking: { type: "enabled" }
     if (body.reasoning_effort) extraParams.reasoning_effort = body.reasoning_effort;
     if (body.thinking_type === 'enabled') extraParams.thinking = { type: 'enabled' };
+    // Native tool calling (OpenAI-compatible): pass tools + tool_choice through to provider
+    if (Array.isArray(body.tools) && body.tools.length > 0) {
+      extraParams.tools = body.tools;
+      extraParams.tool_choice = body.tool_choice || 'auto';
+    }
     const { url, body: providerBody, headers } = buildProviderRequest(
       selectedProvider, model, messages, temperature, body.max_tokens, streamMode, extraParams
     );
@@ -398,6 +467,11 @@ export async function POST(request) {
 
     // Non-streaming mode: return normalized JSON
     const data = await response.json();
+    console.log(`[Aurora] ${selectedProvider.id} raw response - id: ${data.id}, model: ${data.model}, choices: ${data.choices?.length || 0}, usage: ${JSON.stringify(data.usage || {})}`);
+    if (data.choices?.[0]) {
+      const c = data.choices[0];
+      console.log(`[Aurora] choice[0] finish_reason: ${c.finish_reason}, content length: ${c.message?.content?.length || 0}, content[:200]: ${(c.message?.content || '').substring(0, 200)}`);
+    }
     const normalized = normalizeToOpenAIFormat(data, selectedProvider.id, model);
     normalized.provider = selectedProvider.id;
 

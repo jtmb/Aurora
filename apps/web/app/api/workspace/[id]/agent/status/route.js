@@ -22,13 +22,15 @@ export async function GET(request, { params }) {
 
     const { searchParams } = new URL(request.url);
     const shouldResume = searchParams.get('resume') === 'true';
+    const specificJobId = searchParams.get('jobId') || null;
 
     // If auto-resume requested, try resuming interrupted jobs
-    if (shouldResume) {
+    // (only if no specific jobId — resume only makes sense for latest)
+    if (shouldResume && !specificJobId) {
       resumeInterruptedJob(id);
     }
 
-    const status = getJobStatus(id);
+    const status = getJobStatus(id, specificJobId);
 
     if (!status) {
       return NextResponse.json({ active: false });
