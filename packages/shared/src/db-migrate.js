@@ -73,6 +73,7 @@ const SCHEMA = {
       chat_id TEXT NOT NULL,
       role TEXT NOT NULL,
       content TEXT NOT NULL DEFAULT '',
+      thinking TEXT NOT NULL DEFAULT '',
       model TEXT DEFAULT '',
       provider TEXT DEFAULT '',
       timestamp TEXT NOT NULL DEFAULT (datetime('now')),
@@ -184,6 +185,14 @@ export function runMigrations() {
   try {
     db.exec(`ALTER TABLE chats ADD COLUMN workspace_id TEXT DEFAULT ''`);
     console.log('[SQLite] Added workspace_id column to chats (migration)');
+  } catch {
+    // Column already exists — safe to ignore
+  }
+
+  // Migrate existing messages table: add thinking column (new in 2026-06)
+  try {
+    db.exec(`ALTER TABLE messages ADD COLUMN thinking TEXT NOT NULL DEFAULT ''`);
+    console.log('[SQLite] Added thinking column to messages (migration)');
   } catch {
     // Column already exists — safe to ignore
   }

@@ -44,7 +44,7 @@ export async function GET(request, { params }) {
       workspaceId: chat.workspace_id || '',
       messageCount: chat.message_count,
       createdAt: chat.created_at,
-      messages: messages.map(m => ({ id: m.id, role: m.role, content: m.content, timestamp: m.timestamp, model: m.model, provider: m.provider }))
+      messages: messages.map(m => ({ id: m.id, role: m.role, content: m.content, thinking: m.thinking || '', timestamp: m.timestamp, model: m.model, provider: m.provider }))
     });
   } catch (error) {
     console.error('Get chat error:', error);

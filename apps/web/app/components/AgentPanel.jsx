@@ -83,13 +83,14 @@ export default function AgentPanel({
     return paragraphs.length || 1;
   };
 
-  // Dynamic thinking label based on content (Copilot-style)
+  // Dynamic thinking label based on content (VS Code Copilot-style: Thinking → Analyzing → Finished)
   const getThinkingLabel = (thinking, streaming) => {
     if (!streaming) {
       const steps = countSteps(thinking);
       return `Finished with ${steps} step${steps !== 1 ? 's' : ''}`;
     }
     const t = (thinking || '').toLowerCase();
+    if (!t) return 'Thinking';
     if (/\b(?:analyz|break\s*down|examin|inspect|dissect|scrutiniz)\b/i.test(t)) return 'Analyzing';
     if (/\b(?:reason|think|logic|deduc|infer|conclude|ponder)\b/i.test(t)) return 'Reasoning';
     if (/\b(?:evaluat|assess|weigh|judge|compar|decide)\b/i.test(t)) return 'Evaluating';
@@ -310,15 +311,36 @@ export default function AgentPanel({
             const merged = [...prev];
             for (const nm of newMsgs) {
               if (nm.role === 'assistant') {
-                merged.push({
+                const msgObj = {
                   id: nm.id,
                   role: nm.role,
                   content: nm.content,
+                  thinking: nm.thinking || '',
                   timestamp: nm.timestamp,
                   model: nm.model,
                   provider: nm.provider,
                   isFinalSummary: nm.content?.startsWith?.('✅') || nm.content?.startsWith?.('⚠️') || nm.content?.startsWith?.('Task complete'),
-                });
+                };
+                // Detect plan content in newly merged messages
+                if (msgObj.content && /\n###\s*Summary\s*\n/.test(msgObj.content)) {
+                  const planResult = parsePlanTodos(msgObj.content);
+                  if (planResult.todos.length > 0) {
+                    msgObj.isPlanResult = true;
+                    setPlanTodos(planResult.todos);
+                    setPlanSummary(planResult.summary);
+                    setPlanMessageId(msgObj.id);
+                  }
+                }
+                // Parse tool calls from agent-mode messages for tool card display
+                const toolCalls = parseToolCalls(nm.content);
+                if (toolCalls.length > 0) {
+                  msgObj.toolCalls = toolCalls.map((tc, i) => ({
+                    ...tc,
+                    id: `${msgObj.id}_tool_${i}`,
+                    status: 'done'
+                  }));
+                }
+                merged.push(msgObj);
               } else if (nm.role === 'user') {
                 // Skip user messages we already have
                 if (!existingIds.has(nm.id)) {
@@ -370,8 +392,23 @@ export default function AgentPanel({
           if (statusData.planTodos && statusData.planTodos.length > 0) {
             setPlanTodos(statusData.planTodos);
             planTodosRef.current = statusData.planTodos;
-          }
-          if (statusData.planSummary) {
+            // Mark the assistant message containing the plan as isPlanResult
+            if (statusData.planSummary) setPlanSummary(statusData.planSummary);
+            setMessages(prev => {
+              // Find the last assistant message with plan content and flag it
+              let planMsgId = null;
+              for (let i = prev.length - 1; i >= 0; i--) {
+                const m = prev[i];
+                if (m.role === 'assistant' && m.content && /\n###\s*Summary\s*\n/.test(m.content)) {
+                  planMsgId = m.id;
+                  if (!m.isPlanResult) m.isPlanResult = true;
+                  break;
+                }
+              }
+              if (planMsgId) setPlanMessageId(planMsgId);
+              return planMsgId ? [...prev] : prev;
+            });
+          } else if (statusData.planSummary) {
             setPlanSummary(statusData.planSummary);
           }
           setActiveJobId(statusData.jobId);
@@ -425,8 +462,20 @@ export default function AgentPanel({
           if (data.planTodos && data.planTodos.length > 0) {
             setPlanTodos(data.planTodos);
             planTodosRef.current = data.planTodos;
-          }
-          if (data.planSummary) setPlanSummary(data.planSummary);
+            if (data.planSummary) setPlanSummary(data.planSummary);
+            // Mark the plan message on reconnect too
+            setMessages(prev => {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                const m = prev[i];
+                if (m.role === 'assistant' && m.content && /\n###\s*Summary\s*\n/.test(m.content)) {
+                  if (!m.isPlanResult) m.isPlanResult = true;
+                  setPlanMessageId(m.id);
+                  break;
+                }
+              }
+              return [...prev];
+            });
+          } else if (data.planSummary) setPlanSummary(data.planSummary);
         }
       } catch (err) {
         console.error('[AgentPanel] Reconnect error:', err.message);
@@ -745,7 +794,7 @@ export default function AgentPanel({
       if ((currentModel || '').startsWith('deepseek-')) currentProvider = 'deepseek';
       else if ((currentModel || '').startsWith('claude-')) currentProvider = 'anthropic';
       else if ((currentModel || '').startsWith('gpt-')) currentProvider = 'openai';
-      saveMessageToChat('assistant', content, currentModel, currentProvider, assistantId, new Date().toISOString());
+      saveMessageToChat('assistant', content, currentModel, currentProvider, assistantId, new Date().toISOString(), thinking);
     }
     return { content, thinking, assistantId };
   };
@@ -868,7 +917,7 @@ export default function AgentPanel({
 
   // Save a message to the workspace's chat via the API
   // Auto-creates a workspace chat if none exists yet (matching page.js behavior)
-  const saveMessageToChat = async (role, content, model, provider, msgId, timestamp) => {
+  const saveMessageToChat = async (role, content, model, provider, msgId, timestamp, thinking = '') => {
     let chatId = workspaceChatId;
 
     // Auto-create workspace chat if needed (workspaceChatId may be null on first load)
@@ -904,7 +953,7 @@ export default function AgentPanel({
       await fetch(`/api/chats/${chatId}/messages`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: msgId, role, content, model: model || '', provider: provider || '', timestamp: timestamp || new Date().toISOString() })
+        body: JSON.stringify({ id: msgId, role, content, thinking, model: model || '', provider: provider || '', timestamp: timestamp || new Date().toISOString() })
       });
     } catch (err) {
       console.error('[saveMessageToChat] Failed to save message:', err);
@@ -1115,11 +1164,11 @@ export default function AgentPanel({
       const pending = todos.filter(t => !t.done);
       const nextTask = pending[0];
 
-      let planBlock = `\n\n=== BUILD PLAN (${doneCount}/${todos.length} done) ===\n`;
+      let planBlock = `\n\n=== BUILD PLAN (INTERNAL REFERENCE — DO NOT REPEAT IN OUTPUT) (${doneCount}/${todos.length} done) ===\n`;
       for (const t of todos) {
         planBlock += `${t.done ? '[x]' : '[ ]'} ${t.text}\n`;
       }
-      planBlock += `\n`;
+      planBlock += `\nIMPORTANT: This plan is for YOUR internal tracking only. NEVER repeat or output these [x]/[ ] task lines in your response. Just execute the next task silently.\n`;
       if (nextTask) {
         planBlock += `NEXT TASK: ${nextTask.text}\n`;
         planBlock += `You MUST complete THIS task before any other. Use a tool call NOW.\n`;
@@ -1260,18 +1309,39 @@ export default function AgentPanel({
           }
         }
 
-        // Final content save
-        const finalContent = streamedContent;
+        // Strip echoed plan content — model may repeat the injected build plan verbatim
+        let finalContent = streamedContent;
         const finalThinking = streamedThinking;
+        if (finalContent && /^(?:\s*(?:\[x\]|\[ \])\s+.+(?:\n|$)){3,}/m.test(finalContent)) {
+          // Content is mostly echoed plan lines — strip them out
+          finalContent = finalContent.replace(/^\s*(?:\[x\]|\[ \])\s+.+\n?/gm, '').trim();
+          // Also strip the BUILD PLAN header if present
+          finalContent = finalContent.replace(/={2,}\s*BUILD PLAN[\s\S]*?={2,}\n?/g, '').trim();
+          // Also strip the NEXT TASK / CRITICAL lines
+          finalContent = finalContent.replace(/^(?:NEXT TASK|CRITICAL|IMPORTANT):.+\n?/gm, '').trim();
+        }
         setMessages(prev => prev.map(m =>
           m.id === assistantId
             ? { ...m, content: finalContent, thinking: finalThinking || undefined }
             : m
         ));
 
-        // Persist assistant message to chat
+        // Persist assistant message to chat — use cleaned content
         if (finalContent) {
-          saveMessageToChat('assistant', finalContent, selectedModel, msgProvider, assistantId, new Date().toISOString());
+          saveMessageToChat('assistant', finalContent, selectedModel, msgProvider, assistantId, new Date().toISOString(), finalThinking);
+
+          // Auto-detect plan format from Chat mode responses — render plan card without page refresh
+          if (effectiveMode === 'chat') {
+            const planResult = parsePlanTodos(finalContent);
+            if (planResult.todos.length > 0) {
+              setPlanTodos(planResult.todos);
+              setPlanSummary(planResult.summary);
+              setPlanMessageId(assistantId);
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId ? { ...m, isPlanResult: true } : m
+              ));
+            }
+          }
         }
 
         setIsStreaming(false);
@@ -1767,22 +1837,57 @@ You are in CHAT MODE — this is a free conversation. You can:
 - **Explain code, concepts, and best practices**.
 - **Suggest next steps** — but do NOT write files or execute actions unless the user explicitly asks you to switch to Agent mode.
 
-When the user is ready to build, tell them to switch to **Agent mode** (for autonomous execution) or **Plan mode** (to generate a structured plan first).
+**⚠️ CROSS-MODE CONTEXT:** This conversation is shared across all modes. When the user switches to **Plan mode** or **Agent mode**, the new mode WILL see everything you discuss here. Be thorough — your discussion here becomes the specification for planning and execution.
 
-Be concise but thorough. Ask questions when the user's request is ambiguous — it's better to clarify NOW than build the wrong thing.`;
+When the user is ready to build, tell them to switch to **Plan mode** (📋 tab) to generate a structured step-by-step plan. After the plan is reviewed, they can switch to **Agent mode** (🤖 tab) for autonomous execution.
+
+Be concise but thorough. Ask questions when the user's request is ambiguous — it's better to clarify NOW than build the wrong thing later.`;
     }
 
-    // Plan mode — Copilot-style: explore workspace, then produce a concrete file-level plan
+    // Plan mode — conversational planning with workspace exploration and structured output
     if (mode === 'plan') {
-      return `You are a PLANNING agent. Your ONLY job is to explore the workspace and produce a step-by-step build plan. You must NEVER write or modify files.
+      // ── Build past learnings block for Plan mode ──
+      let planLearnings = '';
+      const planUnresolved = corpusEntries.filter(e => !e.resolved);
+      const planResolved = corpusEntries.filter(e => e.resolved && e.resolution);
+      if (planUnresolved.length > 0) {
+        const recent = planUnresolved.slice(-3);
+        planLearnings = '⚠️  PAST LEARNINGS (avoid repeating these):\n';
+        for (const e of recent) planLearnings += `- ${e.problem.slice(0, 150)}\n`;
+        planLearnings += '\n';
+      }
+      if (planResolved.length > 0) {
+        planLearnings += '✅ KNOWN FIXES:\n';
+        for (const e of planResolved.slice(-3)) planLearnings += `- ${e.problem.slice(0, 100)} → ${e.resolution.slice(0, 150)}\n`;
+        planLearnings += '\n';
+      }
 
-${workspaceAgentsMd ? `WORKSPACE AGENTS.md (follow these rules):\n${workspaceAgentsMd}\n\n` : ''}## REQUIRED WORKFLOW
-1. **EXPLORE**: Use list_dir and read_file to understand what already exists in the workspace.
-2. **PLAN**: Output a concrete build plan in the EXACT format below. Each task MUST reference specific file paths you will create or modify.
-3. **STOP**: Do NOT create any files. Do NOT continue to execution. The system will save your plan automatically.
+      // ── Build relevant skills block ──
+      let planSkills = '';
+      if (skills.length > 0) {
+        planSkills = '📚 AVAILABLE SKILLS:\n';
+        for (const s of skills.slice(0, 5)) planSkills += `- ${s.name}: ${(s.description || '').slice(0, 100)}\n`;
+        planSkills += '\n';
+      }
+
+      return `${workspaceAgentsMd ? '⚠️  AGENTS.md RULES:\n\n' + workspaceAgentsMd + '\n\n---\n\n' : ''}${planLearnings}${planSkills}You are a helpful AI assistant in PLAN MODE working with a developer in their workspace. The workspace is at /api/workspace/${wsId}.
+
+You are in PLAN MODE — your goal is to explore the workspace and produce a structured implementation plan. You must NEVER write or modify files in this mode. You CAN use exploration tools (list_dir, read_file, grep_search) to understand the codebase.
+
+**Other available modes (all share the same conversation — you can see messages from any mode):**
+- **Chat mode** — for free discussion, questions, and brainstorming. The user may have discussed their project here first — check the conversation history.
+- **Agent mode** — for autonomous file creation and editing once a plan is ready.
+
+**⚠️ CRITICAL — CROSS-MODE CONTEXT:** The messages in this conversation may include prior discussions from Chat mode. If you see detailed feature discussions, tech choices, or clarifications in earlier messages, USE THEM. Do NOT re-ask questions that were already answered. The user expects you to pick up where Chat mode left off and generate a plan from what was already discussed.
+
+## WORKFLOW
+1. **Read the conversation history first** — especially messages marked as [USER] and [ASSISTANT] from before this message. They contain the user's requirements, preferences, and prior discussion.
+2. **Discuss & clarify** ONLY if critical information is missing. If the conversation history already answers the questions, proceed directly to planning.
+3. **Explore the workspace** using tools like list_dir, read_file, and grep_search to understand what already exists.
+4. **Produce a concrete plan** in the format below. Every task MUST reference specific file paths.
 
 ## EXPLORATION TOOL FORMAT
-To explore the workspace, use fenced code blocks with EXACTLY this syntax. Do NOT use XML tags. Only fenced code blocks are accepted:
+Use fenced code blocks. Do NOT use XML tags:
 
 \`\`\`list_dir path="."
 \`\`\`
@@ -1795,9 +1900,8 @@ To explore the workspace, use fenced code blocks with EXACTLY this syntax. Do NO
 
 - Print ONLY ONE tool per response.
 - After getting results, briefly state what you found, then either explore more OR output the plan.
-- If the workspace is empty, skip exploration and immediately output the plan.
 
-## PLAN FORMAT (copy this EXACTLY)
+## PLAN FORMAT (output this EXACTLY)
 
 ### Summary
 One sentence: what the user asked for + the tech stack you'll use.
@@ -1818,7 +1922,7 @@ One sentence: what the user asked for + the tech stack you'll use.
 - **Read WORKSPACE AGENTS.md** if present — it may override tech choices.
 - **⚠️ FRAMEWORK DEFAULTS**: If the user asks to "make an app", "build a website", "create a project", or any variation WITHOUT specifying a framework → **DEFAULT: Next.js 16 + TypeScript + Tailwind CSS v3**. Plan files like \`package.json\`, \`tsconfig.json\`, \`app/layout.tsx\`, \`app/page.tsx\`, \`app/globals.css\`, \`tailwind.config.js\`. NEVER plan plain HTML files (\`index.html\`, \`style.css\`) unless the user explicitly asks for "static HTML" or "plain HTML page".
 - **Only use read_file, list_dir, grep_search** during exploration.
-- **After outputting the plan, STOP**. Do NOT continue to execution.`;
+- **After outputting the plan, STOP**. The system will surface it to the user with an "Execute Plan" button.`;
     }
 
     // Agent mode (default)
@@ -1854,7 +1958,11 @@ One sentence: what the user asked for + the tech stack you'll use.
       skillsBlock2 += '\n';
     }
 
-    let prompt = `Workspace: /api/workspace/${wsId}.
+    let prompt = `You are in AGENT MODE — you autonomously create and modify files in this workspace. The user can switch to Chat mode for discussion or Plan mode to generate a structured task list before execution.
+
+**⚠️ CROSS-MODE CONTEXT:** This conversation includes messages from all modes (Chat, Plan, Agent). If you see prior discussions, plans, or task lists in the conversation history, USE THEM. The user expects continuity across modes. If a plan was already generated in Plan mode, you should see it in the messages and follow it.
+
+Workspace: /api/workspace/${wsId}.
 ${workspaceAgentsMd ? `\nWORKSPACE AGENTS.md (follow these rules):\n${workspaceAgentsMd}\n` : ''}${learningsBlock2}${skillsBlock2}
 TOOLS (use fenced code blocks):
 \`\`\`read_file filePath="filename.ext"
@@ -2343,23 +2451,28 @@ TESTING WORKFLOW — After creating/modifying project files:
     // Plan result messages: don't show raw content, only the structured plan UI
     if (msg.isPlanResult) return null;
 
-    // Remove tool call fenced blocks from displayed content (shown in tool cards)
-    const toolBlockRegex = /```(create_file|replace_string_in_file|read_file|list_dir|grep_search|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status)\b[^`]*```/g;
-    const cleanContent = msg.content ? msg.content.replace(toolBlockRegex, '').trim() : '';
+    // Remove tool call fenced blocks AND XML-format tool tags from displayed content
+    const toolBlockRegex = /```(create_file|replace_string_in_file|read_file|list_dir|grep_search|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)\b[\s\S]*?\n```/g;
+    const xmlToolRegex = /<(read_file|list_dir|grep_search|create_file|replace_string_in_file|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)(\s+[^>]*)?\/?>[\s\S]*?<\/\1>|<(read_file|list_dir|grep_search|create_file|replace_string_in_file|run_in_terminal|dev_server_start|dev_server_stop|dev_server_status|show_preview|create_skill)(\s+[^>]*)?\s*\/>/gi;
+    let cleanContent = msg.content ? msg.content.replace(toolBlockRegex, '').replace(xmlToolRegex, '').trim() : '';
+    // Also strip leftover self-closing tags and empty fenced code blocks (info-string-only blocks with no body)
+    cleanContent = cleanContent.replace(/<\w+(\s+\w+="[^"]*")*\s*\/>/g, '').replace(/```[^\n]+\n\s*```/g, '').trim();
 
     // If there's nothing to display, return null.
     if (!cleanContent) return null;
 
     // Parse fenced code blocks — use SyntaxHighlighter for code, ReactMarkdown for text
-    const parts = cleanContent.split(/(```\w*\n[\s\S]*?\n```)/g);
+    const parts = cleanContent.split(/(```[^\n]*\n[\s\S]*?\n```)/g);
 
     return (
       <div className="text-xs leading-relaxed text-zinc-300">
         {parts.map((part, i) => {
-          const codeMatch = part.match(/```(\w*)\n([\s\S]*?)\n```/);
+          const codeMatch = part.match(/```(\w*)[^\n]*\n([\s\S]*?)\n```/);
           if (codeMatch) {
             const lang = codeMatch[1] || 'text';
             const code = codeMatch[2];
+            // Skip empty code blocks (e.g. `\`\`\`npm install\n\`\`\`` where all text is info-string)
+            if (!code.trim()) return null;
             return (
               <div key={i} className="relative my-2 group">
                 <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800/80 rounded-t-lg border border-zinc-700/30 border-b-0">
@@ -2438,15 +2551,15 @@ TESTING WORKFLOW — After creating/modifying project files:
     const fp = tc.args?.filePath || tc.args?.path || '';
 
     return (
-      <div className={`mt-1 border-l-2 ${borderColor} bg-zinc-800/30 rounded-r-md overflow-hidden`}>
+      <div className={`mt-1.5 border-l-[3px] ${borderColor} bg-zinc-800/60 rounded-r-md overflow-hidden shadow-sm`}>
         <button
           type="button"
           onClick={toggle}
-          className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[11px] hover:bg-zinc-800/40 transition-colors text-left"
+          className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-zinc-700/50 transition-colors text-left"
         >
-          <span className="text-xs">{getToolIcon(tc.name)}</span>
-          <span className="font-medium text-zinc-300">{tc.name}</span>
-          {fp && <span className="text-zinc-600 font-mono text-[10px] truncate max-w-[140px]">{fp}</span>}
+          <span className="text-sm">{getToolIcon(tc.name)}</span>
+          <span className="font-semibold text-zinc-200">{tc.name}</span>
+          {fp && <span className="text-zinc-400 font-mono text-[10px] truncate max-w-[180px]">{fp}</span>}
           <span className="ml-auto flex-shrink-0">
             {tc.status === 'executing' ? (
               <span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin inline-block" />
@@ -2461,35 +2574,35 @@ TESTING WORKFLOW — After creating/modifying project files:
           </svg>
         </button>
         {isExpanded && (
-          <div className="px-3 py-2 border-t border-zinc-700/20 text-[10px] text-zinc-500 space-y-1">
+          <div className="px-3 py-2.5 border-t border-zinc-700/30 text-[11px] text-zinc-400 space-y-1.5 bg-zinc-900/30">
             {tc.args && Object.keys(tc.args).filter(k => k !== 'content' && k !== 'oldString' && k !== 'newString').length > 0 && (
               <div>
-                <span className="text-zinc-600">Args: </span>
+                <span className="text-zinc-500 font-medium">Args: </span>
                 {Object.entries(tc.args).filter(([k]) => k !== 'content' && k !== 'oldString' && k !== 'newString').map(([k, v]) => (
-                  <span key={k} className="text-zinc-400">{k}=<span className="text-zinc-300">{String(v).slice(0, 80)}</span> </span>
+                  <span key={k} className="text-zinc-400">{k}=<span className="text-zinc-200">{String(v).slice(0, 80)}</span> </span>
                 ))}
               </div>
             )}
             {tc.result?.error ? (
               <div className="text-red-400">{tc.result.error}</div>
             ) : tc.result?.content && tc.name === 'read_file' ? (
-              <pre className="text-zinc-400 whitespace-pre-wrap font-mono max-h-[120px] overflow-y-auto bg-zinc-900/50 p-2 rounded">{String(tc.result.content).slice(0, 500)}</pre>
+              <pre className="text-zinc-300 whitespace-pre-wrap font-mono max-h-[120px] overflow-y-auto bg-zinc-950/60 p-2 rounded text-[10px]">{String(tc.result.content).slice(0, 500)}</pre>
             ) : tc.result?.results && tc.name === 'grep_search' ? (
               <div className="space-y-0.5">
                 {tc.result.results.slice(0, 8).map((r, i) => (
                   <div key={i} className="text-zinc-400">
-                    <span className="text-zinc-600">{r.path}:{r.line}</span> — {r.content?.slice(0, 100)}
+                    <span className="text-zinc-500">{r.path}:{r.line}</span> — {r.content?.slice(0, 100)}
                   </div>
                 ))}
               </div>
             ) : tc.result?.files && tc.name === 'list_dir' ? (
               <div className="flex flex-wrap gap-1">
                 {tc.result.files.slice(0, 20).map(f => (
-                  <span key={f.name || f.path} className="text-zinc-400 bg-zinc-800/50 px-1.5 py-0.5 rounded">{f.name || f.path}</span>
+                  <span key={f.name || f.path} className="text-zinc-300 bg-zinc-800/70 px-1.5 py-0.5 rounded text-[10px]">{f.name || f.path}</span>
                 ))}
               </div>
             ) : tc.status === 'done' ? (
-              <div className="text-emerald-400">{getToolSummary(tc.name, tc.args, tc.result || {})}</div>
+              <div className="text-emerald-400 font-medium">{getToolSummary(tc.name, tc.args, tc.result || {})}</div>
             ) : null}
           </div>
         )}
@@ -2646,10 +2759,9 @@ TESTING WORKFLOW — After creating/modifying project files:
           const isLastAssistant = !isUser && i === messages.length - 1;
           const isStreamingThis = isLastAssistant && isStreaming;
           const hasThinking = !isUser && msg.thinking;
-          // VS Code style: thinking is collapsed by default. While streaming,
-          // only the toggle label animates (with dots). The text only shows
-          // when the user clicks to expand.
-          const isThinkingExpanded = expandedThinkingIds.has(msg.id);
+          // VS Code style: thinking auto-expands while streaming, collapses when finished.
+          // User can manually toggle to override (stored in expandedThinkingIds).
+          const isThinkingExpanded = isStreamingThis ? hasThinking : expandedThinkingIds.has(msg.id);
           const showThinkingToggle = hasThinking;
           const toggleThinking = () => {
             setExpandedThinkingIds(prev => {

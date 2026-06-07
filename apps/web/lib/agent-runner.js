@@ -393,7 +393,7 @@ function saveJob(job) {
   );
 }
 
-async function saveMessageToChat(chatId, role, content, model, provider, msgId, timestamp) {
+async function saveMessageToChat(chatId, role, content, model, provider, msgId, timestamp, thinking = '') {
   try {
     runMigrations();
     const db = getDb();
@@ -405,9 +405,9 @@ async function saveMessageToChat(chatId, role, content, model, provider, msgId, 
     const position = (lastMsg?.maxPos ?? -1) + 1;
 
     db.prepare(`
-      INSERT INTO messages (id, chat_id, role, content, model, provider, timestamp, position)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(messageId, chatId, role, content, model || '', provider || '', ts, position);
+      INSERT INTO messages (id, chat_id, role, content, thinking, model, provider, timestamp, position)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(messageId, chatId, role, content, thinking || '', model || '', provider || '', ts, position);
 
     // Update chat metadata
     db.prepare(`
@@ -419,6 +419,21 @@ async function saveMessageToChat(chatId, role, content, model, provider, msgId, 
 }
 
 // ── System prompt builder (same logic as AgentPanel) ─────────────────────────
+
+/**
+ * Strip echoed plan/progress lines from model output.
+ * Small models (e.g. DeepSeek v4 Flash) often echo [x]/[ ] task lines
+ * as part of their response text instead of just making tool calls.
+ */
+function stripEchoedPlanContent(content) {
+  if (!content) return content;
+  // Only strip if there are 3+ [x]/[ ] lines — indicates the model is echoing a plan
+  if (!/^(?:\s*(?:\[x\]|\[ \])\s+.+(?:\n|$)){3,}/m.test(content)) return content;
+  let cleaned = content.replace(/^\s*(?:\[x\]|\[ \])\s+.+\n?/gm, '').trim();
+  cleaned = cleaned.replace(/={2,}\s*BUILD PLAN[\s\S]*?={2,}\n?/g, '').trim();
+  cleaned = cleaned.replace(/^(?:NEXT TASK|CRITICAL|IMPORTANT):.+\n?/gm, '').trim();
+  return cleaned || content; // fallback to original if we stripped everything
+}
 
 function buildSystemPrompt(wsId, mode = 'agent') {
   if (mode === 'agent') {
@@ -440,7 +455,10 @@ function buildSystemPrompt(wsId, mode = 'agent') {
       'show_preview'
     ].join('\n');
 
-    let base = 'Workspace API: /api/workspace/' + wsId + '. Use RELATIVE paths: "." is root.\n' +
+    let base = 'You are in AGENT MODE — you autonomously create and modify files. '
+      + 'The user can switch to Chat mode for discussion or Plan mode to generate a structured task list before execution.\n'
+      + 'If the user message contains "CONVERSATION HISTORY", that is the prior discussion from Chat/Plan modes — use it for context.\n\n' +
+      'Workspace API: /api/workspace/' + wsId + '. Use RELATIVE paths: "." is root.\n' +
       'TOOL SYNTAX:\n' + toolSyntax + '\n' +
       '- First step: `list_dir path="."` to see what exists.\n' +
       '- create_file puts content INSIDE the block body, never as content="..." attribute.\n' +
@@ -455,10 +473,24 @@ function buildSystemPrompt(wsId, mode = 'agent') {
   }
 
   // Plan mode
-  return `You are a planning assistant. Explore the workspace, understand the codebase, and produce a structured implementation plan.
+  return `You are a helpful AI assistant in PLAN MODE working with a developer in their workspace. The workspace is at /api/workspace/${wsId}.
+
+You are in PLAN MODE — your goal is to explore the workspace and produce a structured implementation plan. You must NEVER write or modify files. You CAN use exploration tools (list_dir, read_file, grep_search) to understand the codebase.
+
+**Other available modes:**
+- **Chat mode** — for free discussion, questions, and brainstorming without producing plans. The user may have discussed their project there first.
+- **Agent mode** — for autonomous file creation and editing once a plan is ready.
+
+**⚠️ CRITICAL: If the user message contains "CONVERSATION HISTORY (from Chat mode)", that means the user already discussed this project in Chat mode. Review that history carefully — it contains the user's preferences, tech choices, and feature requirements. Use it to build your plan. Do NOT re-ask questions that were already answered in the history.**
+
+## WORKFLOW
+1. **Read the conversation history** if present — extract the user's requirements and preferences.
+2. **Discuss & clarify** the user's request ONLY if critical information is missing. If the conversation history already has the answers, proceed.
+3. **Explore the workspace** using tools to understand what already exists.
+4. **Produce a concrete plan** in the format below.
 
 ## EXPLORATION TOOL FORMAT
-To explore the workspace, use fenced code blocks with EXACTLY this syntax:
+Use fenced code blocks:
 \`\`\`list_dir path="."
 \`\`\`
 \`\`\`read_file filePath="src/index.ts"
@@ -466,20 +498,25 @@ To explore the workspace, use fenced code blocks with EXACTLY this syntax:
 \`\`\`grep_search query="pattern"
 \`\`\`
 
-## RULES
-- Explore thoroughly: use list_dir and read_file to understand the codebase.
-- NEVER use write/modify tools (create_file, replace_string_in_file, run_in_terminal).
-- Only use read_file, list_dir, grep_search.
-- When you have enough context, output your plan.
+- Print ONLY ONE tool per response.
+- After getting results, briefly state what you found, then either explore more OR output the plan.
 
 ## PLAN OUTPUT FORMAT
-\`\`\`
-1. [ ] Task description (brief, actionable)
-2. [ ] Task description
-...
-\`\`\`
 
-Each task must be a SINGLE concrete action. Tasks in execution ORDER. 5-15 tasks total.`;
+### Summary
+One sentence: what the user asked for + the tech stack you'll use.
+
+### Tasks
+- [ ] Create \`path/to/file1.ext\`: what this file does — *depends on: Task 1*
+- [ ] Create \`path/to/file2.ext\`: what this file does
+- [ ] Modify \`path/to/existing.ext\`: what change and why
+
+## RULES
+- **Every task MUST mention at least one concrete file path.** No vague tasks.
+- **6-12 tasks maximum.** Keep it focused.
+- **No phases** — just a flat ordered task list.
+- **Only use read_file, list_dir, grep_search.**
+- **After outputting the plan, STOP.** The system will surface it to the user with an "Execute Plan" button.`;
 }
 
 // ── Build compact summary (for context window management) ────────────────────
@@ -577,10 +614,14 @@ export async function runAgentJob(jobId) {
       const apiKeys = job.api_keys || {};
       const { content: rawContent, thinking } = await llmCall(conversation, model, provider, thinkingEffort, apiKeys);
       const assistantId = `agent_${Date.now()}_${iter}`;
-      conversation.push({ role: 'assistant', content: rawContent });
 
-      // Save assistant message
-      await saveMessageToChat(chatId, 'assistant', rawContent, model, provider, assistantId, new Date().toISOString());
+      // Strip echoed plan/progress lines before saving (model may repeat [x]/[ ] tasks)
+      const cleanedContent = stripEchoedPlanContent(rawContent);
+
+      conversation.push({ role: 'assistant', content: cleanedContent });
+
+      // Save assistant message (use cleaned content)
+      await saveMessageToChat(chatId, 'assistant', cleanedContent, model, provider, assistantId, new Date().toISOString(), thinking);
 
       // Parse tool calls
       const toolCalls = parseToolCalls(rawContent);
@@ -957,7 +998,7 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys) {
   const data = await res.json();
   const choice = data.choices?.[0] || {};
   const content = choice.message?.content || '';
-  const thinking = choice.message?.thinking || data.thinking || '';
+  const thinking = choice.message?.reasoning_content || choice.message?.thinking || data.reasoning_content || data.thinking || '';
 
   return { content, thinking };
 }
@@ -1082,14 +1123,55 @@ export function startAgentJob({ workspaceId, chatId, userContent, model, provide
   const isPlanExecution = userContent.startsWith('Execute the following plan');
   const effectiveMode = isPlanExecution ? 'agent' : agentMode;
 
+  // ── Load prior chat messages so Plan/Agent modes have full context ──
+  let priorChatMessages = [];
+  try {
+    const chatMsgs = db.prepare(
+      "SELECT * FROM messages WHERE chat_id = ? ORDER BY position ASC"
+    ).all(chatId);
+    // Map to OpenAI format, exclude empty/system messages
+    priorChatMessages = (chatMsgs || [])
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .map(m => ({ role: m.role, content: m.content || '' }))
+      .filter(m => m.content.trim());
+  } catch (e) {
+    console.warn('[agent-runner] Could not load prior chat messages:', e.message);
+  }
+
   // Build initial conversation
   let systemPromptFinal = systemPrompt || buildSystemPrompt(workspaceId, effectiveMode);
   const frameworkKeywords = /\b(next\.?js|nextjs|react|vue|angular|svelte|express|django|flask|fastapi|rails|laravel|static html|plain html|html only|vanilla js|python|go|rust|sveltekit|nuxt|remix|astro|gatsby|vite)\b/i;
   const frameworkHint = frameworkKeywords.test(userContent) ? '' : '\n\nTECH STACK: Build this as a Next.js 16 + TypeScript + Tailwind CSS v3 project. Create files in the app/ directory (App Router). Do NOT use plain HTML.';
 
   let effectiveUserContent = userContent;
-  if (effectiveMode === 'agent') {
-    effectiveUserContent = `USER REQUEST: ${userContent}${frameworkHint}\n\nIMPORTANT: You are in AGENT MODE. DO NOT describe what you'll do. DO NOT ask questions. DO NOT explain your plan. ACT NOW. Use a TOOL CALL immediately. The workspace may be empty — create ALL needed files yourself. If you need to see what exists, use list_dir first.`;
+
+  // ── Mode-transition context injection ──
+  if (effectiveMode === 'plan') {
+    // Inject prior Chat context so Plan mode knows what was discussed
+    let planContext = '';
+    if (priorChatMessages.length > 0) {
+      planContext = '\n\n=== CONVERSATION HISTORY (from Chat mode) ===\n';
+      planContext += 'The user previously discussed this project in Chat mode. Here is the conversation:\n\n';
+      // Include last 20 messages (10 exchanges) to stay within context
+      const recentMsgs = priorChatMessages.slice(-20);
+      for (const m of recentMsgs) {
+        planContext += `[${m.role.toUpperCase()}]: ${m.content.slice(0, 1000)}\n\n`;
+      }
+      planContext += '=== END CONVERSATION HISTORY ===\n\n';
+    }
+    effectiveUserContent = `${planContext}NOW: ${userContent}\n\nIMPORTANT: Review the conversation history above. The user discussed this project in Chat mode — use that discussion to inform your plan. Generate a structured plan in the ### Summary / ### Tasks format. DO NOT ask more questions unless absolutely necessary — the conversion history already contains the user\'s preferences.`;
+  } else if (effectiveMode === 'agent') {
+    // Inject prior context so Agent mode knows the full history
+    let agentContext = '';
+    if (priorChatMessages.length > 0) {
+      agentContext = '\n\n=== CONVERSATION HISTORY ===\n';
+      const recentMsgs = priorChatMessages.slice(-20);
+      for (const m of recentMsgs) {
+        agentContext += `[${m.role.toUpperCase()}]: ${m.content.slice(0, 800)}\n\n`;
+      }
+      agentContext += '=== END CONVERSATION HISTORY ===\n\n';
+    }
+    effectiveUserContent = `${agentContext}USER REQUEST: ${userContent}${frameworkHint}\n\nIMPORTANT: You are in AGENT MODE. DO NOT describe what you'll do. DO NOT ask questions. DO NOT explain your plan. ACT NOW. Use a TOOL CALL immediately. The workspace may be empty — create ALL needed files yourself. If you need to see what exists, use list_dir first.`;
   }
 
   const conversation = [

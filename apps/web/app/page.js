@@ -319,6 +319,19 @@ export default function Home() {
     init();
   }, []);
 
+  // Handle ?workspace=xxx URL parameter — switch to workspace mode on direct navigation
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const workspaceId = params.get('workspace');
+      if (workspaceId) {
+        setAppMode('workspace');
+        setPendingWorkspace({ id: workspaceId });
+      }
+    } catch {}
+  }, []);
+
   // Hydrate localStorage with provider settings from server DB on login.
   // Source of truth: provider_settings DB table → api_keys table (legacy fallback)
   const hydrateKeysFromServer = async (token) => {
@@ -746,6 +759,8 @@ export default function Home() {
   // Applied at data-ingestion time so ReactMarkdown always receives clean markdown.
   const cleanMarkdownLinks = (text) => {
     if (!text) return text;
+    // Strip empty fenced code blocks (info-string-only, no body) and self-closing XML/HTML tags
+    text = text.replace(/```[^\n]+\n\s*```/g, '').replace(/<\w+(\s+\w+="[^"]*")*\s*\/>/g, '');
     // Pass 1: Convert parenthesized bare URLs to markdown links
     text = text.replace(/(?<!\])(\((https?:\/\/[^\s<>"']+?)\))/g, (match, _outer, url) => {
       try {
@@ -1150,7 +1165,7 @@ export default function Home() {
             await fetch(`/api/chats/${chatId}/messages`, {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ role: 'assistant', content: cleanedFinal, model, provider: providerId })
+              body: JSON.stringify({ role: 'assistant', content: cleanedFinal, thinking: finalThinking || '', model, provider: providerId })
             });
           }
         } catch {}

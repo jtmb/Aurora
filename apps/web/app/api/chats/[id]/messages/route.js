@@ -32,7 +32,7 @@ export async function GET(request, { params }) {
     `).all(id);
 
     return NextResponse.json({
-      messages: messages.map(m => ({ id: m.id, role: m.role, content: m.content, timestamp: m.timestamp, model: m.model, provider: m.provider }))
+      messages: messages.map(m => ({ id: m.id, role: m.role, content: m.content, thinking: m.thinking || '', timestamp: m.timestamp, model: m.model, provider: m.provider }))
     });
   } catch (error) {
     console.error('Get messages error:', error);
@@ -60,17 +60,19 @@ export async function POST(request, { params }) {
     const lastMsg = db.prepare('SELECT MAX(position) as maxPos FROM messages WHERE chat_id = ?').get(id);
     const position = (lastMsg?.maxPos ?? -1) + 1;
 
+    const thinking = body.thinking || '';
+
     db.prepare(`
-      INSERT INTO messages (id, chat_id, role, content, model, provider, timestamp, position)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(messageId, id, body.role || 'user', body.content || '', body.model || '', body.provider || '', timestamp, position);
+      INSERT INTO messages (id, chat_id, role, content, thinking, model, provider, timestamp, position)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(messageId, id, body.role || 'user', body.content || '', thinking, body.model || '', body.provider || '', timestamp, position);
 
     // Update chat metadata
     db.prepare(`
       UPDATE chats SET last_message_at = ?, message_count = message_count + 1 WHERE id = ?
     `).run(timestamp, id);
 
-    const message = { id: messageId, role: body.role || 'user', content: body.content || '', timestamp, model: body.model || '', provider: body.provider || '' };
+    const message = { id: messageId, role: body.role || 'user', content: body.content || '', thinking, timestamp, model: body.model || '', provider: body.provider || '' };
 
     return NextResponse.json({ message }, { status: 201 });
   } catch (error) {

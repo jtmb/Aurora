@@ -35,8 +35,9 @@ export async function GET(request) {
         SELECT * FROM chats WHERE user_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 50
       `).all(userId, workspaceId);
     } else {
+      // Chat mode: only return non-workspace chats (workspace_id is empty string)
       chats = db.prepare(`
-        SELECT * FROM chats WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
+        SELECT * FROM chats WHERE user_id = ? AND workspace_id = '' ORDER BY created_at DESC LIMIT 50
       `).all(userId);
     }
 
@@ -59,6 +60,16 @@ export async function POST(request) {
 
     const body = await request.json().catch(() => ({}));
     const chatId = `chat_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+    // Ensure user exists (auto-create if DB was wiped — common in dev)
+    const userExists = db.prepare("SELECT id FROM users WHERE id = ?").get(userId);
+    if (!userExists) {
+      db.prepare(`
+        INSERT INTO users (id, email, hashed_password, name, role)
+        VALUES (?, ?, 'auto_created', 'Auto User', 'user')
+      `).run(userId, userId);
+      console.log('[chats] Auto-created user:', userId);
+    }
     
     const chatData = {
       id: chatId,
