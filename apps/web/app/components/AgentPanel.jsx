@@ -2481,18 +2481,27 @@ TESTING WORKFLOW — After creating/modifying project files:
   // UI display summary for tool call badges
   const getToolSummary = (name, args, result) => {
     const fp = args.filePath || args.path || '?';
+    const baseName = fp.split('/').pop() || fp;
     switch (name) {
       case 'read_file': return `Read \`${fp}\` (${result.size || result.content?.length || 0} bytes)`;
-      case 'create_file': return `Created \`${fp}\``;
-      case 'replace_string_in_file': return `Patched \`${fp}\``;
+      case 'create_file': {
+        // Use result data first, fall back to counting args.content
+        const n = result.linesAdded || result.totalLines || (typeof args.content === 'string' ? args.content.split('\n').length : 0);
+        return n ? `Created \`${baseName}+${n}\`` : `Created \`${baseName}\``;
+      }
+      case 'replace_string_in_file': {
+        // Total lines swapped: +newLines-oldLines (Copilot-style)
+        const newLines = result.newLines ?? (args.newString ? args.newString.split('\n').length : 0);
+        const oldLines = result.oldLines ?? (args.oldString ? args.oldString.split('\n').length : 0);
+        return `Edited \`${baseName}+${newLines}-${oldLines}\``;
+      }
       case 'grep_search': return `Found ${result.results?.length || 0} matches for "${args.query}"`;
       case 'list_dir': return `Listed ${fp}`;
-      case 'run_in_terminal': return `Ran \`${args.command}\``;
+      case 'run_in_terminal': return `Ran \`${(args.command || '').slice(0, 60)}\``;
       case 'dev_server_status': return `Checked dev server status`;
       case 'dev_server_start': return `Started dev server (${args.command || 'npm run dev'})`;
       case 'dev_server_stop': return `Stopped dev server`;
       case 'show_preview': return `Opened preview panel`;
-      case 'run_in_terminal': return `Ran \`${(args.command || '').slice(0, 60)}\``;
       default: return 'Done';
     }
   };
@@ -2682,6 +2691,22 @@ TESTING WORKFLOW — After creating/modifying project files:
     };
     const borderColor = getToolBorderColor(tc.name, tc.status);
     const fp = tc.args?.filePath || tc.args?.path || '';
+    const baseName = fp.split('/').pop() || fp;
+
+    // Compute diff annotation for file write operations (VS Code Copilot-style)
+    // Uses tc.args since tool calls parsed from text content don't have execution results.
+    let diffAnnotation = null;
+    if (tc.status === 'done' && tc.name === 'create_file') {
+      const content = tc.args?.content || '';
+      const n = typeof content === 'string' ? content.split('\n').length : 0;
+      if (n > 0) diffAnnotation = { text: `+${n}`, color: 'text-emerald-400' };
+    } else if (tc.status === 'done' && tc.name === 'replace_string_in_file') {
+      const oldLines = (tc.args?.oldString || '').split('\n').length;
+      const newLines = (tc.args?.newString || '').split('\n').length;
+      if (oldLines > 0 || newLines > 0) {
+        diffAnnotation = { text: `+${newLines}-${oldLines}`, color: newLines > oldLines ? 'text-emerald-400' : oldLines > newLines ? 'text-amber-400' : 'text-amber-400' };
+      }
+    }
 
     return (
       <div className={`mt-1.5 border-l-[3px] ${borderColor} bg-zinc-800/60 rounded-r-md overflow-hidden shadow-sm`}>
@@ -2692,7 +2717,10 @@ TESTING WORKFLOW — After creating/modifying project files:
         >
           <span className="text-sm">{getToolIcon(tc.name)}</span>
           <span className="font-semibold text-zinc-200">{tc.name}</span>
-          {fp && <span className="text-zinc-400 font-mono text-[10px] truncate max-w-[180px]">{fp}</span>}
+          {baseName && <span className="text-zinc-400 font-mono text-[10px] truncate max-w-[160px]">{baseName}</span>}
+          {diffAnnotation && (
+            <span className={`font-mono text-[10px] font-medium ${diffAnnotation.color}`}>{diffAnnotation.text}</span>
+          )}
           <span className="ml-auto flex-shrink-0">
             {tc.status === 'executing' ? (
               <span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin inline-block" />
@@ -3114,7 +3142,7 @@ TESTING WORKFLOW — After creating/modifying project files:
 
                   {/* Thinking block — VS Code Copilot style: collapsible reasoning */}
                   {showThinkingToggle && (
-                    <div className="mb-2">
+                    <div className={`${isThinkingExpanded ? 'mb-3' : 'mb-2'}`}>
                       <button
                         type="button"
                         onClick={toggleThinking}
@@ -3135,18 +3163,24 @@ TESTING WORKFLOW — After creating/modifying project files:
                         )}
                       </button>
                       {isThinkingExpanded && (
-                        <div className="mt-1.5 pl-3 border-l-2 border-zinc-700/40 relative">
-                          {isStreamingThis && (
-                            <div className="pointer-events-none absolute bottom-0 left-3 right-0 h-8 bg-gradient-to-t from-zinc-950 via-zinc-950/60 to-transparent z-10" />
-                          )}
-                          <div
-                            ref={isStreamingThis ? thinkingContainerRef : undefined}
-                            className="min-h-[8rem] max-h-48 overflow-y-auto"
-                            style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}
-                          >
-                            {renderCodeAwareText(msg.thinking, { compact: true, fontSize: 'text-[11px]' })}
+                        <>
+                          <div className="mt-1.5 pl-3 border-l-2 border-zinc-700/40 relative rounded-lg rounded-l-none bg-zinc-900/30 py-2">
+                            {isStreamingThis && (
+                              <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-14 bg-gradient-to-t from-zinc-950 via-zinc-950/70 to-transparent z-10 rounded-b-lg" />
+                            )}
+                            <div
+                              ref={isStreamingThis ? thinkingContainerRef : undefined}
+                              className="max-h-52 overflow-y-auto -my-1"
+                              style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}
+                            >
+                              <div className="py-1">
+                                {renderCodeAwareText(msg.thinking, { compact: true, fontSize: 'text-[11px]' })}
+                              </div>
+                            </div>
                           </div>
-                        </div>
+                          {/* Divider between thinking and response */}
+                          <div className="mt-2 border-t border-zinc-800/60 w-full" />
+                        </>
                       )}
                     </div>
                   )}

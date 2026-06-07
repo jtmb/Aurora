@@ -48,17 +48,24 @@ export async function POST(request, { params }) {
     }
     
     const wasCreated = !fs.existsSync(safePath);
+    const oldContent = wasCreated ? '' : fs.readFileSync(safePath, 'utf-8');
     fs.writeFileSync(safePath, content, 'utf-8');
     
     const stat = fs.statSync(safePath);
-    
+    const newLines = content.split('\n').length;
+    const oldLines = wasCreated ? 0 : oldContent.split('\n').length;
+    const linesAdded = newLines - oldLines;
+
     return NextResponse.json({
       success: true,
       path: filePath,
       absolutePath: safePath,
       size: stat.size,
       modifiedAt: stat.mtime.toISOString(),
-      created: wasCreated
+      created: wasCreated,
+      linesAdded,
+      linesRemoved: oldLines - newLines > 0 ? oldLines - newLines : 0,
+      totalLines: newLines
     });
   } catch (error) {
     console.error('[workspace/write] Error:', error.message);

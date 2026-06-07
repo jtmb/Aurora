@@ -632,7 +632,7 @@ async function executeToolCall(tc, wsId) {
           });
           const data = await res.json();
           if (data.error) return { error: data.error.message };
-          return { success: true, created: data.created };
+          return { success: true, created: data.created, linesAdded: data.linesAdded || (typeof contentStr === 'string' ? contentStr.split('\n').length : 0), totalLines: data.totalLines };
         }
         case 'replace_string_in_file': {
           // Read, replace, write
@@ -646,6 +646,7 @@ async function executeToolCall(tc, wsId) {
           if (!oldContent.includes(tc.args.oldString)) {
             return { error: `Could not find oldString in file. File may have been modified.` };
           }
+          const oldLines = oldContent.split('\n').length;
           const newContent = oldContent.replace(tc.args.oldString, tc.args.newString);
           const writeRes = await fetch(`${base}/api/workspace/${wsId}/write`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -653,7 +654,10 @@ async function executeToolCall(tc, wsId) {
           });
           const writeData = await writeRes.json();
           if (writeData.error) return { error: writeData.error.message };
-          return { success: true };
+          // Store full line counts for diff display
+          const oldEditLines = tc.args.oldString.split('\n').length;
+          const newEditLines = tc.args.newString.split('\n').length;
+          return { success: true, linesAdded: Math.max(0, newEditLines - oldEditLines), linesRemoved: Math.max(0, oldEditLines - newEditLines), newLines: newEditLines, oldLines: oldEditLines, totalLines: newContent.split('\n').length };
         }
         case 'grep_search': {
           const res = await fetch(`${base}/api/workspace/${wsId}/search`, {
@@ -721,8 +725,16 @@ function summarizeToolResult(name, args, result) {
   if (result.alreadyExists) return `ALREADY EXISTS: \`${fp}\` was already ${result.existingAction || 'created'}. SKIP — move to NEXT task.`;
   switch (name) {
     case 'read_file': return `Read \`${fp}\` (${result.size || result.content?.length || 0} bytes): ${(result.content || '').slice(0, 500)}${(result.content || '').length > 500 ? '...' : ''}`;
-    case 'create_file': return result.error ? `FAILED to create \`${fp}\`: ${result.error}` : `Created \`${fp}\` successfully`;
-    case 'replace_string_in_file': return result.error ? `FAILED to patch \`${fp}\`: ${result.error}` : `Patched \`${fp}\` successfully`;
+    case 'create_file': {
+      const n = result.linesAdded || result.totalLines || 0;
+      const plus = n > 0 ? `+${n}` : '';
+      return result.error ? `FAILED to create \`${fp}\`: ${result.error}` : `Created \`${fp}\`${plus ? ` (${plus} lines)` : ''} successfully`;
+    }
+    case 'replace_string_in_file': {
+      const added = result.newLines ?? (args.newString ? args.newString.split('\n').length : 0);
+      const removed = result.oldLines ?? (args.oldString ? args.oldString.split('\n').length : 0);
+      return result.error ? `FAILED to patch \`${fp}\`: ${result.error}` : `Patched \`${fp}\` +${added}-${removed} successfully`;
+    }
     case 'grep_search': return `Found ${result.results?.length || 0} matches for "${args.query}": ${JSON.stringify((result.results || []).slice(0, 5))}`;
     case 'list_dir': {
       const files = result.files || [];
