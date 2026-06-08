@@ -28,7 +28,7 @@ export async function POST(request, { params }) {
     }
 
     const body = await request.json().catch(() => ({}));
-    const { chatId, userContent, model, provider, thinkingEffort, agentMode, systemPrompt, apiKeys } = body;
+    const { chatId, userContent, userMessageId, model, provider, thinkingEffort, agentMode, systemPrompt, apiKeys, trimAfterMessageId } = body;
 
     if (!chatId || !userContent) {
       return NextResponse.json({ error: { message: 'chatId and userContent are required' } }, { status: 400 });
@@ -38,12 +38,14 @@ export async function POST(request, { params }) {
       workspaceId: id,
       chatId,
       userContent,
-      model: model || 'gpt-4o',
-      provider: provider || 'openai',
+      userMessageId: userMessageId || null,
+      model: model || 'deepseek-v4-flash',
+      provider: provider || 'deepseek',
       thinkingEffort: thinkingEffort || 'high',
       agentMode: agentMode || 'agent',
       systemPrompt: systemPrompt || '',
       apiKeys: apiKeys || {},
+      trimAfterMessageId: trimAfterMessageId || null,
     });
 
     return NextResponse.json({ jobId, status: 'started' }, { status: 201 });

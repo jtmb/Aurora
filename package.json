@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "docker compose up -d && turbo dev",
+    "dev": "turbo dev",
     "dev:stop": "docker compose down",
     "build": "turbo build",
     "lint": "turbo lint",

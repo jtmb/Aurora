@@ -4,13 +4,62 @@
 
 import { getDb } from '@aurora/shared/db-client';
 import { runMigrations } from '@aurora/shared/db-migrate';
+import { EventEmitter } from 'events';
+import { initWorkspaceCheckpoints, createWorkspaceCheckpoint } from './checkpoint-utils.js';
+import { getWorkspaceDir } from './workspace-utils.js';
+import fs from 'fs';
+import path from 'path';
+
+// ── Agent Streaming Event Bus ────────────────────────────────────────────────
+// In-memory pub/sub so the frontend can subscribe to real-time agent SSE events.
+// Keyed by jobId → emits { type: 'thinking'|'content'|'done'|'error', text?, error? }
+const _agentEvents = new EventEmitter();
+_agentEvents.setMaxListeners(200);
+export function getAgentEventBus() { return _agentEvents; }
 
 // ── Concurrency guard ──
 // Track which jobs are actively running in this process to prevent
 // multiple concurrent runAgentJob() calls for the same job ID.
 const _runningJobs = new Set();
 
+// ── Abort registry ──
+// Maps jobId → AbortController so in-flight LLM fetch calls can be aborted
+// when the user clicks Stop. Used by cancelWorkspaceJobs.
+const _abortControllers = new Map();
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Lazy-init checkpoint git and create a tagged checkpoint for a user message.
+ * Called before the agent processes a message so retry can revert to this point.
+ */
+async function createCheckpointForMessage(workspaceId, userMessageId) {
+  try {
+    const wsDir = getWorkspaceDir(workspaceId);
+    if (!fs.existsSync(wsDir)) return;
+
+    // Lazy-init checkpoint git if missing
+    const ckDir = path.join(wsDir, '.aurora', 'checkpoints');
+    if (!fs.existsSync(ckDir)) {
+      const initResult = await initWorkspaceCheckpoints(wsDir);
+      if (!initResult.success) {
+        console.warn(`[agent-runner] Checkpoint init failed: ${initResult.error}`);
+        return;
+      }
+    }
+
+    // Create checkpoint tagged with the user message ID
+    const result = await createWorkspaceCheckpoint(wsDir, userMessageId);
+    if (result.success) {
+      console.log(`[agent-runner] Checkpoint created for message ${userMessageId}: ${result.hash || '(no changes)'}`);
+    } else if (result.error !== 'No changes to commit') {
+      console.warn(`[agent-runner] Checkpoint creation skipped: ${result.error}`);
+    }
+  } catch (err) {
+    console.warn('[agent-runner] Checkpoint creation error:', err.message);
+    // Non-fatal — don't block the agent if checkpoint fails
+  }
+}
 
 function buildHeaders(apiKeys) {
   const headers = {
@@ -791,7 +840,17 @@ async function saveMessageToChat(chatId, role, content, model, provider, msgId, 
     const messageId = msgId || `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const ts = timestamp || new Date().toISOString();
 
-    // Get next position
+    // Check if message already exists (upsert — for incremental streaming updates)
+    const existing = db.prepare('SELECT id, position FROM messages WHERE id = ?').get(messageId);
+    if (existing) {
+      // Update existing message content/thinking (streaming incremental save)
+      db.prepare(`
+        UPDATE messages SET content = ?, thinking = ?, model = ?, provider = ?, timestamp = ? WHERE id = ?
+      `).run(content, thinking || '', model || '', provider || '', ts, messageId);
+      return;
+    }
+
+    // Get next position for new message
     const lastMsg = db.prepare('SELECT MAX(position) as maxPos FROM messages WHERE chat_id = ?').get(chatId);
     const position = (lastMsg?.maxPos ?? -1) + 1;
 
@@ -906,7 +965,7 @@ One sentence: what the user asked for + the tech stack you'll use.
  *
  * @param {string} jobId - The job ID from agent_jobs table
  */
-export async function runAgentJob(jobId) {
+export async function runAgentJob(jobId, userMessageId) {
   // ── Concurrency guard: prevent multiple concurrent runs of the same job ──
   if (_runningJobs.has(jobId)) {
     console.log(`[agent-runner] Job ${jobId} is already running in this process, skipping duplicate call`);
@@ -927,13 +986,13 @@ export async function runAgentJob(jobId) {
 
   _runningJobs.add(jobId);
   try {
-    return await _runAgentJobImpl(jobId, job);
+    return await _runAgentJobImpl(jobId, job, userMessageId);
   } finally {
     _runningJobs.delete(jobId);
   }
 }
 
-async function _runAgentJobImpl(jobId, job) {
+async function _runAgentJobImpl(jobId, job, userMessageId) {
   console.log(`[agent-runner] Starting job ${jobId} for workspace ${job.workspace_id} (mode: ${job.agent_mode || 'agent'})`);
   job.status = 'running';
   saveJob(job);
@@ -951,7 +1010,6 @@ async function _runAgentJobImpl(jobId, job) {
   let conversation = job.conversation || [];
   let planTodos = job.planTodos || job.plan_todos || [];
   let planSummary = job.planSummary || job.plan_summary || '';
-  let checkpointTaken = false;
   let planCompleted = false;
   const executionErrors = [];
 
@@ -969,16 +1027,43 @@ async function _runAgentJobImpl(jobId, job) {
         console.log(`[agent-runner] Job ${jobId} cancelled at iteration ${iter}`);
         job.status = 'cancelled';
         saveJob(job);
+        // Clean up abort controller
+        const ac = _abortControllers.get(jobId);
+        if (ac) { _abortControllers.delete(jobId); }
         return;
       }
 
+      // ── Create AbortController for this LLM call ──
+      const ac = new AbortController();
+      _abortControllers.set(jobId, ac);
+
       // ── LLM Call ──
       const apiKeys = job.api_keys || {};
-      const { content: rawContent, thinking, nativeToolCalls } = await llmCall(conversation, model, provider, thinkingEffort, apiKeys);
       const assistantId = `agent_${Date.now()}_${iter}`;
+      let rawContent, thinking, nativeToolCalls;
+      try {
+        const result = await llmCall(conversation, model, provider, thinkingEffort, apiKeys, chatId, assistantId, jobId, ac.signal);
+        rawContent = result.content;
+        thinking = result.thinking;
+        nativeToolCalls = result.nativeToolCalls;
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          console.log(`[agent-runner] Job ${jobId} LLM call aborted at iteration ${iter}`);
+          job.status = 'cancelled';
+          saveJob(job);
+          _abortControllers.delete(jobId);
+          // Emit stop event so the SSE stream closes
+          _agentEvents.emit(`job:${jobId}`, { type: 'stop' });
+          return;
+        }
+        throw err;
+      }
+      _abortControllers.delete(jobId);
 
       conversation.push({ role: 'assistant', content: rawContent });
-      await saveMessageToChat(chatId, 'assistant', rawContent, model, provider, assistantId, new Date().toISOString(), thinking);
+
+      // Signal iteration end so SSE frontend knows this LLM call is complete
+      _agentEvents.emit(`job:${jobId}`, { type: 'iteration_end' });
 
       // ── Parse tool calls ──
       let toolCalls = [];
@@ -1069,18 +1154,6 @@ async function _runAgentJobImpl(jobId, job) {
       for (const tc of toolCalls) {
         const fp = tc.args.filePath || tc.args.path || '';
 
-        // Checkpoint before first write
-        if (!checkpointTaken && (tc.name === 'create_file' || tc.name === 'replace_string_in_file')) {
-          try {
-            const base = `http://localhost:${process.env.PORT || 3000}`;
-            const res = await fetch(`${base}/api/workspace/${workspaceId}/git/commit`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ message: `checkpoint: agent step ${iter}` })
-            });
-            if (res.ok) checkpointTaken = true;
-          } catch {}
-        }
-
         // Execute tool — let the model write/overwrite anything freely
         const result = await executeToolCall(tc, workspaceId);
 
@@ -1098,6 +1171,24 @@ async function _runAgentJobImpl(jobId, job) {
         if (result.error) {
           executionErrors.push(`${tc.name} ${fp}: ${result.error}`);
         }
+
+        // ── Commit after every file-modifying tool so restore can revert ──
+        if (!result.error && (tc.name === 'create_file' || tc.name === 'replace_string_in_file') && userMessageId) {
+          try {
+            const wsDir = getWorkspaceDir(workspaceId);
+            const stepTag = `${userMessageId}_step${iter + 1}`;
+            // Create step checkpoint (does NOT move the pre-message cp_{userMessageId} tag)
+            await createWorkspaceCheckpoint(wsDir, stepTag);
+          } catch (_) { /* non-fatal */ }
+        }
+      }
+
+      // ── Notify frontend of file changes for real-time tree refresh ──
+      const fileWriteTools = toolCalls.filter(tc =>
+        tc.name === 'create_file' || tc.name === 'replace_string_in_file' || tc.name === 'run_in_terminal'
+      );
+      if (fileWriteTools.length > 0) {
+        _agentEvents.emit(`job:${jobId}`, { type: 'files_changed', count: fileWriteTools.length });
       }
 
       // ── Minimal feedback: just a brief tool result summary ──
@@ -1154,6 +1245,7 @@ async function _runAgentJobImpl(jobId, job) {
     job.fileManifest = [];
     job.iteration = MAX_ITERATIONS;
     saveJob(job);
+    _agentEvents.emit(`job:${jobId}`, { type: 'done' });
     console.log(`[agent-runner] Job ${jobId} completed successfully`);
 
   } catch (err) {
@@ -1161,15 +1253,16 @@ async function _runAgentJobImpl(jobId, job) {
     job.status = 'failed';
     job.errorMessage = err.message;
     saveJob(job);
+    _agentEvents.emit(`job:${jobId}`, { type: 'error', error: err.message });
     try {
       await saveMessageToChat(chatId, 'assistant', `Error: ${err.message}`, model, provider, `agent_err_${Date.now()}`, new Date().toISOString());
     } catch {}
   }
 }
 
-// ── LLM Call (non-streaming for server-side) ─────────────────────────────────
+// ── LLM Call (streaming SSE — saves incremental thinking/content to chat) ───
 
-async function llmCall(conversation, model, provider, thinkingEffort, apiKeys) {
+async function llmCall(conversation, model, provider, thinkingEffort, apiKeys, chatId, assistantId, jobId, signal) {
   const headers = buildHeaders(apiKeys);
   const temp = thinkingEffort === 'high' ? 0.1 : thinkingEffort === 'low' ? 0.5 : 0.3;
   const extraParams = {};
@@ -1189,7 +1282,7 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys) {
     model,
     messages: conversation,
     provider,
-    stream: false,
+    stream: true,
     max_tokens: 4096,
     ...extraParams,
   };
@@ -1202,7 +1295,8 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys) {
   const res = await fetch(`${base}/api/v1/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify(bodyObj)
+    body: JSON.stringify(bodyObj),
+    signal
   });
 
   if (!res.ok) {
@@ -1211,44 +1305,96 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys) {
     throw new Error(errorMsg);
   }
 
-  const data = await res.json();
-  const choice = data.choices?.[0] || {};
-  const content = choice.message?.content || '';
-  const thinking = choice.message?.reasoning_content || choice.message?.thinking || data.reasoning_content || data.thinking || '';
-  const finishReason = choice.finish_reason || '(none)';
+  // Stream SSE response — accumulate content, thinking, and tool_calls incrementally
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let streamBuffer = '';
+  let content = '';
+  let thinking = '';
 
-  // Parse native tool_calls from the response (OpenAI format)
-  const nativeToolCalls = [];
-  if (choice.message?.tool_calls && Array.isArray(choice.message.tool_calls)) {
-    for (const tc of choice.message.tool_calls) {
-      if (tc.type === 'function' && tc.function) {
-        let args = {};
-        try {
-          args = typeof tc.function.arguments === 'string'
-            ? JSON.parse(tc.function.arguments)
-            : tc.function.arguments || {};
-        } catch {
-          args = {};
+  // Accumulate native tool calls from streaming delta chunks
+  const toolCallAccumulator = {}; // index -> { id, name, arguments }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    streamBuffer += decoder.decode(value, { stream: true });
+
+    const lines = streamBuffer.split('\n');
+    streamBuffer = lines.pop() || '';
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const jsonStr = line.slice(6).trim();
+      if (jsonStr === '[DONE]') continue;
+
+      try {
+        const data = JSON.parse(jsonStr);
+        const delta = data.choices?.[0]?.delta || {};
+
+        const thinkChunk = delta.thinking || delta.reasoning_content || delta.reasoning || '';
+        if (thinkChunk) thinking += thinkChunk;
+
+        const contentChunk = delta.content || '';
+        if (contentChunk) content += contentChunk;
+
+        // Accumulate native tool_calls from streaming delta
+        if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            if (!toolCallAccumulator[idx]) {
+              toolCallAccumulator[idx] = { id: tc.id || '', name: '', arguments: '' };
+            }
+            if (tc.id) toolCallAccumulator[idx].id = tc.id;
+            if (tc.function?.name) toolCallAccumulator[idx].name = tc.function.name;
+            if (tc.function?.arguments) toolCallAccumulator[idx].arguments += tc.function.arguments;
+          }
         }
-        // Normalize filePath/path
-        if (args.filePath === undefined && args.path !== undefined) args.filePath = args.path;
-        if (args.path === undefined && args.filePath !== undefined) args.path = args.filePath;
-        nativeToolCalls.push({ name: tc.function.name, args, id: tc.id });
-      }
+
+        // Emit real-time event AND save on EVERY SSE chunk that has content
+        if (thinkChunk || contentChunk) {
+          if (jobId) {
+            // Emit to connected SSE clients (letter-by-letter streaming)
+            _agentEvents.emit(`job:${jobId}`, {
+              type: thinkChunk ? 'thinking' : 'content',
+              text: thinkChunk || contentChunk
+            });
+          }
+          if (chatId && assistantId) {
+            saveMessageToChat(chatId, 'assistant', content, model, provider, assistantId, new Date().toISOString(), thinking);
+          }
+        }
+      } catch {}
     }
   }
 
-  console.log(`[agent-runner] LLM response: content=${content.length} chars, finish_reason=${finishReason}, thinking=${thinking.length} chars, native_tool_calls=${nativeToolCalls.length}`);
+  // Final save with complete content/thinking
+  if (chatId && assistantId) {
+    saveMessageToChat(chatId, 'assistant', content, model, provider, assistantId, new Date().toISOString(), thinking);
+  }
 
-  // DEBUG: Log content when we have create_file tool calls with empty content
+  // Build native tool_calls from stream accumulator
+  const nativeToolCalls = Object.values(toolCallAccumulator)
+    .filter(tc => tc.name)
+    .map(tc => {
+      let args = {};
+      try {
+        args = tc.arguments ? JSON.parse(tc.arguments) : {};
+      } catch {
+        args = {};
+      }
+      // Normalize filePath/path
+      if (args.filePath === undefined && args.path !== undefined) args.filePath = args.path;
+      if (args.path === undefined && args.filePath !== undefined) args.path = args.filePath;
+      return { name: tc.name, args, id: tc.id };
+    });
+  const finishReason = 'stop';
+
+  console.log(`[agent-runner] LLM response: content=${content.length} chars, thinking=${thinking.length} chars, finish_reason=${finishReason}`);
+
+  // DEBUG: Log content when we have tool calls
   if (content.length > 0) {
     console.log(`[agent-runner] LLM message content (first 500 chars): ${content.slice(0, 500)}`);
-  }
-  if (nativeToolCalls.length > 0) {
-    for (const tc of nativeToolCalls) {
-      const argsSummary = JSON.stringify(tc.args);
-      console.log(`[agent-runner] native tool call: name=${tc.name}, args=${argsSummary.slice(0, 300)}`);
-    }
   }
 
   return { content, thinking, finishReason, nativeToolCalls };
@@ -1262,7 +1408,7 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys) {
  * Create and start a new agent job. Returns the job ID immediately.
  * The job runs asynchronously in the background.
  */
-export function startAgentJob({ workspaceId, chatId, userContent, model, provider, thinkingEffort, agentMode, systemPrompt, apiKeys }) {
+export function startAgentJob({ workspaceId, chatId, userContent, userMessageId, model, provider, thinkingEffort, agentMode, systemPrompt, apiKeys, trimAfterMessageId }) {
   runMigrations();
   const db = getDb();
 
@@ -1297,8 +1443,12 @@ export function startAgentJob({ workspaceId, chatId, userContent, model, provide
       WHERE id = ?
     `).run(JSON.stringify(conversation), job.iteration || 0, awaitingJob.id);
 
+    // Create filesystem checkpoint before resuming agent
+    const ckMsgId = userMessageId || userMsgId;
+    createCheckpointForMessage(workspaceId, ckMsgId);
+
     // Run asynchronously
-    runAgentJob(awaitingJob.id).catch(err => {
+    runAgentJob(awaitingJob.id, ckMsgId).catch(err => {
       console.error(`[agent-runner] Unhandled error in resumed job ${awaitingJob.id}:`, err);
     });
 
@@ -1322,8 +1472,17 @@ export function startAgentJob({ workspaceId, chatId, userContent, model, provide
     // Map to OpenAI format, exclude empty/system messages
     priorChatMessages = (chatMsgs || [])
       .filter(m => m.role === 'user' || m.role === 'assistant')
-      .map(m => ({ role: m.role, content: m.content || '' }))
+      .map(m => ({ role: m.role, content: m.content || '', id: m.id }))
       .filter(m => m.content.trim());
+
+    // If retrying from a specific point, trim history after the given message ID
+    if (trimAfterMessageId) {
+      const trimIdx = priorChatMessages.findIndex(m => m.id === trimAfterMessageId);
+      if (trimIdx >= 0) {
+        priorChatMessages = priorChatMessages.slice(0, trimIdx + 1);
+        console.log(`[agent-runner] Trimmed conversation history after message ${trimAfterMessageId}, kept ${priorChatMessages.length} messages`);
+      }
+    }
   } catch (e) {
     console.warn('[agent-runner] Could not load prior chat messages:', e.message);
   }
@@ -1351,23 +1510,26 @@ export function startAgentJob({ workspaceId, chatId, userContent, model, provide
     }
     effectiveUserContent = `${planContext}NOW: ${userContent}\n\nIMPORTANT: Review the conversation history above. The user discussed this project in Chat mode — use that discussion to inform your plan. Generate a structured plan in the ### Summary / ### Tasks format. DO NOT ask more questions unless absolutely necessary — the conversion history already contains the user\'s preferences.`;
   } else if (effectiveMode === 'agent') {
-    // Inject prior context so Agent mode knows the full history
-    let agentContext = '';
-    if (priorChatMessages.length > 0) {
-      agentContext = '\n\n=== CONVERSATION HISTORY ===\n';
-      const recentMsgs = priorChatMessages.slice(-20);
-      for (const m of recentMsgs) {
-        agentContext += `[${m.role.toUpperCase()}]: ${m.content.slice(0, 800)}\n\n`;
-      }
-      agentContext += '=== END CONVERSATION HISTORY ===\n\n';
-    }
-    effectiveUserContent = `${agentContext}USER REQUEST: ${userContent}${frameworkHint}\n\nYou are in AGENT MODE. Act immediately with a tool call. Start with list_dir if you need to see the workspace.`;
+    // Prior messages are included as actual conversation turns below.
+    // Only add the framework hint and mode directive.
+    effectiveUserContent = `${userContent}${frameworkHint}\n\nYou are in AGENT MODE. Act immediately with a tool call. Start with list_dir if you need to see the workspace.`;
   }
 
+  // Build conversation with prior chat messages as actual turns (not just text injection).
+  // This ensures the model maintains full context across retries and continuations.
   const conversation = [
     { role: 'system', content: systemPromptFinal },
-    { role: 'user', content: effectiveUserContent }
   ];
+
+  // Include prior chat messages as separate conversation turns (respecting trimAfterMessageId)
+  if (priorChatMessages.length > 0) {
+    for (const m of priorChatMessages) {
+      conversation.push({ role: m.role, content: m.content });
+    }
+  }
+
+  // Add the new user message as the final turn
+  conversation.push({ role: 'user', content: effectiveUserContent });
 
   // Load existing plan todos if executing a plan
   let planTodos = [];
@@ -1396,8 +1558,13 @@ export function startAgentJob({ workspaceId, chatId, userContent, model, provide
     JSON.stringify(apiKeys || {})
   );
 
+  // Create filesystem checkpoint before agent starts working
+  if (userMessageId) {
+    createCheckpointForMessage(workspaceId, userMessageId);
+  }
+
   // Run asynchronously — don't await
-  runAgentJob(jobId).catch(err => {
+  runAgentJob(jobId, userMessageId || null).catch(err => {
     console.error(`[agent-runner] Unhandled error in job ${jobId}:`, err);
   });
 
@@ -1410,6 +1577,19 @@ export function startAgentJob({ workspaceId, chatId, userContent, model, provide
 export function cancelWorkspaceJobs(workspaceId) {
   runMigrations();
   const db = getDb();
+
+  // Abort any in-flight LLM calls for this workspace
+  const jobs = db.prepare(
+    "SELECT id FROM agent_jobs WHERE workspace_id = ? AND status IN ('running', 'interrupted', 'awaiting_input')"
+  ).all(workspaceId);
+  for (const row of (jobs || [])) {
+    const ac = _abortControllers.get(row.id);
+    if (ac) {
+      ac.abort();
+      _abortControllers.delete(row.job_id);
+    }
+  }
+
   const info = db.prepare(
     "UPDATE agent_jobs SET status = 'cancelled', updated_at = datetime('now') WHERE workspace_id = ? AND status IN ('running', 'interrupted', 'awaiting_input')"
   ).run(workspaceId);
@@ -1474,7 +1654,8 @@ export function resumeInterruptedJob(workspaceId) {
   ).run(job.id);
 
   console.log(`[agent-runner] Resuming interrupted job ${job.id} for workspace ${workspaceId}`);
-  runAgentJob(job.id).catch(err => {
+  // Use job ID as fallback checkpoint tag (pre-message checkpoint already exists from original startAgentJob call)
+  runAgentJob(job.id, `resume_${job.id}`).catch(err => {
     console.error(`[agent-runner] Unhandled error resuming job ${job.id}:`, err);
   });
 

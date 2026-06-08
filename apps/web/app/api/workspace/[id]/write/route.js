@@ -72,3 +72,47 @@ export async function POST(request, { params }) {
     return NextResponse.json({ error: { message: 'Failed to write file' } }, { status: 500 });
   }
 }
+
+export async function DELETE(request, { params }) {
+  try {
+    const { id } = await params;
+    
+    const wsDir = validateWorkspace(id);
+    if (!wsDir) {
+      return NextResponse.json({ error: { message: 'Workspace not found' } }, { status: 404 });
+    }
+    
+    const body = await request.json().catch(() => ({}));
+    const { path: filePath } = body;
+    
+    if (!filePath) {
+      return NextResponse.json({ error: { message: 'File path is required' } }, { status: 400 });
+    }
+    
+    const safePath = resolveSafePath(wsDir, filePath);
+    if (!safePath) {
+      return NextResponse.json({ error: { message: 'Invalid file path' } }, { status: 403 });
+    }
+    
+    if (!fs.existsSync(safePath)) {
+      return NextResponse.json({ error: { message: 'File not found' } }, { status: 404 });
+    }
+    
+    const stat = fs.statSync(safePath);
+    if (stat.isDirectory()) {
+      // Use recursive rmSync for directories
+      fs.rmSync(safePath, { recursive: true, force: true });
+    } else {
+      fs.unlinkSync(safePath);
+    }
+    
+    return NextResponse.json({
+      success: true,
+      path: filePath,
+      deleted: true
+    });
+  } catch (error) {
+    console.error('[workspace/write DELETE] Error:', error.message);
+    return NextResponse.json({ error: { message: 'Failed to delete file' } }, { status: 500 });
+  }
+}

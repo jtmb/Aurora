@@ -13,7 +13,7 @@ const STATUS_COLORS = {
   'U': 'text-emerald-400',
 };
 
-export default function FileTree({ tree, onFileClick, activeFile, searchQuery, onSearchChange, gitStatus }) {
+export default function FileTree({ tree, onFileClick, activeFile, searchQuery, onSearchChange, gitStatus, onDeleteFile }) {
   const [expandedFolders, setExpandedFolders] = useState(new Set());
 
   const toggleFolder = (folderPath) => {
@@ -186,7 +186,7 @@ export default function FileTree({ tree, onFileClick, activeFile, searchQuery, o
       <div
         key={node.path}
         onClick={() => onFileClick(node)}
-        className={`flex items-center gap-1.5 px-2 py-1 cursor-pointer text-xs transition-colors select-none ${
+        className={`group flex items-center gap-1.5 px-2 py-1 cursor-pointer text-xs transition-colors select-none ${
           isActive
             ? 'bg-indigo-600/15 text-indigo-300 border-l-2 border-indigo-500'
             : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/40 border-l-2 border-transparent'
@@ -200,7 +200,24 @@ export default function FileTree({ tree, onFileClick, activeFile, searchQuery, o
             {gitStatusMap[node.path] === '?' ? 'U' : gitStatusMap[node.path]}
           </span>
         )}
-        <span className="truncate">{node.name}</span>
+        <span className="truncate flex-1">{node.name}</span>
+        {/* Delete button — appears on hover */}
+        {onDeleteFile && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (confirm(`Delete "${node.name}"?`)) {
+                onDeleteFile(node);
+              }
+            }}
+            className="opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 rounded hover:bg-red-500/20 text-zinc-500 hover:text-red-400 transition-all"
+            title="Delete file"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
+        )}
       </div>
     );
   };

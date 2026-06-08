@@ -19,7 +19,8 @@ export default function AgentPanel({
   onOpenPreview,
   onToggleMode,
   codeMode,
-  previewInfo
+  previewInfo,
+  onFileTreeChange
 }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -28,9 +29,11 @@ export default function AgentPanel({
   const scrollRef = useRef(null);
   const abortRef = useRef(null);
   const streamAbortRef = useRef(null);    // abort controller for SSE streams (Chat mode)
+  const agentStreamAbortRef = useRef(null); // abort controller for agent SSE stream
   const messagesRef = useRef([]);          // latest messages for async access
   const thinkingContainerRef = useRef(null);
   const turnCounterRef = useRef(0);
+  const retryTrimAfterIdRef = useRef(null);  // message ID to trim DB history after on retry
 
   // --- Copilot-style agent controls ---
   const [agentMode, setAgentMode] = useState('chat');       // 'chat' | 'plan' | 'agent'
@@ -284,11 +287,14 @@ export default function AgentPanel({
   useEffect(() => { localStorage.setItem('aurora_agent_thinking', thinkingEffort); }, [thinkingEffort]);
 
   // ── Polling: fetch new messages and job status while a server-side job is active ──
+  const pollingGraceRef = useRef(0);
   useEffect(() => {
     if (!isStreaming || !workspaceChatId) {
       if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
       return;
     }
+
+    pollingGraceRef.current = Date.now() + 4000; // 4-second grace period before accepting "no active job"
 
     const poll = async () => {
       try {
@@ -302,53 +308,85 @@ export default function AgentPanel({
         if (msgRes.ok) {
           const msgData = await msgRes.json();
           const serverMessages = msgData.messages || [];
-          // Merge server messages into local state (avoid duplicates by ID)
+          // Merge server messages into local state — add new, update existing content/thinking
           setMessages(prev => {
-            const existingIds = new Set(prev.map(m => m.id));
-            const newMsgs = serverMessages.filter(m => !existingIds.has(m.id));
-            if (newMsgs.length === 0) return prev;
-            // Sort by position or timestamp, and append new ones in order
-            const merged = [...prev];
-            for (const nm of newMsgs) {
-              if (nm.role === 'assistant') {
-                const msgObj = {
-                  id: nm.id,
-                  role: nm.role,
-                  content: nm.content,
-                  thinking: nm.thinking || '',
-                  timestamp: nm.timestamp,
-                  model: nm.model,
-                  provider: nm.provider,
-                  isFinalSummary: nm.content?.startsWith?.('✅') || nm.content?.startsWith?.('⚠️') || nm.content?.startsWith?.('Task complete'),
-                };
-                // Detect plan content in newly merged messages
-                if (msgObj.content && /\n###\s*Summary\s*\n/.test(msgObj.content)) {
-                  const planResult = parsePlanTodos(msgObj.content);
-                  if (planResult.todos.length > 0) {
-                    msgObj.isPlanResult = true;
-                    setPlanTodos(planResult.todos);
-                    setPlanSummary(planResult.summary);
-                    setPlanMessageId(msgObj.id);
+            const existingById = new Map(prev.map(m => [m.id, m]));
+            let changed = false;
+            let merged = [...prev];
+
+            for (const sm of serverMessages) {
+              const existing = existingById.get(sm.id);
+              if (existing) {
+                // Update existing message if content or thinking has changed (streaming incremental updates)
+                if (existing.role === 'assistant') {
+                  if (existing.content !== sm.content || (existing.thinking || '') !== (sm.thinking || '')) {
+                    existing.content = sm.content;
+                    existing.thinking = sm.thinking || '';
+                    existing.timestamp = sm.timestamp;
+                    changed = true;
+                  }
+                  // Detect plan content on existing messages (may have been added by SSE before polling saw it)
+                  if (!existing.isPlanResult && existing.content && /\n###\s*Summary\s*\n/.test(existing.content)) {
+                    const planResult = parsePlanTodos(existing.content);
+                    if (planResult.todos.length > 0) {
+                      existing.isPlanResult = true;
+                      setPlanTodos(planResult.todos);
+                      setPlanSummary(planResult.summary);
+                      setPlanMessageId(existing.id);
+                      changed = true;
+                    }
                   }
                 }
-                // Parse tool calls from agent-mode messages for tool card display
-                const toolCalls = parseToolCalls(nm.content);
-                if (toolCalls.length > 0) {
-                  msgObj.toolCalls = toolCalls.map((tc, i) => ({
-                    ...tc,
-                    id: `${msgObj.id}_tool_${i}`,
-                    status: 'done'
-                  }));
-                }
-                merged.push(msgObj);
-              } else if (nm.role === 'user') {
-                // Skip user messages we already have
-                if (!existingIds.has(nm.id)) {
-                  merged.push({ id: nm.id, role: 'user', content: nm.content, timestamp: nm.timestamp, turnId: nm.id });
+              } else {
+                // New message
+                if (sm.role === 'assistant') {
+                  const msgObj = {
+                    id: sm.id,
+                    role: sm.role,
+                    content: sm.content,
+                    thinking: sm.thinking || '',
+                    timestamp: sm.timestamp,
+                    model: sm.model,
+                    provider: sm.provider,
+                    isFinalSummary: sm.content?.startsWith?.('✅') || sm.content?.startsWith?.('⚠️') || sm.content?.startsWith?.('Task complete'),
+                  };
+                  // Detect plan content in newly merged messages
+                  if (msgObj.content && /\n###\s*Summary\s*\n/.test(msgObj.content)) {
+                    const planResult = parsePlanTodos(msgObj.content);
+                    if (planResult.todos.length > 0) {
+                      msgObj.isPlanResult = true;
+                      setPlanTodos(planResult.todos);
+                      setPlanSummary(planResult.summary);
+                      setPlanMessageId(msgObj.id);
+                    }
+                  }
+                  // Parse tool calls from agent-mode messages for tool card display
+                  const toolCalls = parseToolCalls(sm.content);
+                  if (toolCalls.length > 0) {
+                    msgObj.toolCalls = toolCalls.map((tc, i) => ({
+                      ...tc,
+                      id: `${msgObj.id}_tool_${i}`,
+                      status: 'done'
+                    }));
+                  }
+                  merged.push(msgObj);
+                  changed = true;
+                } else if (sm.role === 'user') {
+                  merged.push({ id: sm.id, role: 'user', content: sm.content, timestamp: sm.timestamp, turnId: sm.id });
+                  changed = true;
                 }
               }
             }
-            return merged;
+
+            // Filter out SSE ephemeral messages that have DB-backed equivalents
+            // (SSE messages use agent_asst_* prefix, DB messages use agent_* prefix)
+            const hasDbAssistant = serverMessages.some(sm => sm.role === 'assistant' && !sm.id.startsWith('agent_asst_'));
+            if (hasDbAssistant) {
+              merged = merged.filter(m => !m.id.startsWith('agent_asst_'));
+              changed = true;
+            }
+
+            return changed ? [...merged] : prev;
           });
         }
 
@@ -358,6 +396,8 @@ export default function AgentPanel({
         if (statusRes.ok) {
           const statusData = await statusRes.json();
           if (!statusData.active) {
+            // Don't kill polling during the grace period — the job may not be created yet
+            if (Date.now() < pollingGraceRef.current) return;
             // Job finished (completed or failed)
             setIsStreaming(false);
             setIsThinking(false);
@@ -418,7 +458,7 @@ export default function AgentPanel({
       }
     };
 
-    pollingRef.current = setInterval(poll, 1500);
+    pollingRef.current = setInterval(poll, 200);
     poll(); // Immediate first poll
 
     return () => {
@@ -816,47 +856,95 @@ export default function AgentPanel({
   };
 
   // Retry: remove last assistant turn and re-submit the user message
-  const handleRetry = (msgId) => {
+  const handleRetry = async (msgId) => {
     if (isStreaming) return;
-    setMessages(prev => {
-      const idx = prev.findIndex(m => m.id === msgId);
-      if (idx < 0) return prev;
-      // Find the user message that preceded this assistant message
-      let userMsg = null;
-      for (let i = idx - 1; i >= 0; i--) {
-        if (prev[i].role === 'user' && !prev[i].isToolResult) { userMsg = prev[i]; break; }
-      }
-      if (!userMsg) return prev;
-      // Remove from the user message onward
-      const trimmed = prev.slice(0, prev.indexOf(userMsg));
-      // Re-trigger with the same user content
-      setTimeout(() => {
-        setInput(userMsg.content);
-        // Submit after state settles
-        setTimeout(() => {
-          const form = document.querySelector('#agent-input-form');
-          if (form) form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-        }, 50);
-      }, 50);
-      return trimmed;
-    });
+    // Snapshot messages outside of setMessages to avoid stale closure
+    const snapshot = messagesRef.current;
+    const idx = snapshot.findIndex(m => m.id === msgId);
+    if (idx < 0) return;
+    // Find the user message that preceded this assistant message
+    let userMsg = null;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (snapshot[i].role === 'user' && !snapshot[i].isToolResult) { userMsg = snapshot[i]; break; }
+    }
+    if (!userMsg) return;
+    const userIdx = snapshot.indexOf(userMsg);
+
+    // Restore workspace files to the state before this message's agent work
+    if (workspaceId && userMsg.id) {
+      fetch(`/api/workspace/${workspaceId}/checkpoint/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag: userMsg.id })
+      }).catch(() => {});
+    }
+
+    // Tell the server to only use history up to the message before this user message
+    const trimAfterId = userIdx > 0 ? snapshot[userIdx - 1].id : null;
+    retryTrimAfterIdRef.current = trimAfterId;
+
+    // Trim DB messages to match — delete everything after the trim point
+    if (workspaceChatId) {
+      try {
+        const token = localStorage.getItem('auth_token');
+        await fetch(`/api/chats/${workspaceChatId}/messages`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ beforeId: trimAfterId || undefined })
+        });
+      } catch (_) {}
+    }
+
+    // Remove from the user message onward in frontend state
+    const trimmed = snapshot.slice(0, userIdx);
+    setMessages(trimmed);
+
+    // Re-trigger with the same user content
+    let retryContent = userMsg.content;
+    setInput(retryContent);
+    // Submit after state settles — use requestSubmit for reliable React onSubmit trigger
+    setTimeout(() => {
+      document.getElementById('agent-input-form')?.requestSubmit();
+    }, 100);
   };
 
   // Retry from user message: trim to that point and resubmit original text
-  const handleUserRetry = (msgId) => {
+  const handleUserRetry = async (msgId) => {
     if (isStreaming) return;
-    setMessages(prev => {
-      const idx = prev.findIndex(m => m.id === msgId);
-      if (idx < 0) return prev;
-      const trimmed = prev.slice(0, idx + 1);
-      setTimeout(() => {
-        setInput(prev[idx].content);
-        setTimeout(() => {
-          document.getElementById('agent-input-form')?.requestSubmit();
-        }, 50);
-      }, 50);
-      return trimmed;
-    });
+    const snapshot = messagesRef.current;
+    const idx = snapshot.findIndex(m => m.id === msgId);
+    if (idx < 0) return;
+
+    // Restore workspace files to the state before this message
+    if (workspaceId) {
+      fetch(`/api/workspace/${workspaceId}/checkpoint/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag: msgId })
+      }).catch(() => {});
+    }
+
+    // Tell server to trim history after this user message (keep up to and including it)
+    retryTrimAfterIdRef.current = msgId;
+
+    // Trim DB messages to match
+    if (workspaceChatId) {
+      try {
+        const token = localStorage.getItem('auth_token');
+        await fetch(`/api/chats/${workspaceChatId}/messages`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ beforeId: msgId })
+        });
+      } catch (_) {}
+    }
+
+    const trimmed = snapshot.slice(0, idx + 1);
+    setMessages(trimmed);
+    setInput(snapshot[idx].content);
+    setTimeout(() => {
+      document.getElementById('agent-input-form')?.requestSubmit();
+    }, 100);
   };
 
   // Start editing a user message inline
@@ -867,22 +955,36 @@ export default function AgentPanel({
   };
 
   // Submit edited user message, trim from that point
-  const handleEditSubmit = (msgId) => {
+  const handleEditSubmit = async (msgId) => {
     if (!editInput.trim() || isStreaming) return;
-    setMessages(prev => {
-      const idx = prev.findIndex(m => m.id === msgId);
-      if (idx < 0) return prev;
-      const trimmed = prev.slice(0, idx);
-      setTimeout(() => {
-        setInput(editInput.trim());
-        setEditingMessageId(null);
-        setEditInput('');
-        setTimeout(() => {
-          document.getElementById('agent-input-form')?.requestSubmit();
-        }, 50);
-      }, 50);
-      return trimmed;
-    });
+    const snapshot = messagesRef.current;
+    const idx = snapshot.findIndex(m => m.id === msgId);
+    if (idx < 0) return;
+
+    // Tell server to trim after the message before this one (keep up to that point)
+    const trimAfterId = idx > 0 ? snapshot[idx - 1].id : null;
+    retryTrimAfterIdRef.current = trimAfterId;
+
+    // Trim DB messages to match
+    if (workspaceChatId) {
+      try {
+        const token = localStorage.getItem('auth_token');
+        await fetch(`/api/chats/${workspaceChatId}/messages`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ beforeId: trimAfterId || undefined })
+        });
+      } catch (_) {}
+    }
+
+    const trimmed = snapshot.slice(0, idx);
+    setMessages(trimmed);
+    setInput(editInput.trim());
+    setEditingMessageId(null);
+    setEditInput('');
+    setTimeout(() => {
+      document.getElementById('agent-input-form')?.requestSubmit();
+    }, 100);
   };
 
   // Stop generation
@@ -891,6 +993,12 @@ export default function AgentPanel({
     if (streamAbortRef.current) {
       streamAbortRef.current.abort();
       streamAbortRef.current = null;
+    }
+
+    // Abort agent SSE stream (Agent/Plan mode)
+    if (agentStreamAbortRef.current) {
+      agentStreamAbortRef.current.abort();
+      agentStreamAbortRef.current = null;
     }
 
     // Cancel server-side agent job (Plan/Agent mode)
@@ -1131,7 +1239,8 @@ export default function AgentPanel({
 
     // Detecting plan execution from the message is definitive — it works even if
     // React hasn't flushed setAgentMode('agent') yet (race condition with setTimeout).
-    const isPlanExecution = userContent.startsWith('Execute the following plan');
+    const isPlanExecution = userContent.startsWith('Execute the following plan')
+      || userContent === 'Continue implementing the plan.';
 
     // Preserve plan todos when executing a plan (progress tracker)
     if (!isPlanExecution) {
@@ -1388,14 +1497,17 @@ export default function AgentPanel({
         body: JSON.stringify({
           chatId: workspaceChatId,
           userContent,
+          userMessageId: userMsg.id,
           model: selectedModel,
           provider: msgProvider,
           thinkingEffort,
           agentMode: effectiveMode,
           systemPrompt,
-          apiKeys
+          apiKeys,
+          trimAfterMessageId: retryTrimAfterIdRef.current || undefined
         })
       });
+      retryTrimAfterIdRef.current = null;  // clear for next send
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -1404,6 +1516,123 @@ export default function AgentPanel({
 
       const data = await res.json();
       setActiveJobId(data.jobId);
+      // Re-affirm streaming — polling may have been killed by an early poll that saw no job yet
+      setIsStreaming(true);
+      setIsThinking(true);
+
+      // ── Connect to real-time SSE stream for letter-by-letter thinking/content ──
+      let streamIterId = 0;
+      let streamAssistId = `agent_asst_${Date.now()}`;
+      let streamedThinking = '';
+      let streamedContent = '';
+      let streamMessageCreated = false;
+
+      // Create abort controller for agent SSE stream
+      const agentStreamController = new AbortController();
+      agentStreamAbortRef.current = agentStreamController;
+
+      (async () => {
+        try {
+          const streamRes = await fetch(
+            `/api/workspace/${workspaceId}/agent/stream?jobId=${encodeURIComponent(data.jobId)}`,
+            { signal: agentStreamController.signal }
+          );
+          if (!streamRes.ok) return;
+          const reader = streamRes.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const jsonStr = line.slice(6).trim();
+              if (!jsonStr) continue;
+              try {
+                const evt = JSON.parse(jsonStr);
+                if (evt.type === 'done' || evt.type === 'error' || evt.type === 'stop') {
+                  // Detect plan content so Execute Plan button shows immediately
+                  if (streamedContent && /\n###\s*Summary\s*\n/.test(streamedContent)) {
+                    const planResult = parsePlanTodos(streamedContent);
+                    if (planResult.todos.length > 0) {
+                      setPlanTodos(planResult.todos);
+                      setPlanSummary(planResult.summary);
+                      setPlanMessageId(streamAssistId);
+                      setMessages(prev => prev.map(m =>
+                        m.id === streamAssistId ? { ...m, isPlanResult: true } : m
+                      ));
+                    }
+                  }
+                  return;
+                }
+                if (evt.type === 'iteration_end') {
+                  // Current iteration's stream content is done; reset for next
+                  // (server-side agent-runner persists to DB, polling will sync)
+                  if (streamedContent && /\n###\s*Summary\s*\n/.test(streamedContent)) {
+                    const planResult = parsePlanTodos(streamedContent);
+                    if (planResult.todos.length > 0) {
+                      setPlanTodos(planResult.todos);
+                      setPlanSummary(planResult.summary);
+                      setPlanMessageId(streamAssistId);
+                      setMessages(prev => prev.map(m =>
+                        m.id === streamAssistId ? { ...m, isPlanResult: true, isPlanCard: true } : m
+                      ));
+                    }
+                  }
+                  streamIterId++;
+                  streamAssistId = `agent_asst_${Date.now()}`;
+                  streamedThinking = '';
+                  streamedContent = '';
+                  streamMessageCreated = false;
+                  continue;
+                }
+                if (evt.type === 'files_changed') {
+                  // Agent wrote files — trigger file tree refresh in parent
+                  onFileTreeChange?.();
+                  continue;
+                }
+                if (evt.type === 'thinking') {
+                  streamedThinking += evt.text;
+                } else if (evt.type === 'content') {
+                  streamedContent += evt.text;
+                }
+                if (!streamMessageCreated && (streamedThinking || streamedContent)) {
+                  streamMessageCreated = true;
+                  setMessages(prev => [...prev, {
+                    id: streamAssistId,
+                    role: 'assistant',
+                    content: streamedContent,
+                    thinking: streamedThinking || undefined,
+                    timestamp: new Date().toISOString(),
+                    model: selectedModel,
+                    provider: msgProvider,
+                    turnId
+                  }]);
+                } else if (streamMessageCreated) {
+                  const curId = streamAssistId;
+                  const curThinking = streamedThinking;
+                  const curContent = streamedContent;
+                  setMessages(prev => prev.map(m =>
+                    m.id === curId
+                      ? { ...m, content: curContent, thinking: curThinking || m.thinking }
+                      : m
+                  ));
+                }
+              } catch {}
+            }
+          }
+        } catch (err) {
+          if (err.name !== 'AbortError') {
+            console.error('[AgentPanel] Agent stream error:', err.message);
+          }
+        } finally {
+          agentStreamAbortRef.current = null;
+        }
+      })();
+
       // Polling will start via the useEffect that watches isStreaming
     } catch (err) {
       setIsStreaming(false);
@@ -2848,9 +3077,39 @@ TESTING WORKFLOW — After creating/modifying project files:
           ) : null}
           {messages.length > 0 && (
             <button
-              onClick={() => setMessages([])}
+              onClick={async () => {
+                if (!isStreaming) {
+                  // Reset workspace files to clean state
+                  if (workspaceId) {
+                    try {
+                      const res = await fetch(`/api/workspace/${workspaceId}/checkpoint/reset`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                      });
+                      if (!res.ok) {
+                        console.error('[ClearChat] Reset failed:', res.status);
+                      }
+                    } catch (err) {
+                      console.error('[ClearChat] Reset error:', err);
+                    }
+                  }
+                  // Clear all messages from DB
+                  if (workspaceChatId) {
+                    try {
+                      const token = localStorage.getItem('auth_token');
+                      if (token) {
+                        await fetch(`/api/chats/${workspaceChatId}/messages`, {
+                          method: 'DELETE',
+                          headers: { 'Authorization': `Bearer ${token}` }
+                        });
+                      }
+                    } catch {}
+                  }
+                  setMessages([]);
+                }
+              }}
               className="p-1 rounded text-zinc-600 hover:text-zinc-300 transition-colors"
-              title="Clear chat"
+              title="Clear chat and revert files"
             >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -2988,12 +3247,9 @@ TESTING WORKFLOW — After creating/modifying project files:
                       setAgentMode('agent');
                       localStorage.setItem('aurora_agent_mode', 'agent');
 
-                      // Build plan execution message from flat todos
-                      let planMsg = 'Build this step by step:\n\n';
-                      planMsg += `NEXT: ${planTodos.filter(t => !t.done).map(t => t.text).join(' | ')}\n\n`;
-                      planMsg += 'Mark each [x] when done. Start NOW with the first task.';
-
-                      setInput(planMsg);
+                      // Plan state is already in the system prompt — just tell the
+                      // agent to continue. No need to paste plan text as a user message.
+                      setInput('Continue implementing the plan.');
                       // Submit the form after React flushes the input state
                       setTimeout(() => {
                         document.getElementById('agent-input-form')?.requestSubmit();
@@ -3140,20 +3396,18 @@ TESTING WORKFLOW — After creating/modifying project files:
                     )}
                   </div>
 
-                  {/* Thinking block — VS Code Copilot style: collapsible reasoning */}
+                  {/* Thinking block — VS Code Copilot style: collapsible reasoning (matches chat page) */}
                   {showThinkingToggle && (
-                    <div className={`${isThinkingExpanded ? 'mb-3' : 'mb-2'}`}>
+                    <div className="mb-3">
                       <button
                         type="button"
                         onClick={toggleThinking}
-                        className="flex items-center gap-1.5 text-[10px] text-zinc-500 hover:text-zinc-400 transition-colors w-full text-left group/think"
+                        className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-300 transition-colors w-full text-left"
                       >
-                        <svg className={`w-2.5 h-2.5 transition-transform ${isThinkingExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg className={`w-3 h-3 transition-transform ${isThinkingExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
-                        <span className="text-zinc-400 group-hover/think:text-zinc-300">
-                          {getThinkingLabel(msg.thinking, isStreamingThis)}
-                        </span>
+                        <span>{getThinkingLabel(msg.thinking, isStreamingThis)}</span>
                         {isStreamingThis && (
                           <span className="inline-flex gap-0.5">
                             <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
@@ -3163,24 +3417,20 @@ TESTING WORKFLOW — After creating/modifying project files:
                         )}
                       </button>
                       {isThinkingExpanded && (
-                        <>
-                          <div className="mt-1.5 pl-3 border-l-2 border-zinc-700/40 relative rounded-lg rounded-l-none bg-zinc-900/30 py-2">
-                            {isStreamingThis && (
-                              <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-14 bg-gradient-to-t from-zinc-950 via-zinc-950/70 to-transparent z-10 rounded-b-lg" />
-                            )}
-                            <div
-                              ref={isStreamingThis ? thinkingContainerRef : undefined}
-                              className="max-h-52 overflow-y-auto -my-1"
-                              style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}
-                            >
-                              <div className="py-1">
-                                {renderCodeAwareText(msg.thinking, { compact: true, fontSize: 'text-[11px]' })}
-                              </div>
+                        <div className="mt-2 pl-4 border-l-2 border-zinc-600/50 relative rounded-lg rounded-l-none bg-zinc-900/60 py-2">
+                          {isStreamingThis && (msg.thinking || '').length > 150 && (
+                            <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-6 bg-gradient-to-t from-zinc-900/80 via-zinc-900/30 to-transparent z-10 rounded-b-lg" />
+                          )}
+                          <div
+                            ref={isStreamingThis ? thinkingContainerRef : undefined}
+                            className="text-[11px] text-zinc-400 font-mono leading-relaxed whitespace-pre-wrap max-h-52 overflow-y-auto tracking-tight"
+                            style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}
+                          >
+                            <div className="py-0.5">
+                              {msg.thinking}
                             </div>
                           </div>
-                          {/* Divider between thinking and response */}
-                          <div className="mt-2 border-t border-zinc-800/60 w-full" />
-                        </>
+                        </div>
                       )}
                     </div>
                   )}
@@ -3388,7 +3638,7 @@ TESTING WORKFLOW — After creating/modifying project files:
             <button
               key={mode.id}
               type="button"
-              onClick={() => setAgentMode(mode.id)}
+              onClick={() => { setAgentMode(mode.id); agentModeRef.current = mode.id; }}
               className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-colors ${
                 agentMode === mode.id
                   ? 'bg-indigo-600 text-white shadow-sm'

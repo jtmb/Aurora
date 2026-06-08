@@ -1983,12 +1983,9 @@ export default function Home() {
                           )}
                         </button>
                         {isThinkingExpanded && (
-                          <div className="mt-2 pl-4 border-l-2 border-zinc-600/50 relative rounded-lg rounded-l-none bg-zinc-800/40 py-2">
-                            {isStreaming && (
-                              <>
-                                <div className="pointer-events-none absolute top-0 left-4 right-0 h-6 bg-gradient-to-b from-zinc-800/60 via-zinc-800/30 to-transparent z-10" />
-                                <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-zinc-800/90 via-zinc-800/50 to-transparent z-10 rounded-b-lg" />
-                              </>
+                          <div className="mt-2 pl-4 border-l-2 border-zinc-600/50 relative rounded-lg rounded-l-none bg-zinc-900/60 py-2">
+                            {isStreaming && (msg.thinking || '').length > 150 && (
+                                <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-6 bg-gradient-to-t from-zinc-900/80 via-zinc-900/30 to-transparent z-10 rounded-b-lg" />
                             )}
                             <div
                               ref={isStreaming ? thinkingContainerRef : undefined}

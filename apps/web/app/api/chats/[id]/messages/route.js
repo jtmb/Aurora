@@ -80,3 +80,53 @@ export async function POST(request, { params }) {
     return NextResponse.json({ error: { message: 'Failed to add message' } }, { status: 500 });
   }
 }
+
+// DELETE /api/chats/[id]/messages — clear all messages from a chat (optionally trim after beforeId)
+export async function DELETE(request, { params }) {
+  try {
+    runMigrations();
+    const db = getDb();
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+
+    const { id } = await params;
+
+    // Verify chat exists and belongs to user
+    const chat = db.prepare('SELECT * FROM chats WHERE id = ? AND user_id = ?').get(id, userId);
+    if (!chat) {
+      return NextResponse.json({ error: { message: 'Chat not found' } }, { status: 404 });
+    }
+
+    // Check for optional beforeId body parameter — trim messages after this ID
+    const body = await request.json().catch(() => ({}));
+    const { beforeId } = body;
+
+    if (beforeId) {
+      // Find the position of the beforeId message
+      const targetMsg = db.prepare('SELECT position FROM messages WHERE id = ? AND chat_id = ?').get(beforeId, id);
+      if (targetMsg) {
+        // Delete messages with position > target position
+        const result = db.prepare('DELETE FROM messages WHERE chat_id = ? AND position > ?').run(id, targetMsg.position);
+        // Update message count
+        const remaining = db.prepare('SELECT COUNT(*) as count FROM messages WHERE chat_id = ?').get(id);
+        db.prepare('UPDATE chats SET message_count = ? WHERE id = ?').run(remaining.count, id);
+        return NextResponse.json({ success: true, deleted: result.changes, message: `Trimmed messages after ${beforeId}` });
+      }
+      return NextResponse.json({ error: { message: 'beforeId message not found' } }, { status: 404 });
+    }
+
+    // Delete all messages for this chat
+    db.prepare('DELETE FROM messages WHERE chat_id = ?').run(id);
+    // Delete usage records
+    db.prepare('DELETE FROM usage_records WHERE chat_id = ?').run(id);
+    // Reset chat counters
+    db.prepare('UPDATE chats SET message_count = 0, last_message_at = NULL WHERE id = ?').run(id);
+
+    return NextResponse.json({ success: true, message: 'All messages cleared' });
+  } catch (error) {
+    console.error('Delete messages error:', error);
+    return NextResponse.json({ error: { message: 'Failed to clear messages' } }, { status: 500 });
+  }
+}

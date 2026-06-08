@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { simpleGit } from 'simple-git';
 import { getWorkspaceDir, ensureWorkspacesDir } from '../../../../lib/workspace-utils';
+import { initWorkspaceCheckpoints } from '../../../../lib/checkpoint-utils';
 
 export async function POST(request) {
   try {
@@ -171,6 +172,12 @@ If you need to remove a skill, delete its \`.md\` file.
     };
     
     fs.writeFileSync(path.join(wsDir, '.aurora', 'workspace.json'), JSON.stringify(metadata, null, 2));
+
+    // Initialize checkpoint git for filesystem snapshots (separate from workspace git)
+    const ckResult = await initWorkspaceCheckpoints(wsDir);
+    if (!ckResult.success) {
+      console.warn(`[workspace/create] Checkpoint init warning: ${ckResult.error}`);
+    }
     
     return NextResponse.json({
       id: safeName,

@@ -328,6 +328,48 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     }
   };
 
+  const handleDeleteFile = async (node) => {
+    if (!activeWorkspace) return;
+    try {
+      const res = await fetch(`/api/workspace/${activeWorkspace.id}/write`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: node.path })
+      });
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error.message);
+        return;
+      }
+      // Close the file tab if it's open
+      if (openFiles.find(f => f.path === node.path)) {
+        setOpenFiles(prev => {
+          const filtered = prev.filter(f => f.path !== node.path);
+          if (activeFile === node.path && filtered.length > 0) {
+            setActiveFile(filtered[filtered.length - 1].path);
+          } else if (filtered.length === 0) {
+            setActiveFile(null);
+          }
+          return filtered;
+        });
+      }
+      // Remove from file contents
+      setFileContents(prev => {
+        const next = { ...prev };
+        delete next[node.path];
+        return next;
+      });
+      // Refresh the file tree
+      try {
+        const treeRes = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+        const treeData = await treeRes.json();
+        if (treeData.tree) setFileTree(treeData.tree);
+      } catch {}
+    } catch (err) {
+      setError('Failed to delete file');
+    }
+  };
+
   const handleTabClick = (filePath) => {
     setActiveFile(filePath);
   };
@@ -389,6 +431,16 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       if (data.tree) setFileTree(data.tree);
     } catch {} // non-critical — tree just won't update until next refresh
   }, [activeWorkspace, openFiles]);
+
+  // ── Refresh file tree (called by AgentPanel when agent writes files) ──
+  const refreshTree = useCallback(async () => {
+    if (!activeWorkspace) return;
+    try {
+      const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+      const data = await res.json();
+      if (data.tree) setFileTree(data.tree);
+    } catch {} // non-critical
+  }, [activeWorkspace]);
 
   const handleCloneRepo = async (e) => {
     e.preventDefault();
@@ -970,6 +1022,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 initialMessages={workspaceMessages}
                 activeFilePath={null}
                 onFileEdit={handleFileEdit}
+                onFileTreeChange={refreshTree}
                 onReadFile={async (path) => {
                   if (!activeWorkspace) return null;
                   const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
@@ -1106,6 +1159,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 searchQuery={treeSearch}
                 onSearchChange={setTreeSearch}
                 gitStatus={gitStatus}
+                onDeleteFile={handleDeleteFile}
               />
             ) : (
               <GitPanel
@@ -1210,6 +1264,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 initialMessages={workspaceMessages}
                 activeFilePath={activeFile}
                 onFileEdit={handleFileEdit}
+                onFileTreeChange={refreshTree}
                 onReadFile={async (path) => {
                   if (!activeWorkspace) return null;
                   const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
