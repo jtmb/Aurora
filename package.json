@@ -29,6 +29,8 @@
     "apps/*"
   ],
   "dependencies": {
+    "@corbe30/fortune-excel": "^2.3.2",
+    "@fortune-sheet/react": "^1.0.4",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.10.0",
     "ioredis": "^5.11.0"

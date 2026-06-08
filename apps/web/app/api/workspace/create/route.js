@@ -12,7 +12,7 @@ import { getUserId } from '../../../../lib/auth-utils';
 export async function POST(request) {
   try {
     const body = await request.json().catch(() => ({}));
-    const { name, repoUrl, type = 'blank', codeMode = 'full' } = body;
+    const { name, repoUrl, type = 'blank', codeMode = 'full', workspaceType = 'code' } = body;
 
     // Require authentication
     const userId = getUserId(request);
@@ -22,6 +22,16 @@ export async function POST(request) {
     
     if (!name || !name.trim()) {
       return NextResponse.json({ error: { message: 'Workspace name is required' } }, { status: 400 });
+    }
+
+    // Validate workspaceType
+    if (!['code', 'documents'].includes(workspaceType)) {
+      return NextResponse.json({ error: { message: 'workspaceType must be "code" or "documents"' } }, { status: 400 });
+    }
+
+    // Documents workspaces don't support git clone
+    if (workspaceType === 'documents' && repoUrl) {
+      return NextResponse.json({ error: { message: 'Documents workspaces do not support git clone' } }, { status: 400 });
     }
     
     ensureWorkspacesDir();
@@ -168,6 +178,7 @@ If you need to remove a skill, delete its \`.md\` file.
       repoUrl: repoUrl || null,
       type: type || 'blank',
       codeMode: codeMode || 'full',
+      workspaceType: workspaceType || 'code',
       ownerId: userId,
       createdAt,
       lastOpened: createdAt

@@ -71,6 +71,7 @@ export async function GET(request) {
         repoUrl: metadata.repoUrl || null,
         type: metadata.type || 'blank',
         codeMode: metadata.codeMode || 'full',
+        workspaceType: metadata.workspaceType || 'code',
         primaryLanguage: primaryLanguage || metadata.primaryLanguage || null,
         createdAt: metadata.createdAt || stat.birthtime?.toISOString() || stat.mtime.toISOString(),
         lastOpened: lastOpened || null,

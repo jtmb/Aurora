@@ -3,6 +3,7 @@ const nextConfig = {
   transpilePackages: [
     '@aurora/auth-service',
     '@aurora/api-gateway',
+    '@fortune-sheet/react',
   ],
   serverExternalPackages: [
     'better-sqlite3',

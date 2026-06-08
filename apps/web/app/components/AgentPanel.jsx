@@ -26,7 +26,9 @@ export default function AgentPanel({
   onToggleMode,
   codeMode,
   previewInfo,
-  onFileTreeChange
+  onFileTreeChange,
+  showPlanTab = true,
+  hideBottomControls = false
 }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -3710,6 +3712,7 @@ TESTING WORKFLOW — After creating/modifying project files:
       </div>
 
       {/* 🧠 Learnings Debug Panel — corpus + skills visibility */}
+      {!hideBottomControls && (
       <div className="border-t border-zinc-800/40">
         <button
           type="button"
@@ -3782,14 +3785,16 @@ TESTING WORKFLOW — After creating/modifying project files:
           </div>
         )}
       </div>
+      )}
 
       {/* Agent mode toolbar */}
+      {!hideBottomControls && (
       <div className="px-2 pt-1.5 pb-0.5 flex items-center gap-2 border-t border-zinc-800/20">
         {/* Mode pills: Chat | Plan | Agent */}
         <div className="flex items-center gap-0.5 bg-zinc-800/40 rounded-lg p-0.5">
           {[
             { id: 'chat', icon: '💬', label: 'Chat' },
-            { id: 'plan', icon: '📋', label: 'Plan' },
+            ...(showPlanTab ? [{ id: 'plan', icon: '📋', label: 'Plan' }] : []),
             { id: 'agent', icon: '🤖', label: 'Agent' },
           ].map(mode => (
             <button
@@ -3835,6 +3840,7 @@ TESTING WORKFLOW — After creating/modifying project files:
           </div>
         </div>
       </div>
+      )}
 
       {/* Input */}
       <div className="p-2 border-t border-zinc-800/40">

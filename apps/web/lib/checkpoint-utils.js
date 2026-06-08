@@ -163,6 +163,87 @@ export async function createWorkspaceCheckpoint(wsDir, tag) {
 }
 
 /**
+ * List all checkpoints for a workspace with metadata.
+ * Returns tags, commit hashes, dates, and messages sorted by date desc.
+ *
+ * @param {string} wsDir - Absolute path to the workspace directory
+ * @returns {{ success: boolean, checkpoints?: Array, error?: string }}
+ */
+export async function listWorkspaceCheckpoints(wsDir) {
+  try {
+    const ckDir = getCheckpointDir(wsDir);
+
+    if (!fs.existsSync(ckDir)) {
+      return { success: true, checkpoints: [] };
+    }
+
+    const git = simpleGit(wsDir).env({
+      GIT_DIR: ckDir,
+      GIT_WORK_TREE: wsDir,
+    });
+
+    const isRepo = await git.checkIsRepo().catch(() => false);
+    if (!isRepo) {
+      return { success: true, checkpoints: [] };
+    }
+
+    // Get all tags
+    const tagsResult = await git.tags();
+    const allTags = tagsResult.all || [];
+
+    // Collect checkpoint tags (cp_*) plus "initial"
+    const checkpointTags = allTags.filter(
+      t => t.startsWith('cp_') || t === 'initial'
+    );
+
+    if (checkpointTags.length === 0) {
+      return { success: true, checkpoints: [] };
+    }
+
+    // For each tag, get commit info using git log -1 --format
+    const checkpoints = [];
+    for (const tag of checkpointTags) {
+      try {
+        const logOutput = await git.raw([
+          'log', '-1', '--format=%H%n%ai%n%s', tag
+        ]);
+        const [hash, date, ...msgParts] = logOutput.trim().split('\n');
+        const message = msgParts.join(' ').trim();
+        checkpoints.push({
+          tag,
+          hash: hash?.slice(0, 7) || 'unknown',
+          fullHash: hash || 'unknown',
+          date: date || null,
+          message: message || ''
+        });
+      } catch {
+        // Tag exists but no commit (unlikely), skip
+        checkpoints.push({
+          tag,
+          hash: 'unknown',
+          fullHash: 'unknown',
+          date: null,
+          message: ''
+        });
+      }
+    }
+
+    // Sort by date descending (most recent first), initial always last or by date
+    checkpoints.sort((a, b) => {
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return b.date.localeCompare(a.date);
+    });
+
+    console.log(`[checkpoint] Listed ${checkpoints.length} checkpoints for workspace`);
+    return { success: true, checkpoints };
+  } catch (error) {
+    console.error('[checkpoint/list] Error:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Restore the workspace working tree to a checkpoint tag.
  * Uses git reset --hard to restore the entire working tree atomically.
  * This is O(1) — a single fast operation regardless of file count.

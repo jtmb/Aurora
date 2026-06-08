@@ -10,6 +10,7 @@ import FileTabs from './FileTabs';
 import AgentPanel from './AgentPanel';
 import PreviewPanel from './PreviewPanel';
 import GitPanel from './GitPanel';
+import DocumentsWorkspace from './DocumentsWorkspace';
 
 // xterm.js uses browser APIs, must be client-only
 const TerminalPanel = dynamic(() => import('./TerminalPanel'), { ssr: false });
@@ -29,6 +30,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
   const [error, setError] = useState('');
   const [creationStep, setCreationStep] = useState(null); // null | 'select' | 'form'
   const [creationMode, setCreationMode] = useState('full'); // 'full' | 'vibe'
+  const [creationType, setCreationType] = useState('code'); // 'code' | 'documents'
   const [codeMode, setCodeMode] = useState(() => pendingWorkspace?.codeMode || 'full'); // active workspace's mode
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneName, setCloneName] = useState('');
@@ -499,7 +501,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       const res = await fetch('/api/workspace/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ name: cloneName.trim(), repoUrl: cloneUrl.trim(), type: 'git', codeMode: creationMode })
+        body: JSON.stringify({ name: cloneName.trim(), repoUrl: cloneUrl.trim(), type: 'git', codeMode: creationMode, workspaceType: creationType })
       });
       const data = await res.json();
       if (data.error) {
@@ -530,7 +532,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       const res = await fetch('/api/workspace/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ name: createName.trim(), type: 'blank', codeMode: creationMode })
+        body: JSON.stringify({ name: createName.trim(), type: 'blank', codeMode: creationMode, workspaceType: creationType })
       });
       const data = await res.json();
       if (data.error) {
@@ -697,10 +699,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 <h3 className="text-sm font-semibold text-white">Choose your workflow</h3>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 {/* Vibe Code */}
                 <button
-                  onClick={() => { setCreationMode('vibe'); setCreationStep('form'); }}
+                  onClick={() => { setCreationType('code'); setCreationMode('vibe'); setCreationStep('form'); }}
                   className="group relative bg-zinc-800/60 border border-zinc-700/40 hover:border-purple-500/40 rounded-xl p-4 text-left transition-all hover:bg-zinc-800"
                 >
                   <div className="w-9 h-9 rounded-lg bg-purple-500/10 flex items-center justify-center mb-3 group-hover:bg-purple-500/20 transition-colors">
@@ -714,7 +716,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
 
                 {/* Full Workspace */}
                 <button
-                  onClick={() => { setCreationMode('full'); setCreationStep('form'); }}
+                  onClick={() => { setCreationType('code'); setCreationMode('full'); setCreationStep('form'); }}
                   className="group relative bg-zinc-800/60 border border-zinc-700/40 hover:border-indigo-500/40 rounded-xl p-4 text-left transition-all hover:bg-zinc-800"
                 >
                   <div className="w-9 h-9 rounded-lg bg-indigo-500/10 flex items-center justify-center mb-3 group-hover:bg-indigo-500/20 transition-colors">
@@ -724,6 +726,20 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                   </div>
                   <h4 className="text-sm font-semibold text-white mb-1">Full Workspace</h4>
                   <p className="text-[11px] text-zinc-400 leading-relaxed">File tree, code editor, terminal, and AI chat. Full control over your project.</p>
+                </button>
+
+                {/* Documents */}
+                <button
+                  onClick={() => { setCreationType('documents'); setCreationStep('form'); }}
+                  className="group relative bg-zinc-800/60 border border-zinc-700/40 hover:border-amber-500/40 rounded-xl p-4 text-left transition-all hover:bg-zinc-800"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center mb-3 group-hover:bg-amber-500/20 transition-colors">
+                    <svg className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  </div>
+                  <h4 className="text-sm font-semibold text-white mb-1">Documents</h4>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">Edit Word &amp; Excel files with AI. Changes are checkpointed automatically.</p>
                 </button>
               </div>
             </div>
@@ -742,13 +758,52 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                   </svg>
                 </button>
                 <h3 className="text-sm font-semibold text-white">
-                  {creationMode === 'vibe' ? 'Create Vibe Code Workspace' : 'Create Full Workspace'}
+                  {creationType === 'documents'
+                    ? 'Create Documents Workspace'
+                    : creationMode === 'vibe' ? 'Create Vibe Code Workspace' : 'Create Full Workspace'}
                 </h3>
                 <span className="text-[10px] px-1.5 py-0.5 rounded font-medium text-zinc-400 bg-zinc-800">
-                  {creationMode === 'vibe' ? 'Vibe Code' : 'Full Workspace'}
+                  {creationType === 'documents'
+                    ? 'Documents'
+                    : creationMode === 'vibe' ? 'Vibe Code' : 'Full Workspace'}
                 </span>
               </div>
-              <form onSubmit={handleCloneRepo} className="space-y-3">
+              {creationType === 'documents' ? (
+                /* Documents: only workspace name, no repo URL */
+                <form onSubmit={handleCreateBlank} className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-medium text-zinc-400 mb-1">Workspace Name</label>
+                    <input
+                      type="text"
+                      value={createName}
+                      onChange={(e) => setCreateName(e.target.value)}
+                      placeholder="My Documents"
+                      className="w-full bg-zinc-800 border border-zinc-700/50 rounded-xl px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-amber-500/30 transition-all"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      disabled={cloneLoading || !createName.trim()}
+                      className="flex-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-xl py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                    >
+                      {cloneLoading ? (
+                        <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      ) : null}
+                      Create
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCreationStep(null)}
+                      className="px-4 py-2.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <>
+                <form onSubmit={handleCloneRepo} className="space-y-3">
                 <div>
                   <label className="block text-[11px] font-medium text-zinc-400 mb-1">Repository URL</label>
                   <input
@@ -816,6 +871,8 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                   </button>
                 </form>
               </div>
+              </>
+              )}
             </div>
           )}
 
@@ -986,7 +1043,22 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
   // Computed for Git badge
   const changedCount = gitStatus?.files?.length || 0;
 
-  // IDE layout — Vibe Code or Full Workspace
+  // Documents layout
+  if (activeWorkspace?.workspaceType === 'documents') {
+    return (
+      <DocumentsWorkspace
+        workspace={activeWorkspace}
+        onWorkspaceDeleted={() => {
+          setActiveWorkspace(null);
+          loadWorkspaces();
+        }}
+        onBack={() => setActiveWorkspace(null)}
+        workspaceChatId={workspaceChatId}
+        initialMessages={workspaceMessages}
+      />
+    );
+  }
+
   if (codeMode === '_loading') {
     // Cold cache — waiting for API to return workspace metadata
     return (
