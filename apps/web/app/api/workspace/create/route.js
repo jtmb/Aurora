@@ -3,32 +3,33 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { simpleGit } from 'simple-git';
 import { getWorkspaceDir, ensureWorkspacesDir } from '../../../../lib/workspace-utils';
 import { initWorkspaceCheckpoints } from '../../../../lib/checkpoint-utils';
+import { getUserId } from '../../../../lib/auth-utils';
 
 export async function POST(request) {
   try {
     const body = await request.json().catch(() => ({}));
     const { name, repoUrl, type = 'blank', codeMode = 'full' } = body;
+
+    // Require authentication
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
     
     if (!name || !name.trim()) {
       return NextResponse.json({ error: { message: 'Workspace name is required' } }, { status: 400 });
     }
     
-    // Sanitize name for filesystem
-    const safeName = name.trim().replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').toLowerCase();
-    if (!safeName) {
-      return NextResponse.json({ error: { message: 'Invalid workspace name' } }, { status: 400 });
-    }
-    
     ensureWorkspacesDir();
-    const wsDir = getWorkspaceDir(safeName);
-    
-    // Check if workspace already exists
-    if (fs.existsSync(wsDir)) {
-      return NextResponse.json({ error: { message: 'Workspace already exists' } }, { status: 409 });
-    }
+
+    // Generate a unique ID — directory names use UUID so two users can have
+    // workspaces with the same display name without collision.
+    const workspaceId = crypto.randomUUID();
+    const wsDir = getWorkspaceDir(workspaceId);
     
     const createdAt = new Date().toISOString();
     let cloneSuccess = false;
@@ -167,6 +168,7 @@ If you need to remove a skill, delete its \`.md\` file.
       repoUrl: repoUrl || null,
       type: type || 'blank',
       codeMode: codeMode || 'full',
+      ownerId: userId,
       createdAt,
       lastOpened: createdAt
     };
@@ -180,7 +182,7 @@ If you need to remove a skill, delete its \`.md\` file.
     }
     
     return NextResponse.json({
-      id: safeName,
+      id: workspaceId,
       ...metadata,
       isGitRepo: cloneSuccess || (repoUrl ? true : false)
     }, { status: 201 });

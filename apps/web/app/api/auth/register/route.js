@@ -47,25 +47,29 @@ export async function POST(request) {
       );
     }
 
+    // First account provisioned gets admin role
+    const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get();
+    const role = userCount.count === 0 ? 'admin' : 'user';
+
     // Create user
     const userId = crypto.randomUUID();
     const hashedPassword = await bcrypt.hash(body.password, 10);
     
     db.prepare(`
       INSERT INTO users (id, email, hashed_password, name, role, created_at)
-      VALUES (?, ?, ?, ?, 'user', datetime('now'))
-    `).run(userId, body.email, hashedPassword, body.name || null);
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+    `).run(userId, body.email, hashedPassword, body.name || null, role);
 
     // Generate real JWT
     const token = authHandler.signToken({
       sub: body.email,
       email: body.email,
       userId,
-      roles: ['user']
+      roles: [role]
     });
 
     return NextResponse.json(
-      { message: 'Registration successful', token, user: { id: userId, email: body.email, name: body.name || null } },
+      { message: 'Registration successful', token, user: { id: userId, email: body.email, name: body.name || null, role } },
       { status: 201 }
     );
 

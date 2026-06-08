@@ -8,7 +8,12 @@ export async function GET(request, { params }) {
   try {
     const { id } = await params;
     
-    const wsDir = validateWorkspace(id);
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+    
+    const wsDir = validateWorkspace(id, userId);
     if (!wsDir) {
       return NextResponse.json({ error: { message: 'Workspace not found' } }, { status: 404 });
     }
@@ -49,7 +54,12 @@ export async function PUT(request, { params }) {
   try {
     const { id } = await params;
     
-    const wsDir = validateWorkspace(id);
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+    
+    const wsDir = validateWorkspace(id, userId);
     if (!wsDir) {
       return NextResponse.json({ error: { message: 'Workspace not found' } }, { status: 404 });
     }

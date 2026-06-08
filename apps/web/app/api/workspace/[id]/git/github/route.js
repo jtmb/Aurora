@@ -6,6 +6,7 @@ import path from 'path';
 import os from 'os';
 import { simpleGit } from 'simple-git';
 import { validateWorkspace } from '../../../../../../lib/workspace-utils';
+import { getUserId } from '../../../../../../lib/auth-utils';
 
 function getGithubAuthPath() {
   return path.join(os.homedir(), '.aurora', 'github-auth.json');
@@ -26,7 +27,12 @@ export async function POST(request, { params }) {
   try {
     const { id } = await params;
     
-    const wsDir = validateWorkspace(id);
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+    
+    const wsDir = validateWorkspace(id, userId);
     if (!wsDir) {
       return NextResponse.json({ error: { message: 'Workspace not found' } }, { status: 404 });
     }

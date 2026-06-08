@@ -161,6 +161,22 @@ const SCHEMA = {
     );
     CREATE INDEX IF NOT EXISTS idx_agent_jobs_workspace ON agent_jobs(workspace_id);
     CREATE INDEX IF NOT EXISTS idx_agent_jobs_status ON agent_jobs(status);
+  `,
+
+  user_model_access: `
+    CREATE TABLE IF NOT EXISTS user_model_access (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      enabled INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, provider, model_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_uma_user ON user_model_access(user_id);
+    CREATE INDEX IF NOT EXISTS idx_uma_user_provider ON user_model_access(user_id, provider);
   `
 };
 
@@ -264,6 +280,27 @@ export function runMigrations() {
     console.log('[SQLite] Added pending_question column to agent_jobs (migration)');
   } catch {
     // Column already exists — safe to ignore
+  }
+  try {
+    db.exec(`ALTER TABLE agent_jobs ADD COLUMN user_id TEXT DEFAULT ''`);
+    console.log('[SQLite] Added user_id column to agent_jobs (migration)');
+  } catch {
+    // Column already exists — safe to ignore
+  }
+
+  // Bootstrap admin user from env var (idempotent)
+  const adminEmail = process.env.ADMIN_EMAIL;
+  if (adminEmail) {
+    try {
+      const result = db.prepare(
+        "UPDATE users SET role = 'admin' WHERE email = ? AND role != 'admin'"
+      ).run(adminEmail);
+      if (result.changes > 0) {
+        console.log(`[SQLite] Promoted ${adminEmail} to admin role`);
+      }
+    } catch (err) {
+      console.error('[SQLite] Admin bootstrap failed:', err.message);
+    }
   }
 
   if (created.length > 0) {

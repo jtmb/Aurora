@@ -171,6 +171,44 @@ const getProviders = (keys) => {
 };
 
 /**
+ * Check if a user has explicitly provisioned model access.
+ * Returns:
+ *   null  — user has full access (admin or unauthenticated)
+ *   Set   — user may only use models in this set ("provider:model" keys)
+ *           An empty Set means no models are allowed.
+ */
+const getAllowedModels = (userId) => {
+  // Unauthenticated requests (API keys only, no JWT) get full access
+  if (!userId) return null;
+
+  try {
+    runMigrations();
+    const db = getDb();
+
+    // Admins always have full access
+    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId);
+    if (user?.role === 'admin') return null;
+
+    // Check if any access rules exist for this user (enabled or not)
+    const anyRows = db.prepare(
+      'SELECT COUNT(*) as count FROM user_model_access WHERE user_id = ?'
+    ).get(userId);
+
+    // No rules configured yet → deny all access (admin must provision first)
+    if (anyRows.count === 0) return new Set();
+
+    // Rules exist: return only models explicitly enabled
+    const rows = db.prepare(
+      'SELECT provider, model_id FROM user_model_access WHERE user_id = ? AND enabled = 1'
+    ).all(userId);
+    return new Set(rows.map(r => `${r.provider}:${r.model_id}`));
+  } catch {
+    // DB not ready, table missing — deny access to be safe
+    return new Set();
+  }
+};
+
+/**
  * Normalize response to OpenAI v1 format regardless of provider
  */
 const normalizeToOpenAIFormat = (data, providerId, modelName) => {
@@ -211,6 +249,10 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens,
       const lmBase = provider.baseUrl.endsWith('/v1') ? provider.baseUrl : `${provider.baseUrl}/v1`;
       url = `${lmBase}/chat/completions`;
       body = { model, messages, temperature, max_tokens: maxTokens, stream, ...extraParams };
+      // OpenAI-compatible: request usage stats in stream chunks (needed for token tracking)
+      if (stream) {
+        body.stream_options = { include_usage: true };
+      }
       break;
 
     case 'deepseek':
@@ -300,6 +342,16 @@ export async function POST(request) {
       return NextResponse.json(
         { error: { message: 'No LLM provider configured. Set API keys in Settings or configure environment variables.', type: 'configuration_error' } },
         { status: 400 }
+      );
+    }
+
+    // Model access gating: if admin has provisioned access for this user, check against the allowlist
+    const userIdForAccess = getUserId(request);
+    const allowedModels = getAllowedModels(userIdForAccess);
+    if (allowedModels !== null && !allowedModels.has(`${selectedProvider.id}:${model}`)) {
+      return NextResponse.json(
+        { error: { message: `Model "${model}" is not available for your account. Contact your administrator.`, type: 'access_restricted' } },
+        { status: 403 }
       );
     }
 

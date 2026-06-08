@@ -130,11 +130,9 @@ export async function GET(request) {
         }
       }
     } else {
-      // Populate from defaults
-      if (forceRefresh) {
-        for (const provider of Object.keys(DEFAULT_PRICING)) {
-          cachePricing(provider, DEFAULT_PRICING[provider]);
-        }
+      // Populate from defaults — always cache on first call so subsequent calls are fast
+      for (const provider of Object.keys(DEFAULT_PRICING)) {
+        cachePricing(provider, DEFAULT_PRICING[provider]);
       }
 
       models = getDefaultModels();

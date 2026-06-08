@@ -1,5 +1,7 @@
 // @aurora/api/workspace/[id]/agent/stream - SSE endpoint for real-time agent progress
 import { getAgentEventBus } from '../../../../../../lib/agent-runner';
+import { getUserId } from '../../../../../../lib/auth-utils';
+import { validateWorkspace } from '../../../../../../lib/workspace-utils';
 
 /**
  * GET — Subscribe to real-time agent job events via SSE.
@@ -15,6 +17,19 @@ import { getAgentEventBus } from '../../../../../../lib/agent-runner';
 export async function GET(request, { params }) {
   const { searchParams } = new URL(request.url);
   const jobId = searchParams.get('jobId');
+  const { id } = await params;
+
+  // Auth check
+  const userId = getUserId(request);
+  if (!userId) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  // Ownership check
+  const wsDir = validateWorkspace(id, userId);
+  if (!wsDir) {
+    return new Response('Workspace not found', { status: 404 });
+  }
 
   if (!jobId) {
     return new Response('Missing jobId', { status: 400 });

@@ -8,6 +8,12 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
+// Shared auth header utility for workspace API calls
+function getAuthHeaders() {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+  return token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+}
+
 export default function AgentPanel({ 
   workspaceId,
   workspaceChatId,
@@ -340,6 +346,7 @@ export default function AgentPanel({
               } else {
                 // New message
                 if (sm.role === 'assistant') {
+                  const isFinal = sm.content?.startsWith?.('✅') || sm.content?.startsWith?.('⚠️') || sm.content?.startsWith?.('Task complete');
                   const msgObj = {
                     id: sm.id,
                     role: sm.role,
@@ -348,7 +355,8 @@ export default function AgentPanel({
                     timestamp: sm.timestamp,
                     model: sm.model,
                     provider: sm.provider,
-                    isFinalSummary: sm.content?.startsWith?.('✅') || sm.content?.startsWith?.('⚠️') || sm.content?.startsWith?.('Task complete'),
+                    isFinalSummary: false,
+                    isSuccess: sm.content?.startsWith?.('✅') || sm.content?.startsWith?.('Task complete') || false,
                   };
                   // Detect plan content in newly merged messages
                   if (msgObj.content && /\n###\s*Summary\s*\n/.test(msgObj.content)) {
@@ -388,11 +396,15 @@ export default function AgentPanel({
 
             return changed ? [...merged] : prev;
           });
+
+          // Always refresh file tree after syncing messages during active job
+          // (tree API is cheap and this guarantees visibility of agent-created files)
+          onFileTreeChange?.();
         }
 
         // Fetch job status
         if (!workspaceId) return;
-        const statusRes = await fetch(`/api/workspace/${workspaceId}/agent/status`);
+        const statusRes = await fetch(`/api/workspace/${workspaceId}/agent/status`, { headers: getAuthHeaders() });
         if (statusRes.ok) {
           const statusData = await statusRes.json();
           if (!statusData.active) {
@@ -472,7 +484,7 @@ export default function AgentPanel({
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/workspace/${workspaceId}/agent/status?resume=true`);
+        const res = await fetch(`/api/workspace/${workspaceId}/agent/status?resume=true`, { headers: getAuthHeaders() });
         if (!res.ok || cancelled) return;
         const data = await res.json();
         if (data.active) {
@@ -532,7 +544,7 @@ export default function AgentPanel({
       try {
         const res = await fetch(`/api/workspace/${workspaceId}/read`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           body: JSON.stringify({ path: 'AGENTS.md' })
         });
         if (!cancelled && res.ok) {
@@ -542,7 +554,7 @@ export default function AgentPanel({
           // AGENTS.md not found — try CLAUDE.md
           const res2 = await fetch(`/api/workspace/${workspaceId}/read`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAuthHeaders(),
             body: JSON.stringify({ path: 'CLAUDE.md' })
           });
           if (!cancelled && res2.ok) {
@@ -557,7 +569,7 @@ export default function AgentPanel({
       // Load corpus entries (per-workspace)
       let workspaceEntries = [];
       try {
-        const cr = await fetch(`/api/workspace/${workspaceId}/corpus`);
+        const cr = await fetch(`/api/workspace/${workspaceId}/corpus`, { headers: getAuthHeaders() });
         if (!cancelled && cr.ok) {
           const cd = await cr.json();
           workspaceEntries = cd.entries || [];
@@ -582,7 +594,7 @@ export default function AgentPanel({
 
       // Load skills
       try {
-        const sr = await fetch(`/api/workspace/${workspaceId}/skills`);
+        const sr = await fetch(`/api/workspace/${workspaceId}/skills`, { headers: getAuthHeaders() });
         if (!cancelled && sr.ok) {
           const sd = await sr.json();
           setSkills(sd.skills || []);
@@ -844,7 +856,7 @@ export default function AgentPanel({
     try {
       const res = await fetch(`/api/workspace/${workspaceId}/git/commit`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ message: `checkpoint: ${label}` })
       });
       if (res.ok) {
@@ -874,7 +886,7 @@ export default function AgentPanel({
     if (workspaceId && userMsg.id) {
       fetch(`/api/workspace/${workspaceId}/checkpoint/restore`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ tag: userMsg.id })
       }).catch(() => {});
     }
@@ -919,7 +931,7 @@ export default function AgentPanel({
     if (workspaceId) {
       fetch(`/api/workspace/${workspaceId}/checkpoint/restore`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ tag: msgId })
       }).catch(() => {});
     }
@@ -1181,14 +1193,14 @@ export default function AgentPanel({
     // Fire-and-forget — do NOT await
     fetch(`/api/workspace/${workspaceId}/corpus`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body
     }).catch(() => {});
 
     // Also post to global corpus for cross-project learning
     fetch('/api/corpus', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ type, problem, context, resolution, workspaceId })
     }).catch(() => {});
   }, [workspaceId]);
@@ -1198,7 +1210,7 @@ export default function AgentPanel({
     if (!workspaceId || !entryId) return;
     fetch(`/api/workspace/${workspaceId}/corpus`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ entryId, resolution })
     }).catch(() => {});
   }, [workspaceId]);
@@ -1533,9 +1545,13 @@ export default function AgentPanel({
 
       (async () => {
         try {
+          const token = localStorage.getItem('auth_token');
           const streamRes = await fetch(
             `/api/workspace/${workspaceId}/agent/stream?jobId=${encodeURIComponent(data.jobId)}`,
-            { signal: agentStreamController.signal }
+            {
+              signal: agentStreamController.signal,
+              headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+            }
           );
           if (!streamRes.ok) return;
           const reader = streamRes.body.getReader();
@@ -1554,6 +1570,8 @@ export default function AgentPanel({
               try {
                 const evt = JSON.parse(jsonStr);
                 if (evt.type === 'done' || evt.type === 'error' || evt.type === 'stop') {
+                  // Final file tree refresh when job finishes
+                  onFileTreeChange?.();
                   // Detect plan content so Execute Plan button shows immediately
                   if (streamedContent && /\n###\s*Summary\s*\n/.test(streamedContent)) {
                     const planResult = parsePlanTodos(streamedContent);
@@ -1582,6 +1600,8 @@ export default function AgentPanel({
                       ));
                     }
                   }
+                  // Refresh file tree — iteration may have written/patched files
+                  onFileTreeChange?.();
                   streamIterId++;
                   streamAssistId = `agent_asst_${Date.now()}`;
                   streamedThinking = '';
@@ -2444,7 +2464,7 @@ TESTING WORKFLOW — After creating/modifying project files:
   const executeReadFile = async (wsId, filePath) => {
     const res = await fetch(`/api/workspace/${wsId}/read`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ path: filePath })
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error?.message || 'Read failed');
@@ -2462,7 +2482,7 @@ TESTING WORKFLOW — After creating/modifying project files:
     }
     const res = await fetch(`/api/workspace/${wsId}/write`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ path: filePath, content })
     });
     if (!res.ok) {
@@ -2480,7 +2500,7 @@ TESTING WORKFLOW — After creating/modifying project files:
     // First read the file
     const readRes = await fetch(`/api/workspace/${wsId}/read`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ path: filePath })
     });
     if (!readRes.ok) throw new Error('File not found');
@@ -2503,7 +2523,7 @@ TESTING WORKFLOW — After creating/modifying project files:
     // Write the modified content
     const writeRes = await fetch(`/api/workspace/${wsId}/write`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ path: filePath, content: newContent })
     });
     if (!writeRes.ok) throw new Error('Write failed');
@@ -2511,14 +2531,14 @@ TESTING WORKFLOW — After creating/modifying project files:
   };
 
   const executeSearch = async (wsId, query) => {
-    const res = await fetch(`/api/workspace/${wsId}/search?q=${encodeURIComponent(query)}`);
+    const res = await fetch(`/api/workspace/${wsId}/search?q=${encodeURIComponent(query)}`, { headers: getAuthHeaders() });
     if (!res.ok) throw new Error('Search failed');
     return await res.json();
   };
 
   const executeListFiles = async (wsId, dirPath) => {
     // Reuse tree endpoint with subpath
-    const res = await fetch(`/api/workspace/${wsId}/tree?depth=2`);
+    const res = await fetch(`/api/workspace/${wsId}/tree?depth=2`, { headers: getAuthHeaders() });
     if (!res.ok) throw new Error('List failed');
     const data = await res.json();
     if (dirPath) {
@@ -2539,7 +2559,7 @@ TESTING WORKFLOW — After creating/modifying project files:
   };
 
   const executeGitStatus = async (wsId) => {
-    const res = await fetch(`/api/workspace/${wsId}/git/status`);
+    const res = await fetch(`/api/workspace/${wsId}/git/status`, { headers: getAuthHeaders() });
     return await res.json();
   };
 
@@ -2550,7 +2570,7 @@ TESTING WORKFLOW — After creating/modifying project files:
     try {
       const res = await fetch(`/api/workspace/${wsId}/exec`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ command })
       });
       const data = await res.json();
@@ -2567,7 +2587,7 @@ TESTING WORKFLOW — After creating/modifying project files:
   };
 
   const executeDevServerStatus = async (wsId) => {
-    const res = await fetch(`/api/workspace/${wsId}/dev-server`);
+    const res = await fetch(`/api/workspace/${wsId}/dev-server`, { headers: getAuthHeaders() });
     if (!res.ok) throw new Error('Status check failed');
     const data = await res.json();
     if (data.error) return { error: data.error.message };
@@ -2586,7 +2606,7 @@ TESTING WORKFLOW — After creating/modifying project files:
     if (!cmd) {
       try {
         // First check preview-info
-        const infoRes = await fetch(`/api/workspace/${wsId}/preview-info`);
+        const infoRes = await fetch(`/api/workspace/${wsId}/preview-info`, { headers: getAuthHeaders() });
         const infoData = await infoRes.json();
         if (!infoData.error && infoData.suggestedCommand) {
           cmd = infoData.suggestedCommand;
@@ -2596,7 +2616,7 @@ TESTING WORKFLOW — After creating/modifying project files:
       if (!cmd) {
         // Auto-detect project type from workspace tree
         try {
-          const treeRes = await fetch(`/api/workspace/${wsId}/tree?depth=2`);
+          const treeRes = await fetch(`/api/workspace/${wsId}/tree?depth=2`, { headers: getAuthHeaders() });
           const treeData = await treeRes.json();
           const files = treeData.tree ? flattenTree(treeData.tree) : [];
           const fileSet = new Set(files.map(f => f.name || f));
@@ -2641,7 +2661,7 @@ TESTING WORKFLOW — After creating/modifying project files:
 
     const res = await fetch(`/api/workspace/${wsId}/dev-server`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ command: finalCmd })
     });
     if (!res.ok) {
@@ -2653,7 +2673,7 @@ TESTING WORKFLOW — After creating/modifying project files:
     // Wait a moment then check status for build output
     await new Promise(r => setTimeout(r, 3000));
 
-    const statusRes = await fetch(`/api/workspace/${wsId}/dev-server`);
+    const statusRes = await fetch(`/api/workspace/${wsId}/dev-server`, { headers: getAuthHeaders() });
     const statusData = await statusRes.json();
 
     return {
@@ -2667,7 +2687,7 @@ TESTING WORKFLOW — After creating/modifying project files:
   };
 
   const executeDevServerStop = async (wsId) => {
-    const res = await fetch(`/api/workspace/${wsId}/dev-server`, { method: 'DELETE' });
+    const res = await fetch(`/api/workspace/${wsId}/dev-server`, { method: 'DELETE', headers: getAuthHeaders() });
     if (!res.ok) throw new Error('Stop failed');
     const data = await res.json();
     return { running: false, message: data.message || 'Dev server stopped' };
@@ -2688,13 +2708,13 @@ TESTING WORKFLOW — After creating/modifying project files:
     try {
       const res = await fetch(`/api/workspace/${wsId}/skills`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ name, description, applyTo, content })
       });
       const data = await res.json();
       if (res.ok && data.success) {
         // Refresh skills list
-        const sr = await fetch(`/api/workspace/${wsId}/skills`);
+        const sr = await fetch(`/api/workspace/${wsId}/skills`, { headers: getAuthHeaders() });
         if (sr.ok) {
           const sd = await sr.json();
           setSkills(sd.skills || []);
@@ -2894,9 +2914,9 @@ TESTING WORKFLOW — After creating/modifying project files:
     let cleanContent = msg.content ? msg.content.replace(toolBlockRegex, '').replace(xmlToolRegex, '').trim() : '';
     // Also strip leftover self-closing tags and empty fenced code blocks (info-string-only blocks with no body)
     cleanContent = cleanContent.replace(/<\w+(\s+\w+="[^"]*")*\s*\/>/g, '').replace(/```[^\n]+\n\s*```/g, '').trim();
-    // Strip [x] progress/task lines that LLMs output following the system prompt
+    // Replace [x] prefix with checkmark emoji — LLMs output [x] to mark completed tasks
     // (catches both streaming and history-loaded/db-persisted messages)
-    cleanContent = cleanContent.replace(/^\s*\[x\]\s+(?:PROGRESS|Task|task)\b[^\n]*\n?/gmi, '').trim();
+    cleanContent = cleanContent.replace(/^\s*\[x\]\s+/gmi, '✅ ').trim();
 
     // If there's nothing to display, return null.
     if (!cleanContent) return null;
@@ -3000,6 +3020,63 @@ TESTING WORKFLOW — After creating/modifying project files:
     );
   };
 
+  // Build rendering segments: consecutive assistant messages with thinking are
+  // collapsed into a single "Finished with N steps" group, matching VS Code
+  // Copilot's UX pattern. The first non-thinking assistant message after a
+  // thinking group is included as the "verbal result".
+  const buildRenderSegments = (msgs) => {
+    const isGroupable = (m) =>
+      m.role === 'assistant' && !m.isError && !m.isPlanResult && !m.isPlanCard && !m.isFinalSummary;
+
+    const segments = [];
+    let i = 0;
+    while (i < msgs.length) {
+      const msg = msgs[i];
+
+      if (isGroupable(msg) && msg.thinking) {
+        // Collect consecutive thinking messages
+        const groupMsgs = [msg];
+        let j = i + 1;
+        while (j < msgs.length) {
+          const next = msgs[j];
+          if (isGroupable(next) && next.thinking) {
+            groupMsgs.push(next);
+            j++;
+          } else {
+            break;
+          }
+        }
+
+        // If the very next message is a non-thinking verbal result, include it
+        if (j < msgs.length && isGroupable(msgs[j]) && !msgs[j].thinking) {
+          groupMsgs.push(msgs[j]);
+          j++;
+        }
+
+        if (groupMsgs.length > 1) {
+          const totalSteps = groupMsgs
+            .filter(m => m.thinking)
+            .reduce((sum, m) => sum + countSteps(m.thinking), 0);
+          segments.push({
+            type: 'thinking-group',
+            messages: groupMsgs,
+            totalSteps,
+            id: `grp_${msg.id}`,
+          });
+        } else {
+          segments.push({ type: 'single', message: msg });
+        }
+        i = j;
+      } else {
+        segments.push({ type: 'single', message: msg });
+        i++;
+      }
+    }
+    return segments;
+  };
+
+  const segments = buildRenderSegments(messages);
+
   return (
     <div className="flex flex-col h-full bg-zinc-900/50 border-l border-zinc-800/40">
       {/* Header with model picker */}
@@ -3084,10 +3161,13 @@ TESTING WORKFLOW — After creating/modifying project files:
                     try {
                       const res = await fetch(`/api/workspace/${workspaceId}/checkpoint/reset`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' }
+                        headers: getAuthHeaders()
                       });
                       if (!res.ok) {
                         console.error('[ClearChat] Reset failed:', res.status);
+                      } else {
+                        // Immediately refresh the file tree after reset
+                        onFileTreeChange?.();
                       }
                     } catch (err) {
                       console.error('[ClearChat] Reset error:', err);
@@ -3178,9 +3258,143 @@ TESTING WORKFLOW — After creating/modifying project files:
           </div>
         )}
 
-        {messages.map((msg, i) => {
+        {segments.map((seg, segIdx) => {
+          // ── Thinking group: collapsed consecutive assistant steps ──
+          if (seg.type === 'thinking-group') {
+            const groupMsgs = seg.messages;
+            const lastMsg = groupMsgs[groupMsgs.length - 1];
+            const groupId = seg.id;
+            const isLastInChat = segIdx === segments.length - 1;
+            const isStreamingGroup = isLastInChat && isStreaming;
+            const allToolCalls = groupMsgs.flatMap(m => m.toolCalls || []);
+            const hasContent = groupMsgs.some(m => m.content?.trim());
+
+            // Thinking toggle for the group
+            const isThinkingExpanded = isStreamingGroup
+              ? true
+              : expandedThinkingIds.has(groupId);
+            const toggleThinking = () => {
+              setExpandedThinkingIds(prev => {
+                const next = new Set(prev);
+                if (next.has(groupId)) next.delete(groupId);
+                else next.add(groupId);
+                return next;
+              });
+            };
+
+            return (
+              <div key={groupId} className={`group relative py-2.5 ${segIdx > 0 ? 'border-t border-zinc-800/20' : ''}`}>
+                {/* Model badge + timestamp + retry */}
+                <div className="flex items-center gap-2 mb-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`w-1.5 h-1.5 rounded-full ${sourceColorMap[currentModelInfo?.source] || 'bg-zinc-500'}`} />
+                    <span className="text-[10px] font-medium text-zinc-400">
+                      {lastMsg.model || currentModelInfo?.name || 'Agent'}
+                    </span>
+                  </div>
+                  <span className="text-[9px] text-zinc-700">{new Date(lastMsg.timestamp).toLocaleTimeString()}</span>
+                  {!isStreaming && (
+                    <button
+                      type="button"
+                      onClick={() => handleRetry(lastMsg.id)}
+                      className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-zinc-600 hover:text-zinc-300 transition-all flex items-center gap-1"
+                      title="Retry"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      Retry
+                    </button>
+                  )}
+                </div>
+
+                {/* Thinking toggle: "Finished with N steps" */}
+                <div className="mb-2">
+                  <button
+                    type="button"
+                    onClick={toggleThinking}
+                    className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-300 transition-colors w-full text-left"
+                  >
+                    <svg className={`w-3 h-3 transition-transform ${isThinkingExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                    <span>Finished with {seg.totalSteps} step{seg.totalSteps !== 1 ? 's' : ''}</span>
+                    {isStreamingGroup && (
+                      <span className="inline-flex gap-0.5">
+                        <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </span>
+                    )}
+                  </button>
+                  {isThinkingExpanded && (
+                    <div className="mt-2 pl-4 border-l-2 border-zinc-600/50 relative rounded-lg rounded-l-none bg-zinc-900/60 py-2">
+                      <div className="text-[11px] text-zinc-400 font-mono leading-relaxed whitespace-pre-wrap max-h-52 overflow-y-auto tracking-tight"
+                        style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}>
+                        {groupMsgs.map((gm, gi) => (
+                          <div key={gi} className={`py-0.5 ${gi > 0 ? 'mt-2 pt-2 border-t border-zinc-800/30' : ''}`}>
+                            {gm.thinking}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Content from messages that have it (typically only the final message) */}
+                {hasContent && (
+                  <div className="text-zinc-300">
+                    {groupMsgs.filter(m => m.content?.trim()).map((cm, ci) => (
+                      <div key={ci} className={ci > 0 ? 'mt-1' : ''}>
+                        {renderMessageContent(cm)}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Tool call cards from all messages in the group */}
+                {allToolCalls.map(tc => (
+                  <ToolCallCard key={tc.id} tc={tc} msgId={lastMsg.id} />
+                ))}
+
+                {/* Plan card support — check all messages in the group */}
+                {groupMsgs.some(m => m.isPlanCard) && !groupMsgs.some(m => m.isPlanResult) && planTodos.length > 0 && (
+                  <div className="mt-2 mx-1">
+                    <div className="border border-indigo-800/30 bg-zinc-900/40 rounded-xl overflow-hidden">
+                      <div className="px-3 py-2 bg-indigo-950/20 border-b border-indigo-800/20 flex items-center gap-2">
+                        <span className="text-xs">📋</span>
+                        <span className="text-[10px] font-medium text-indigo-300 uppercase tracking-wider">Implementation Plan</span>
+                        <span className="ml-auto text-[10px] text-indigo-500">{planTodos.filter(t => t.done).length}/{planTodos.length}</span>
+                      </div>
+                      <div className="px-3 py-2 space-y-1 max-h-[200px] overflow-y-auto">
+                        {planTodos.map((todo, idx) => (
+                          <div key={todo.id} className={`flex items-start gap-2 py-0.5 transition-all duration-300 ${todo.done ? 'opacity-50' : ''}`}>
+                            <span className={`text-[11px] mt-0.5 flex-shrink-0 transition-colors duration-300 ${todo.done ? 'text-emerald-400' : 'text-zinc-600'}`}>
+                              {todo.done ? (
+                                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                </svg>
+                              ) : (
+                                <span className="block w-3.5 h-3.5 rounded-full border border-zinc-600" />
+                              )}
+                            </span>
+                            <span className={`text-[11px] leading-relaxed transition-colors duration-300 ${todo.done ? 'text-zinc-500 line-through' : 'text-zinc-300'}`}>
+                              {idx + 1}. {todo.text}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          // ── Single message ──
+          const msg = seg.message;
           const isUser = msg.role === 'user';
-          const isLastAssistant = !isUser && i === messages.length - 1;
+          const isLastAssistant = !isUser && segIdx === segments.length - 1;
           const isStreamingThis = isLastAssistant && isStreaming;
           const hasThinking = !isUser && msg.thinking;
           // VS Code style: thinking auto-expands while streaming, collapses when finished.
@@ -3197,7 +3411,7 @@ TESTING WORKFLOW — After creating/modifying project files:
           };
 
           return (
-          <div key={msg.id} className={`group relative ${i > 0 ? 'border-t border-zinc-800/20' : ''} ${isUser ? 'py-2' : 'py-2.5'}`}>
+          <div key={msg.id} className={`group relative ${segIdx > 0 ? 'border-t border-zinc-800/20' : ''} ${isUser ? 'py-2' : 'py-2.5'}`}>
             {/* Checkpoint banner */}
             {msg.checkpointHash && (
               <div className="flex items-center gap-1.5 px-2 py-1 mb-1 bg-amber-950/20 border border-amber-800/20 rounded text-[10px] text-amber-400">
@@ -3295,48 +3509,6 @@ TESTING WORKFLOW — After creating/modifying project files:
                     ))}
                   </div>
                 </div>
-              </div>
-            )}
-
-            {/* Final summary banner with build status */}
-            {msg.isFinalSummary && (
-              <div className={`mb-2 mx-1 px-3 py-2.5 rounded-xl border ${msg.isSuccess ? 'bg-emerald-950/20 border-emerald-800/30' : 'bg-amber-950/20 border-amber-800/30'}`}>
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="text-sm">{msg.isSuccess ? '✅' : '⚠️'}</span>
-                  <span className={`text-[11px] font-medium ${msg.isSuccess ? 'text-emerald-300' : 'text-amber-300'}`}>
-                    {msg.isSuccess ? 'Task Complete' : 'Partial Completion'}
-                  </span>
-                </div>
-                {msg.stats && (
-                  <div className="grid grid-cols-3 gap-2 mb-2">
-                    <div className="text-center">
-                      <div className="text-[13px] font-bold text-zinc-200">{msg.stats.tasksDone}/{msg.stats.tasksTotal}</div>
-                      <div className="text-[9px] text-zinc-500">Tasks</div>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-[13px] font-bold text-zinc-200">{msg.stats.filesCreated + msg.stats.filesModified}</div>
-                      <div className="text-[9px] text-zinc-500">Files</div>
-                    </div>
-                    <div className="text-center">
-                      <div className={`text-[13px] font-bold ${msg.stats.buildPassed ? 'text-emerald-400' : 'text-zinc-400'}`}>
-                        {msg.stats.buildPassed ? '✓' : '—'}
-                      </div>
-                      <div className="text-[9px] text-zinc-500">Build</div>
-                    </div>
-                  </div>
-                )}
-                {msg.previewUrl && (
-                  <button
-                    onClick={onOpenPreview}
-                    className="w-full px-2.5 py-1.5 bg-indigo-600/40 hover:bg-indigo-600/60 text-indigo-200 rounded-lg text-[10px] font-medium transition-colors flex items-center justify-center gap-1.5"
-                  >
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                    </svg>
-                    Open Preview
-                  </button>
-                )}
               </div>
             )}
 
@@ -3480,7 +3652,7 @@ TESTING WORKFLOW — After creating/modifying project files:
                     Generating plan...
                   </div>
                 ) : (
-                  renderMessageContent(msg)
+                  <>{renderMessageContent(msg)}{msg.isSuccess ? ' ✅' : ''}</>
                 )}
               </div>
 
@@ -3522,21 +3694,6 @@ TESTING WORKFLOW — After creating/modifying project files:
               })()}
             </div>
           );
-        })()}
-
-        {/* Build complete notification */}
-        {!isStreaming && (() => {
-          const lastMsg = messages[messages.length - 1];
-          const hasTools = messages.some(m => m.toolCalls?.length > 0);
-          if (
-            lastMsg?.role === 'assistant' &&
-            hasTools &&
-            lastMsg.content?.toLowerCase().includes('task complete') &&
-            onOpenPreview
-          ) {
-            return null; // Superseded by isFinalSummary banner
-          }
-          return null;
         })()}
 
         {/* Streaming indicator — thin progress bar */}

@@ -336,7 +336,10 @@ export default function Home() {
         // If cache miss, use _loading sentinel so WorkspaceMode waits instead of defaulting to full
         setPendingWorkspace(ws || { id: workspaceId, codeMode: '_loading' });
         // Always refresh from API in background to keep cache current
-        fetch(`/api/workspace/list`).then(r => r.json()).then(data => {
+        const token = localStorage.getItem('auth_token');
+        fetch(`/api/workspace/list`, {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        }).then(r => r.json()).then(data => {
           const fresh = (data.workspaces || []).find(w => w.id === workspaceId);
           if (fresh) {
             try {

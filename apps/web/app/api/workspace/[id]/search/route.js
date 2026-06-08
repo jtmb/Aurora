@@ -4,6 +4,7 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { validateWorkspace, resolveSafePath } from '../../../../../lib/workspace-utils';
+import { getUserId } from '../../../../../lib/auth-utils';
 
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.next', '__pycache__', '.DS_Store',
@@ -78,8 +79,13 @@ function walkAndSearch(dirPath, query, workspaceRoot, maxResults = 100) {
 export async function GET(request, { params }) {
   try {
     const { id } = await params;
+
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
     
-    const wsDir = validateWorkspace(id);
+    const wsDir = validateWorkspace(id, userId);
     if (!wsDir) {
       return NextResponse.json({ error: { message: 'Workspace not found' } }, { status: 404 });
     }

@@ -85,13 +85,25 @@ export async function GET(request) {
     const endDate = searchParams.get('endDate');
     const providerFilter = searchParams.get('provider');
     const granularity = searchParams.get('granularity'); // 'daily' for time-series
+    const targetUserId = searchParams.get('userId'); // admin override: view another user's usage
 
     runMigrations();
     const db = getDb();
 
+    // Admin override: allow viewing any user's usage
+    let effectiveUserId = userId;
+    if (targetUserId) {
+      const requestingUser = db.prepare('SELECT role FROM users WHERE id = ?').get(userId);
+      if (requestingUser?.role === 'admin') {
+        effectiveUserId = targetUserId;
+      } else {
+        return NextResponse.json({ error: { message: 'Admin access required to view other users' } }, { status: 403 });
+      }
+    }
+
     // Build WHERE clause
     const conditions = ['user_id = ?'];
-    const params = [userId];
+    const params = [effectiveUserId];
 
     if (startDate) {
       conditions.push('created_at >= ?');

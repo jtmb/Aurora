@@ -109,8 +109,11 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
   }, [pendingWorkspace]);
 
   const loadWorkspaces = async () => {
+    const token = localStorage.getItem('auth_token');
     try {
-      const res = await fetch('/api/workspace/list');
+      const res = await fetch('/api/workspace/list', {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
       const data = await res.json();
       const list = data.workspaces || [];
       setWorkspaces(list);
@@ -153,10 +156,13 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
 
     // Parallelize ALL fetches: file tree + git + preview + chat messages
     // This prevents chat messages from loading sequentially after the file tree
+    const token = localStorage.getItem('auth_token');
     const [treeResult, chatResult] = await Promise.allSettled([
       // 1. File tree
       (async () => {
-        const res = await fetch(`/api/workspace/${ws.id}/tree`);
+        const res = await fetch(`/api/workspace/${ws.id}/tree`, {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
         const data = await res.json();
         if (data.error) throw new Error(data.error.message);
         return data.tree || [];
@@ -179,13 +185,17 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     }
 
     // Fire-and-forget: git status (non-blocking)
-    fetch(`/api/workspace/${ws.id}/git/status`)
+    fetch(`/api/workspace/${ws.id}/git/status`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    })
       .then(r => r.json())
       .then(d => { if (!d.error) setGitStatus(d); })
       .catch(() => {});
 
     // Fire-and-forget: preview info (non-blocking)
-    fetch(`/api/workspace/${ws.id}/preview-info`)
+    fetch(`/api/workspace/${ws.id}/preview-info`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    })
       .then(r => r.json())
       .then(d => { if (!d.error) setPreviewInfo(d); })
       .catch(() => {});
@@ -277,7 +287,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       setOpenFiles(prev => [...prev, { path: filePath, name: fileName, language: ext }]);
     }
     try {
-      const diffRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/diff?path=${encodeURIComponent(filePath)}&staged=${staged ? 'true' : 'false'}`);
+      const token = localStorage.getItem('auth_token');
+      const diffRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/diff?path=${encodeURIComponent(filePath)}&staged=${staged ? 'true' : 'false'}`, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
       const diffData = await diffRes.json();
       if (!diffData.error) {
         setFileContents(prev => ({ ...prev, [filePath]: diffData.diff || '(no changes)' }));
@@ -285,7 +298,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
         // Fallback: read the file normally
         const readRes = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
           body: JSON.stringify({ path: filePath })
         });
         const readData = await readRes.json();
@@ -312,9 +325,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     setOpenFiles(prev => [...prev, { path: node.path, name: node.name, language: node.language }]);
 
     try {
+      const token = localStorage.getItem('auth_token');
       const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ path: node.path })
       });
       const data = await res.json();
@@ -331,9 +345,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
   const handleDeleteFile = async (node) => {
     if (!activeWorkspace) return;
     try {
+      const token = localStorage.getItem('auth_token');
       const res = await fetch(`/api/workspace/${activeWorkspace.id}/write`, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ path: node.path })
       });
       const data = await res.json();
@@ -361,7 +376,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       });
       // Refresh the file tree
       try {
-        const treeRes = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+        const token = localStorage.getItem('auth_token');
+        const treeRes = await fetch(`/api/workspace/${activeWorkspace.id}/tree`, {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
         const treeData = await treeRes.json();
         if (treeData.tree) setFileTree(treeData.tree);
       } catch {}
@@ -400,9 +418,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     if (window._saveTimeout) clearTimeout(window._saveTimeout);
     window._saveTimeout = setTimeout(async () => {
       try {
+        const token = localStorage.getItem('auth_token');
         await fetch(`/api/workspace/${activeWorkspace.id}/write`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
           body: JSON.stringify({ path: filePath, content })
         });
       } catch (err) {
@@ -426,7 +445,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
 
     // Refresh the file tree so new files appear immediately
     try {
-      const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
       const data = await res.json();
       if (data.tree) setFileTree(data.tree);
     } catch {} // non-critical — tree just won't update until next refresh
@@ -434,12 +456,35 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
 
   // ── Refresh file tree (called by AgentPanel when agent writes files) ──
   const refreshTree = useCallback(async () => {
-    if (!activeWorkspace) return;
+    if (!activeWorkspace) {
+      console.warn('[refreshTree] Skipped — no activeWorkspace');
+      return;
+    }
     try {
-      const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree?_t=${Date.now()}`, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!res.ok) {
+        console.warn(`[refreshTree] API returned ${res.status} — retrying after 500ms delay`);
+        // Single retry after delay (filesystem may not have flushed yet)
+        await new Promise(r => setTimeout(r, 500));
+        const retryRes = await fetch(`/api/workspace/${activeWorkspace.id}/tree?_t=${Date.now()}`, {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        if (!retryRes.ok) {
+          console.warn(`[refreshTree] Retry also failed: ${retryRes.status}`);
+          return;
+        }
+        const retryData = await retryRes.json();
+        if (retryData.tree) setFileTree(retryData.tree);
+        return;
+      }
       const data = await res.json();
       if (data.tree) setFileTree(data.tree);
-    } catch {} // non-critical
+    } catch (err) {
+      console.warn('[refreshTree] Failed:', err.message);
+    }
   }, [activeWorkspace]);
 
   const handleCloneRepo = async (e) => {
@@ -449,10 +494,11 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     setCloneLoading(true);
     setError('');
     
+    const token = localStorage.getItem('auth_token');
     try {
       const res = await fetch('/api/workspace/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ name: cloneName.trim(), repoUrl: cloneUrl.trim(), type: 'git', codeMode: creationMode })
       });
       const data = await res.json();
@@ -479,10 +525,11 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     setCloneLoading(true);
     setError('');
     
+    const token = localStorage.getItem('auth_token');
     try {
       const res = await fetch('/api/workspace/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ name: createName.trim(), type: 'blank', codeMode: creationMode })
       });
       const data = await res.json();
@@ -502,8 +549,12 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
   };
 
   const handleDeleteWorkspace = async (wsId) => {
+    const token = localStorage.getItem('auth_token');
     try {
-      await fetch(`/api/workspace/${wsId}/delete`, { method: 'DELETE' });
+      await fetch(`/api/workspace/${wsId}/delete`, {
+        method: 'DELETE',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
       if (activeWorkspace?.id === wsId) {
         setActiveWorkspace(null);
         setOpenFiles([]);
@@ -563,9 +614,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     if (!activeWorkspace) return;
     const newMode = codeMode === 'vibe' ? 'full' : 'vibe';
     try {
+      const token = localStorage.getItem('auth_token');
       await fetch(`/api/workspace/${activeWorkspace.id}/mode`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ codeMode: newMode })
       });
       setCodeMode(newMode);
@@ -579,13 +631,18 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       } catch {}
       // When switching to full mode, reload the file tree and preview info
       if (newMode === 'full') {
+        const token = localStorage.getItem('auth_token');
         try {
-          const treeRes = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+          const treeRes = await fetch(`/api/workspace/${activeWorkspace.id}/tree`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
           const treeData = await treeRes.json();
           if (!treeData.error) setFileTree(treeData.tree || []);
         } catch {}
         try {
-          const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+          const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
           const previewData = await previewRes.json();
           if (!previewData.error) setPreviewInfo(previewData);
         } catch {}
@@ -968,7 +1025,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                   }
                   // Detect/re-detect preview info, then show if valid
                   try {
-                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+                    const token = localStorage.getItem('auth_token');
+                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`, {
+                      headers: { 'Authorization': `Bearer ${token}` }
+                    });
                     const previewData = await previewRes.json();
                     if (!previewData.error) {
                       setPreviewInfo(previewData);
@@ -1025,9 +1085,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 onFileTreeChange={refreshTree}
                 onReadFile={async (path) => {
                   if (!activeWorkspace) return null;
+                  const token = localStorage.getItem('auth_token');
                   const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                     body: JSON.stringify({ path })
                   });
                   return res.json();
@@ -1036,7 +1097,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 onOpenPreview={async () => {
                   // Refresh preview info, then ALWAYS open panel
                   try {
-                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+                    const token = localStorage.getItem('auth_token');
+                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`, {
+                      headers: { 'Authorization': `Bearer ${token}` }
+                    });
                     const previewData = await previewRes.json();
                     if (!previewData.error) {
                       setPreviewInfo(previewData);
@@ -1077,7 +1141,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                   }
                   // Always refresh preview info, then open panel
                   try {
-                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+                    const token = localStorage.getItem('auth_token');
+                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`, {
+                      headers: { 'Authorization': `Bearer ${token}` }
+                    });
                     const previewData = await previewRes.json();
                     if (!previewData.error) {
                       setPreviewInfo(previewData);
@@ -1167,13 +1234,18 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 onFileClick={handleGitFileClick}
                 onRefreshTree={async () => {
                   // Refresh git status BEFORE tree (tree dirties .aurora/workspace.json)
+                  const token = localStorage.getItem('auth_token');
                   try {
-                    const gitRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/status`);
+                    const gitRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/status`, {
+                      headers: { 'Authorization': `Bearer ${token}` }
+                    });
                     const gitData = await gitRes.json();
                     if (!gitData.error) setGitStatus(gitData);
                   } catch {}
                   try {
-                    const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+                    const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`, {
+                      headers: { 'Authorization': `Bearer ${token}` }
+                    });
                     const data = await res.json();
                     if (data.tree) setFileTree(data.tree);
                   } catch {}
@@ -1267,9 +1339,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 onFileTreeChange={refreshTree}
                 onReadFile={async (path) => {
                   if (!activeWorkspace) return null;
+                  const token = localStorage.getItem('auth_token');
                   const res = await fetch(`/api/workspace/${activeWorkspace.id}/read`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                     body: JSON.stringify({ path })
                   });
                   return res.json();
@@ -1278,7 +1351,10 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 onOpenPreview={async () => {
                   // Detect/re-detect preview info, then show
                   try {
-                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`);
+                    const token = localStorage.getItem('auth_token');
+                    const previewRes = await fetch(`/api/workspace/${activeWorkspace.id}/preview-info`, {
+                      headers: { 'Authorization': `Bearer ${token}` }
+                    });
                     const previewData = await previewRes.json();
                     if (!previewData.error) {
                       setPreviewInfo(previewData);
@@ -1303,13 +1379,18 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
         activeFile={activeFile}
         openFiles={openFiles}
         onRefreshTree={async () => {
+          const token = localStorage.getItem('auth_token');
           try {
-            const gitRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/status`);
+            const gitRes = await fetch(`/api/workspace/${activeWorkspace.id}/git/status`, {
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
             const gitData = await gitRes.json();
             if (!gitData.error) setGitStatus(gitData);
           } catch {}
           try {
-            const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`);
+            const res = await fetch(`/api/workspace/${activeWorkspace.id}/tree`, {
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
             const data = await res.json();
             if (data.tree) setFileTree(data.tree);
           } catch {}
@@ -1333,7 +1414,10 @@ function StatusBar({ workspaceId, isGitRepo, activeFile, openFiles, onRefreshTre
     let cancelled = false;
     const fetchStatus = async () => {
       try {
-        const res = await fetch(`/api/workspace/${workspaceId}/git/status`);
+        const token = localStorage.getItem('auth_token');
+        const res = await fetch(`/api/workspace/${workspaceId}/git/status`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
         const data = await res.json();
         if (!cancelled && !data.error) setGitStatus(data);
       } catch {}
@@ -1346,7 +1430,10 @@ function StatusBar({ workspaceId, isGitRepo, activeFile, openFiles, onRefreshTre
   // Fetch branches when dropdown opens
   const fetchBranches = async () => {
     try {
-      const res = await fetch(`/api/workspace/${workspaceId}/git/branches`);
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`/api/workspace/${workspaceId}/git/branches`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       const data = await res.json();
       if (!data.error) setBranches(data.branches || []);
     } catch {}
@@ -1355,6 +1442,7 @@ function StatusBar({ workspaceId, isGitRepo, activeFile, openFiles, onRefreshTre
   const handleSwitchBranch = async (branchName) => {
     setSwitchError('');
     try {
+      const token = localStorage.getItem('auth_token');
       const res = await fetch(`/api/workspace/${workspaceId}/git/branches`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

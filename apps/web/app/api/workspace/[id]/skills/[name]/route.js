@@ -2,12 +2,17 @@
 
 import { NextResponse } from 'next/server';
 import { validateWorkspace } from '../../../../../../lib/workspace-utils';
+import { getUserId } from '../../../../../../lib/auth-utils';
 import { loadAllSkills, deleteSkill } from '../../../../../../lib/skills-utils';
 
 export async function GET(request, { params }) {
   try {
     const { id, name } = await params;
-    const wsDir = validateWorkspace(id);
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+    const wsDir = validateWorkspace(id, userId);
     if (!wsDir) {
       return NextResponse.json({ error: { message: 'Workspace not found' } }, { status: 404 });
     }
@@ -32,7 +37,11 @@ export async function GET(request, { params }) {
 export async function DELETE(request, { params }) {
   try {
     const { id, name } = await params;
-    const wsDir = validateWorkspace(id);
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+    const wsDir = validateWorkspace(id, userId);
     if (!wsDir) {
       return NextResponse.json({ error: { message: 'Workspace not found' } }, { status: 404 });
     }

@@ -4,19 +4,20 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import AdminPanel from '../components/AdminPanel';
 
 const DEFAULT_SETTINGS = {
   openai: '',
   anthropic: '',
   deepseek: '',
-  ollamaBase: 'http://localhost:11434',
+  ollamaBase: '',
   lmStudioHost: 'localhost',
   lmStudioPort: '1234',
   lmStudioUrl: '',
   lmStudioMaxModels: '3',
   lmStudioApiKey: '',
   lmStudioApiKeyEnabled: false,
-  providerEnabled: { openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false },
+  providerEnabled: { openai: false, anthropic: false, deepseek: false, ollama: false, lmstudio: false },
   removedProviders: [],
 };
 
@@ -26,8 +27,8 @@ export default function SettingsPage() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   // ---- State (must be before any function that references these) ----
-  const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS, ollamaBase: 'http://localhost:11434' });
-  const [providerEnabled, setProviderEnabled] = useState({ openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false });
+  const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS });
+  const [providerEnabled, setProviderEnabled] = useState({ openai: false, anthropic: false, deepseek: false, ollama: false, lmstudio: false });
   const [showApiKey, setShowApiKey] = useState({ openai: false, anthropic: false, deepseek: false });
   const [lmStudioApiKeyEnabled, setLmStudioApiKeyEnabled] = useState(false);
   const [testStatus, setTestStatus] = useState({});
@@ -37,6 +38,7 @@ export default function SettingsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [saved, setSaved] = useState(false);
   const [user, setUser] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   // Password reset state
   const [passwordCurrent, setPasswordCurrent] = useState('');
@@ -91,7 +93,7 @@ export default function SettingsPage() {
       const stored = localStorage.getItem('PROVIDER_ENABLED');
       if (stored) return JSON.parse(stored);
     } catch {}
-    return { openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false };
+    return { openai: false, anthropic: false, deepseek: false, ollama: false, lmstudio: false };
   };
 
   const loadRemovedFromCache = () => {
@@ -108,7 +110,7 @@ export default function SettingsPage() {
         openai: localStorage.getItem('OPENAI_API_KEY') || '',
         anthropic: localStorage.getItem('ANTHROPIC_API_KEY') || '',
         deepseek: localStorage.getItem('DEEPSEEK_API_KEY') || '',
-        ollamaBase: localStorage.getItem('OLLAMA_API_BASE') || 'http://localhost:11434',
+        ollamaBase: localStorage.getItem('OLLAMA_API_BASE') || '',
         lmStudioHost: localStorage.getItem('LM_STUDIO_HOST') || 'localhost',
         lmStudioPort: localStorage.getItem('LM_STUDIO_PORT') || '1234',
         lmStudioUrl: localStorage.getItem('LM_STUDIO_URL') || '',
@@ -168,7 +170,13 @@ export default function SettingsPage() {
       if (token) {
         try {
           const payload = JSON.parse(atob(token.split('.')[1]));
-          if (!cancelled) setUser({ id: payload.userId, email: payload.email });
+          if (!cancelled) {
+            setUser({ id: payload.userId, email: payload.email });
+            const admin = (payload.roles || []).includes('admin');
+            setIsAdmin(admin);
+            // Non-admin users should not land on the (now-hidden) Providers tab
+            if (!admin && activeTab === 'providers') setActiveTab('account');
+          }
         } catch {}
       }
 
@@ -181,14 +189,14 @@ export default function SettingsPage() {
           openai: dbSettings.openai || '',
           anthropic: dbSettings.anthropic || '',
           deepseek: dbSettings.deepseek || '',
-          ollamaBase: dbSettings.ollamaBase || 'http://localhost:11434',
+          ollamaBase: dbSettings.ollamaBase || '',
           lmStudioHost: dbSettings.lmStudioHost || 'localhost',
           lmStudioPort: dbSettings.lmStudioPort || '1234',
           lmStudioUrl: dbSettings.lmStudioUrl || '',
           lmStudioMaxModels: dbSettings.lmStudioMaxModels || '3',
           lmStudioApiKey: dbSettings.lmStudioApiKey || '',
         });
-        setProviderEnabled(dbSettings.providerEnabled || { openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false });
+        setProviderEnabled(dbSettings.providerEnabled || { openai: false, anthropic: false, deepseek: false, ollama: false, lmstudio: false });
         setLmStudioApiKeyEnabled(dbSettings.lmStudioApiKeyEnabled ?? false);
         setRemovedProviders(new Set(dbSettings.removedProviders || []));
 
@@ -201,14 +209,14 @@ export default function SettingsPage() {
           openai: cached.openai || '',
           anthropic: cached.anthropic || '',
           deepseek: cached.deepseek || '',
-          ollamaBase: cached.ollamaBase || 'http://localhost:11434',
+          ollamaBase: cached.ollamaBase || '',
           lmStudioHost: cached.lmStudioHost || 'localhost',
           lmStudioPort: cached.lmStudioPort || '1234',
           lmStudioUrl: cached.lmStudioUrl || '',
           lmStudioMaxModels: cached.lmStudioMaxModels || '3',
           lmStudioApiKey: cached.lmStudioApiKey || '',
         });
-        setProviderEnabled(cached.providerEnabled || { openai: false, anthropic: false, deepseek: false, ollama: true, lmstudio: false });
+        setProviderEnabled(cached.providerEnabled || { openai: false, anthropic: false, deepseek: false, ollama: false, lmstudio: false });
         setLmStudioApiKeyEnabled(cached.lmStudioApiKeyEnabled ?? false);
         // Compute removed from cached settings (missing keys = removed)
         const computedRemoved = cached.removedProviders?.length > 0
@@ -500,10 +508,11 @@ export default function SettingsPage() {
   };
 
   const tabs = [
-    { id: 'providers', label: 'Providers', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z' },
+    ...(isAdmin ? [{ id: 'providers', label: 'Providers', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z' }] : []),
     { id: 'billing', label: 'Billing', icon: 'M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'account', label: 'Account', icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' },
-    { id: 'about', label: 'About', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' }
+    { id: 'about', label: 'About', icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
+    ...(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' }] : [])
   ];
 
   return (
@@ -1120,6 +1129,11 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
+
+          {/* ===== ADMIN TAB ===== */}
+          {activeTab === 'admin' && isAdmin && (
+            <AdminPanel token={typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null} />
+          )}
         </div>
       </main>
     </div>
@@ -1459,7 +1473,12 @@ function BillingTab({ period, onPeriodChange, usageData, dailyUsage, pricingData
     return String(n);
   };
 
-  const fmtCost = (n) => `$${n.toFixed(n < 0.01 ? 4 : 2)}`;
+  const fmtCost = (n) => {
+    if (n <= 0) return '$0.00';
+    if (n < 0.0001) return `$${n.toExponential(1)}`;
+    if (n < 0.01) return `$${n.toFixed(6)}`;
+    return `$${n.toFixed(2)}`;
+  };
 
   if (loading) {
     return (

@@ -1,12 +1,18 @@
-// @aurora/api/workspace/list - List all workspaces
+// @aurora/api/workspace/list - List user's workspaces (ownership-scoped)
 
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { getWorkspacesDir, ensureWorkspacesDir } from '../../../../lib/workspace-utils';
+import { getUserId } from '../../../../lib/auth-utils';
 
-export async function GET() {
+export async function GET(request) {
   try {
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
+
     const dir = ensureWorkspacesDir();
     
     const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -16,7 +22,7 @@ export async function GET() {
       if (!entry.isDirectory()) continue;
       const wsPath = path.join(dir, entry.name);
       
-      // Read metadata if available
+      // Read metadata if available (check ownership)
       let metadata = {};
       const metaPath = path.join(wsPath, '.aurora', 'workspace.json');
       if (fs.existsSync(metaPath)) {
@@ -24,6 +30,9 @@ export async function GET() {
           metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
         } catch {}
       }
+      
+      // Skip workspaces owned by a different user
+      if (metadata.ownerId && metadata.ownerId !== userId) continue;
       
       // Get last modified time from git config or directory
       let lastOpened = metadata.lastOpened;

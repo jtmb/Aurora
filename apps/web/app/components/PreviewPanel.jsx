@@ -4,6 +4,11 @@
 
 import { useState, useEffect, useCallback } from 'react';
 
+function getAuthHeaders() {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+  return token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+}
+
 export default function PreviewPanel({ workspaceId, previewInfo, onClose, onStartServer }) {
   const [serverStatus, setServerStatus] = useState({ running: false, port: null, url: null });
   const [isStarting, setIsStarting] = useState(false);
@@ -17,7 +22,7 @@ export default function PreviewPanel({ workspaceId, previewInfo, onClose, onStar
   // Poll server status
   const checkStatus = useCallback(async () => {
     try {
-      const res = await fetch(`/api/workspace/${workspaceId}/dev-server`);
+      const res = await fetch(`/api/workspace/${workspaceId}/dev-server`, { headers: getAuthHeaders() });
       const data = await res.json();
       if (!data.error) {
         setServerStatus(data);
@@ -44,7 +49,7 @@ export default function PreviewPanel({ workspaceId, previewInfo, onClose, onStar
     try {
       const res = await fetch(`/api/workspace/${workspaceId}/dev-server`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           command: suggestedCommand || 'npm run dev',
           port: defaultPort
@@ -65,7 +70,7 @@ export default function PreviewPanel({ workspaceId, previewInfo, onClose, onStar
         const portCheck = setInterval(async () => {
           attempts++;
           try {
-            const statusRes = await fetch(`/api/workspace/${workspaceId}/dev-server`);
+            const statusRes = await fetch(`/api/workspace/${workspaceId}/dev-server`, { headers: getAuthHeaders() });
             const statusData = await statusRes.json();
             if (!statusData.error) {
               setServerStatus(statusData);
@@ -87,7 +92,7 @@ export default function PreviewPanel({ workspaceId, previewInfo, onClose, onStar
     setIsStopping(true);
     setError('');
     try {
-      await fetch(`/api/workspace/${workspaceId}/dev-server`, { method: 'DELETE' });
+      await fetch(`/api/workspace/${workspaceId}/dev-server`, { method: 'DELETE', headers: getAuthHeaders() });
       setServerStatus({ running: false, port: null, url: null });
     } catch (err) {
       setError('Failed to stop dev server');

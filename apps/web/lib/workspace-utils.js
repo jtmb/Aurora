@@ -143,12 +143,62 @@ export function walkDirectory(dirPath, maxDepth = 4, currentDepth = 0) {
 
 /**
  * Validate workspace exists and return its path.
- * Returns null if workspace doesn't exist.
+ * When userId is provided, also checks workspace ownership.
+ * Workspaces without an ownerId (legacy) are accessible to all users.
+ * Returns null if workspace doesn't exist or user doesn't own it.
  */
-export function validateWorkspace(workspaceId) {
+export function validateWorkspace(workspaceId, userId) {
   const dir = getWorkspaceDir(workspaceId);
   if (!fs.existsSync(dir)) return null;
+  // Ownership check (only when userId is provided)
+  if (userId) {
+    const metaPath = path.join(dir, '.aurora', 'workspace.json');
+    if (fs.existsSync(metaPath)) {
+      try {
+        const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        // If ownerId is set and doesn't match, deny access
+        if (metadata.ownerId && metadata.ownerId !== userId) return null;
+      } catch { /* corrupt metadata — allow access */ }
+    }
+    // No metadata or no ownerId set → allow (backward compat with pre-ownership workspaces)
+  }
   return dir;
+}
+
+/**
+ * Read workspace metadata from .aurora/workspace.json.
+ * Returns {} if no metadata file exists, null if workspace doesn't exist.
+ */
+export function readWorkspaceMetadata(workspaceId) {
+  const dir = getWorkspaceDir(workspaceId);
+  if (!fs.existsSync(dir)) return null;
+  const metaPath = path.join(dir, '.aurora', 'workspace.json');
+  if (!fs.existsSync(metaPath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Write workspace metadata to .aurora/workspace.json.
+ * Creates the .aurora directory if it doesn't exist.
+ */
+export function writeWorkspaceMetadata(workspaceId, metadata) {
+  const dir = getWorkspaceDir(workspaceId);
+  if (!fs.existsSync(dir)) return false;
+  const auroraDir = path.join(dir, '.aurora');
+  if (!fs.existsSync(auroraDir)) {
+    fs.mkdirSync(auroraDir, { recursive: true });
+  }
+  const metaPath = path.join(auroraDir, 'workspace.json');
+  try {
+    fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2), 'utf-8');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -3,14 +3,20 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import { validateWorkspace } from '../../../../../lib/workspace-utils';
+import { getUserId } from '../../../../../lib/auth-utils';
 import { getDb } from '@aurora/shared/db-client';
 import { runMigrations } from '@aurora/shared/db-migrate';
 
 export async function DELETE(request, { params }) {
   try {
     const { id } = await params;
+
+    const userId = getUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
+    }
     
-    const wsDir = validateWorkspace(id);
+    const wsDir = validateWorkspace(id, userId);
     if (!wsDir) {
       return NextResponse.json({ error: { message: 'Workspace not found' } }, { status: 404 });
     }

@@ -183,6 +183,17 @@ const PROVIDER_TOOL_MODE = {
   ollama: 'custom',
 };
 
+// Completion-detection patterns — model signaled it's done
+const DONE_PHRASES = [
+  /^task\s*complete/i,
+  /^job\s*complete/i,
+  /all\s*(requested\s*)?(files|tasks)\s*(are|have been)\s*(created|completed|done)/i,
+  /^i('ve| have)\s*(completed|finished|done)/i,
+  /\b(the\s+)?(task|job|project)\s+is\s+(complete|done|finished)/i,
+  /^\s*✅/m,
+  /\btask\s+complete[.!]?\s*$/im,
+];
+
 /**
  * Build OpenAI-format tools definitions array for native tool calling.
  * Each tool has a name, description, and JSON Schema parameters.
@@ -649,21 +660,52 @@ function parseToolCalls(content) {
   return calls;
 }
 
+/**
+ * Strip tool call syntax from content text so it doesn't appear in the UI.
+ * Uses parseToolCalls to find all matched patterns and removes them by their
+ * raw matched text. This keeps the conversation history parseable (it still
+ * holds the raw content) while cleaning what gets saved to the DB for display.
+ */
+function stripToolCallsFromContent(content) {
+  if (!content) return content;
+  const calls = parseToolCalls(content);
+  if (calls.length === 0) return content;
+  let cleaned = content;
+  // Remove from end to start so index positions stay valid
+  const removals = calls
+    .map(c => ({ raw: c.raw, index: content.indexOf(c.raw) }))
+    .filter(r => r.raw && r.index >= 0)
+    .sort((a, b) => b.index - a.index);
+  // Deduplicate: if two removals share the same index, only keep one
+  const seen = new Set();
+  for (const r of removals) {
+    const key = `${r.index}:${r.raw.length}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cleaned = cleaned.slice(0, r.index) + cleaned.slice(r.index + r.raw.length);
+  }
+  // Collapse blank lines left behind
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+  return cleaned;
+}
+
 // ── Tool execution (server-side, via fetch to local API routes) ──────────────
 
 const TOOL_TIMEOUT = 30000;
 
-async function executeToolCall(tc, wsId) {
+async function executeToolCall(tc, wsId, userId) {
   const timeoutPromise = new Promise((_, reject) =>
     setTimeout(() => reject(new Error(`Tool ${tc.name} timed out after ${TOOL_TIMEOUT / 1000}s`)), TOOL_TIMEOUT)
   );
+  // Build internal auth header so workspace API calls pass getUserId()
+  const internalHeaders = userId ? { 'x-internal-user-id': userId } : {};
   try {
     const result = await Promise.race([(async () => {
       const base = `http://localhost:${process.env.PORT || 3000}`;
       switch (tc.name) {
         case 'read_file': {
           const res = await fetch(`${base}/api/workspace/${wsId}/read`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...internalHeaders },
             body: JSON.stringify({ path: tc.args.filePath || tc.args.path })
           });
           const data = await res.json();
@@ -676,7 +718,7 @@ async function executeToolCall(tc, wsId) {
             return { error: `Content is empty or missing. You MUST provide the full file content in the 'content' argument of create_file.` };
           }
           const res = await fetch(`${base}/api/workspace/${wsId}/write`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...internalHeaders },
             body: JSON.stringify({ path: tc.args.filePath || tc.args.path, content: contentStr })
           });
           const data = await res.json();
@@ -686,7 +728,7 @@ async function executeToolCall(tc, wsId) {
         case 'replace_string_in_file': {
           // Read, replace, write
           const readRes = await fetch(`${base}/api/workspace/${wsId}/read`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...internalHeaders },
             body: JSON.stringify({ path: tc.args.filePath || tc.args.path })
           });
           const readData = await readRes.json();
@@ -698,7 +740,7 @@ async function executeToolCall(tc, wsId) {
           const oldLines = oldContent.split('\n').length;
           const newContent = oldContent.replace(tc.args.oldString, tc.args.newString);
           const writeRes = await fetch(`${base}/api/workspace/${wsId}/write`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...internalHeaders },
             body: JSON.stringify({ path: tc.args.filePath || tc.args.path, content: newContent })
           });
           const writeData = await writeRes.json();
@@ -710,7 +752,7 @@ async function executeToolCall(tc, wsId) {
         }
         case 'grep_search': {
           const res = await fetch(`${base}/api/workspace/${wsId}/search`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...internalHeaders },
             body: JSON.stringify({ query: tc.args.query })
           });
           const data = await res.json();
@@ -719,7 +761,7 @@ async function executeToolCall(tc, wsId) {
         }
         case 'list_dir': {
           const pathParam = tc.args.path || '.';
-          const res = await fetch(`${base}/api/workspace/${wsId}/tree?depth=2`);
+          const res = await fetch(`${base}/api/workspace/${wsId}/tree?depth=2`, { headers: internalHeaders });
           const data = await res.json();
           if (data.error) return { error: data.error.message };
           const flat = flattenTree(data.tree);
@@ -729,7 +771,7 @@ async function executeToolCall(tc, wsId) {
         }
         case 'run_in_terminal': {
           const res = await fetch(`${base}/api/workspace/${wsId}/exec`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...internalHeaders },
             body: JSON.stringify({ command: tc.args.command })
           });
           const data = await res.json();
@@ -737,20 +779,20 @@ async function executeToolCall(tc, wsId) {
           return { success: data.success, stdout: data.stdout, stderr: data.stderr, exitCode: data.exitCode };
         }
         case 'dev_server_status': {
-          const res = await fetch(`${base}/api/workspace/${wsId}/dev-server`, { method: 'GET' });
+          const res = await fetch(`${base}/api/workspace/${wsId}/dev-server`, { method: 'GET', headers: internalHeaders });
           const data = await res.json();
           return { running: data.running || false, port: data.port, url: data.url, logs: data.logs };
         }
         case 'dev_server_start': {
           const res = await fetch(`${base}/api/workspace/${wsId}/dev-server`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...internalHeaders },
             body: JSON.stringify({ command: tc.args.command || 'npm run dev' })
           });
           const data = await res.json();
           return { running: data.running || false, port: data.port, url: data.url, command: data.command, logs: data.logs };
         }
         case 'dev_server_stop': {
-          const res = await fetch(`${base}/api/workspace/${wsId}/dev-server`, { method: 'DELETE' });
+          const res = await fetch(`${base}/api/workspace/${wsId}/dev-server`, { method: 'DELETE', headers: internalHeaders });
           const data = await res.json();
           return { message: data.message || 'Server stopped' };
         }
@@ -848,6 +890,16 @@ async function saveMessageToChat(chatId, role, content, model, provider, msgId, 
         UPDATE messages SET content = ?, thinking = ?, model = ?, provider = ?, timestamp = ? WHERE id = ?
       `).run(content, thinking || '', model || '', provider || '', ts, messageId);
       return;
+    }
+
+    // Ensure the chat row exists (defensive — frontend may not have created it yet)
+    const chatExists = db.prepare('SELECT 1 FROM chats WHERE id = ?').get(chatId);
+    if (!chatExists) {
+      // Auto-create the chat row so FK constraint passes
+      db.prepare(`
+        INSERT OR IGNORE INTO chats (id, user_id, title, created_at, last_message_at, message_count)
+        VALUES (?, 'auto', ?, ?, ?, 1)
+      `).run(chatId, 'Auto-created chat', ts, ts);
     }
 
     // Get next position for new message
@@ -1000,6 +1052,7 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
   const MAX_ITERATIONS = 100;
   const workspaceId = job.workspace_id;
   const chatId = job.chat_id;
+  const userId = job.user_id || '';
   const model = job.model || 'gpt-4o';
   const provider = job.provider || 'openai';
   const thinkingEffort = job.thinkingEffort || job.thinking_effort || 'high';
@@ -1044,6 +1097,10 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
       try {
         const result = await llmCall(conversation, model, provider, thinkingEffort, apiKeys, chatId, assistantId, jobId, ac.signal);
         rawContent = result.content;
+        // Strip [x] / [X] checklist prefixes the model echoes from tool feedback
+        if (rawContent) {
+          rawContent = rawContent.replace(/^\[x\]\s*/gmi, '');
+        }
         thinking = result.thinking;
         nativeToolCalls = result.nativeToolCalls;
       } catch (err) {
@@ -1060,7 +1117,7 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
       }
       _abortControllers.delete(jobId);
 
-      conversation.push({ role: 'assistant', content: rawContent });
+      conversation.push({ role: 'assistant', content: rawContent, native_tool_calls: nativeToolCalls });
 
       // Signal iteration end so SSE frontend knows this LLM call is complete
       _agentEvents.emit(`job:${jobId}`, { type: 'iteration_end' });
@@ -1089,7 +1146,7 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
               const planLines = [`# Implementation Plan`, ``, `> **Request:** ${originalRequest.slice(0, 200)}`, ``, `## Tasks`, ``];
               for (const t of todos) planLines.push(`- [${t.done ? 'x' : ' '}] ${t.text}`);
               const planMd = planLines.join('\n');
-              await executeToolCall({ name: 'create_file', args: { filePath: 'PLAN.md', content: planMd } }, workspaceId);
+              await executeToolCall({ name: 'create_file', args: { filePath: 'PLAN.md', content: planMd } }, workspaceId, userId);
             } catch (err) {
               console.warn('[agent-runner] Failed to write PLAN.md:', err.message);
             }
@@ -1098,14 +1155,19 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
         }
 
         // ── Clarification pause: detect questions before any files are created ──
+        // Check both parsed text tool calls AND native tool calls from provider
         const hasCreatedFiles = conversation.some(m => {
           if (m.role !== 'assistant') return false;
           const calls = parseToolCalls(m.content || '');
-          const nativeCalls = [];
-          return calls.some(tc => tc.name === 'create_file') || nativeCalls.some(tc => tc.name === 'create_file');
+          const nativeCalls = m.native_tool_calls || [];
+          const allCalls = [...calls, ...nativeCalls.map(ntc => ({ name: ntc.name }))];
+          return allCalls.some(tc => tc.name === 'create_file' || tc.name === 'replace_string_in_file');
         });
 
-        if (agentMode === 'agent' && !planCompleted && !hasCreatedFiles) {
+        // Also check the current iteration's native tool calls
+        const hasCreatedThisIter = toolCalls.some(tc => tc.name === 'create_file' || tc.name === 'replace_string_in_file');
+
+        if (agentMode === 'agent' && !planCompleted && !hasCreatedFiles && !hasCreatedThisIter) {
           const questionPatterns = [
             /\?/,
             /^(before i|i need to|let me|first|should i|do you want|would you like)/i,
@@ -1128,18 +1190,54 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
         }
 
         // ── Completion detection: model says it's done ──
-        const donePhrases = [
-          /^task\s*complete/i,
-          /^job\s*complete/i,
-          /all\s*(requested\s*)?(files|tasks)\s*(are|have been)\s*(created|completed|done)/i,
-          /^i('ve| have)\s*(completed|finished|done)/i,
-          /^the\s*(task|job|project)\s*is\s*(complete|done|finished)/i,
-          /^\s*✅/m,
-        ];
-        const isDone = donePhrases.some(p => p.test(rawContent.trim()));
+        const isDone = DONE_PHRASES.some(p => p.test(rawContent.trim()));
+
+        // ── Auto-complete: files were created but model didn't say a done phrase ──
+        // After creating/modifying files, models often respond with text like
+        // "I've created hello.txt" which matches NO done phrase, causing an
+        // infinite nudge loop. If we've already done real work and the model
+        // has no more tool calls, assume completion.
+        const didFileWork = hasCreatedFiles || hasCreatedThisIter;
+        const isStuck = !isDone && didFileWork && !planCompleted;
+
         if (isDone) {
           console.log(`[agent-runner] Job ${jobId}: Model signaled completion at iteration ${iter}`);
           break;
+        }
+
+        if (isStuck) {
+          console.log(`[agent-runner] Job ${jobId}: Files created, no more tool calls — auto-completing`);
+          break;
+        }
+
+        // ── Detect repeated-tool loops (model calls same tool 3+ times without making file progress) ──
+        const recentToolNames = [];
+        for (let i = conversation.length - 1; i >= 0; i--) {
+          const m = conversation[i];
+          if (m.role !== 'assistant') continue;
+          const calls = parseToolCalls(m.content || '');
+          const nativeCalls = m.native_tool_calls || [];
+          for (const c of [...calls, ...nativeCalls.map(ntc => ({ name: ntc.name }))]) {
+            recentToolNames.push(c.name);
+          }
+          if (recentToolNames.length >= 4) break;
+        }
+        // Check if last 4 tool calls are all the same name
+        const repeatedTool = recentToolNames.length >= 3 &&
+          recentToolNames.slice(0, 3).every(t => t === recentToolNames[0]) &&
+          recentToolNames[0] !== 'create_file' &&
+          recentToolNames[0] !== 'replace_string_in_file';
+
+        if (repeatedTool) {
+          const tool = recentToolNames[0];
+          console.log(`[agent-runner] Job ${jobId}: Repeated ${tool} loop detected, forceful nudge`);
+          conversation.push({
+            role: 'user',
+            content: tool === 'list_dir'
+              ? `You've seen the workspace. STOP listing directories. Now CREATE the file the user requested: "${originalRequest}". Use create_file immediately. DO NOT list directories again.`
+              : `You've been using "${tool}" repeatedly. Make progress: create or edit files now. Stop using "${tool}".`
+          });
+          continue;
         }
 
         // ── Gentle nudge: model stopped without acting ──
@@ -1151,15 +1249,58 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
       }
 
       // ── Execute tools (no manifest skip — model writes freely) ──
+      const toolResults = [];
+
+      // ── Detect repeated-tool loops BEFORE executing (model keeps returning same tool) ──
+      const allToolNames = toolCalls.map(tc => tc.name);
+      const allSame = allToolNames.length > 0 && allToolNames.every(t => t === allToolNames[0]);
+      const allSamePaths = allSame && toolCalls.every(tc =>
+        (tc.args.filePath || tc.args.path || '') === (toolCalls[0].args.filePath || toolCalls[0].args.path || ''));
+      if (allSame && (allToolNames[0] === 'list_dir' || allToolNames[0] === 'read_file')) {
+        const repeatCount = (job._sameToolCount || 0) + 1;
+        job._sameToolCount = repeatCount;
+        if (repeatCount >= 3) {
+          console.log(`[agent-runner] Job ${jobId}: Repeated ${allToolNames[0]} loop (${repeatCount}x), forceful nudge`);
+          job._sameToolCount = 0;
+          conversation.push({
+            role: 'user',
+            content: allToolNames[0] === 'list_dir'
+              ? `You've been listing directories for ${repeatCount} iterations. STOP. The workspace is EMPTY. Just CREATE the file: "${originalRequest}". Use create_file NOW. DO NOT list anything.`
+              : `You've been reading files for ${repeatCount} iterations. STOP reading. Make changes NOW. Create or edit files: "${originalRequest}".`
+          });
+          continue;
+        }
+      } else if (allSamePaths && (allToolNames[0] === 'create_file' || allToolNames[0] === 'replace_string_in_file')) {
+        const repeatCount = (job._sameToolCount || 0) + 1;
+        job._sameToolCount = repeatCount;
+        if (repeatCount >= 3) {
+          console.log(`[agent-runner] Job ${jobId}: Repeated ${allToolNames[0]} on same file (${repeatCount}x), breaking`);
+          job._sameToolCount = 0;
+          break;
+        }
+      } else {
+        job._sameToolCount = 0;
+      }
+
       for (const tc of toolCalls) {
+        // Check for cancellation during tool execution (tools can be slow, e.g. npm install)
+        const cancelCheck = loadJob(jobId);
+        if (!cancelCheck || cancelCheck.status === 'cancelled') {
+          console.log(`[agent-runner] Job ${jobId} cancelled during tool execution at iteration ${iter}`);
+          job.status = 'cancelled';
+          saveJob(job);
+          return;
+        }
+
         const fp = tc.args.filePath || tc.args.path || '';
 
         // Execute tool — let the model write/overwrite anything freely
-        const result = await executeToolCall(tc, workspaceId);
+        const result = await executeToolCall(tc, workspaceId, userId);
+        toolResults.push({ tc, result, fp });
 
         // After create_file, verify the file actually exists on disk
         if (!result.error && tc.name === 'create_file' && fp) {
-          const verifyRes = await executeToolCall({ name: 'read_file', args: { filePath: fp } }, workspaceId);
+          const verifyRes = await executeToolCall({ name: 'read_file', args: { filePath: fp } }, workspaceId, userId);
           if (verifyRes.error) {
             conversation.push({
               role: 'user',
@@ -1191,28 +1332,73 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
         _agentEvents.emit(`job:${jobId}`, { type: 'files_changed', count: fileWriteTools.length });
       }
 
-      // ── Minimal feedback: just a brief tool result summary ──
-      const resultLines = toolCalls.map(tc => {
+      // ── Tool result feedback with actual data ──
+      const feedbackParts = [];
+      for (const { tc, result, fp } of toolResults) {
         const name = tc.name;
-        const fp = tc.args.filePath || tc.args.path || '';
         switch (name) {
-          case 'create_file': return `Created \`${fp}\``;
-          case 'replace_string_in_file': return `Patched \`${fp}\``;
-          case 'read_file': return `Read \`${fp}\``;
-          case 'list_dir': return `Listed \`${fp || '.'}\``;
-          case 'run_in_terminal': return `Ran: ${(tc.args.command || '').slice(0, 60)}`;
-          case 'dev_server_start': return `Started dev server`;
-          case 'dev_server_status': return `Checked dev server`;
-          default: return `${name} done`;
+          case 'create_file':
+            feedbackParts.push(`Created \`${fp}\``);
+            break;
+          case 'replace_string_in_file':
+            feedbackParts.push(`Patched \`${fp}\``);
+            break;
+          case 'read_file':
+            if (!result.error && result.content) {
+              const truncated = result.content.length > 4000 ? result.content.slice(0, 4000) + '\n... (truncated)' : result.content;
+              feedbackParts.push(`Read \`${fp}\`:\n\`\`\`\n${truncated}\n\`\`\``);
+            } else {
+              feedbackParts.push(`Read \`${fp}\`: ${result.error || 'empty'}`);
+            }
+            break;
+          case 'list_dir':
+            if (!result.error && result.files) {
+              const lines = result.files.map(f => {
+                const icon = f.type === 'directory' ? '📁' : '📄';
+                return `${icon} ${f.path || f.name}`;
+              });
+              feedbackParts.push(`Workspace files:\n${lines.join('\n')}`);
+            } else {
+              feedbackParts.push(`Listed \`${fp || '.'}\`: ${result.error || 'empty'}`);
+            }
+            break;
+          case 'run_in_terminal': {
+            const out = [result.stdout, result.stderr].filter(Boolean).join('\n').slice(0, 2000);
+            feedbackParts.push(`Ran: ${(tc.args.command || '').slice(0, 60)}\n\`\`\`\n${out || '(no output)'}\n\`\`\``);
+            break;
+          }
+          case 'dev_server_start':
+            feedbackParts.push(`Started dev server`);
+            break;
+          case 'dev_server_status':
+            feedbackParts.push(`Checked dev server`);
+            break;
+          case 'grep_search': {
+            if (!result.error && result.results) {
+              feedbackParts.push(`Search results for "${tc.args.query}": ${result.total} matches`);
+            } else {
+              feedbackParts.push(`Search "${tc.args.query}": ${result.error || 'no matches'}`);
+            }
+            break;
+          }
+          default:
+            feedbackParts.push(`${name} done`);
         }
-      }).join('; ');
+      }
 
       conversation.push({
         role: 'user',
-        content: `[Step ${iter + 1}] ${resultLines}`
+        content: `[Step ${iter + 1}] ${feedbackParts.join('\n')}`
       });
 
-      // ── Persist progress ──
+      // ── Persist progress (guard: don't overwrite a DB-side cancellation) ──
+      const preSaveCheck = loadJob(jobId);
+      if (!preSaveCheck || preSaveCheck.status === 'cancelled') {
+        console.log(`[agent-runner] Job ${jobId} cancelled (detected pre-save), exiting`);
+        job.status = 'cancelled';
+        saveJob(job);
+        return;
+      }
       job.iteration = iter + 1;
       job.planTodos = planTodos;
       job.planSummary = planSummary;
@@ -1221,21 +1407,29 @@ async function _runAgentJobImpl(jobId, job, userMessageId) {
       saveJob(job);
     }
 
-    // ── Post-loop summary ──
+    // ── Post-loop summary (only when the model didn't already say it's done) ──
     if (!planCompleted) {
-      let summary = 'Task complete.';
+      // Check if the model's last message already contained a done phrase.
+      // If so, the UI already shows a completion message — skip the duplicate.
+      const lastMsg = conversation.filter(m => m.role === 'assistant').pop();
+      const lastContent = (lastMsg?.content || '').replace(/^\[x\]\s*/gmi, '').trim();
+      const alreadySignaled = lastContent && DONE_PHRASES.some(p => p.test(lastContent));
 
-      try {
-        const base = `http://localhost:${process.env.PORT || 3000}`;
-        const devRes = await fetch(`${base}/api/workspace/${workspaceId}/dev-server`, { method: 'GET' });
-        const devData = devRes.ok ? await devRes.json() : null;
-        if (devData?.running) {
-          summary = `✅ Task complete. Dev server is running on port ${devData.port}.`;
-        }
-      } catch {}
+      if (!alreadySignaled) {
+        let summary = 'Task complete. ✅';
 
-      const summaryId = `agent_summary_${Date.now()}`;
-      await saveMessageToChat(chatId, 'assistant', summary, model, provider, summaryId, new Date().toISOString());
+        try {
+          const base = `http://localhost:${process.env.PORT || 3000}`;
+          const devRes = await fetch(`${base}/api/workspace/${workspaceId}/dev-server`, { method: 'GET' });
+          const devData = devRes.ok ? await devRes.json() : null;
+          if (devData?.running) {
+            summary = `✅ Task complete. Dev server is running on port ${devData.port}.`;
+          }
+        } catch {}
+
+        const summaryId = `agent_summary_${Date.now()}`;
+        await saveMessageToChat(chatId, 'assistant', summary, model, provider, summaryId, new Date().toISOString());
+      }
     }
 
     // ── Mark job completed ──
@@ -1368,9 +1562,17 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys, c
     }
   }
 
-  // Final save with complete content/thinking
+  // Final save with complete content/thinking — strip [x] echo and tool call syntax before persisting
   if (chatId && assistantId) {
-    saveMessageToChat(chatId, 'assistant', content, model, provider, assistantId, new Date().toISOString(), thinking);
+    let cleanContent = content;
+    if (cleanContent) {
+      cleanContent = cleanContent.replace(/^\[x\]\s*/gmi, '');
+      // Strip tool call syntax (fenced blocks, XML, brackets, etc.) so the UI
+      // doesn't show raw tool calls as visible text. Only affects local LLMs
+      // (non-native tool calling providers) since native tool_calls are separate.
+      cleanContent = stripToolCallsFromContent(cleanContent);
+    }
+    saveMessageToChat(chatId, 'assistant', cleanContent, model, provider, assistantId, new Date().toISOString(), thinking);
   }
 
   // Build native tool_calls from stream accumulator
@@ -1408,7 +1610,7 @@ async function llmCall(conversation, model, provider, thinkingEffort, apiKeys, c
  * Create and start a new agent job. Returns the job ID immediately.
  * The job runs asynchronously in the background.
  */
-export function startAgentJob({ workspaceId, chatId, userContent, userMessageId, model, provider, thinkingEffort, agentMode, systemPrompt, apiKeys, trimAfterMessageId }) {
+export function startAgentJob({ workspaceId, chatId, userId, userContent, userMessageId, model, provider, thinkingEffort, agentMode, systemPrompt, apiKeys, trimAfterMessageId }) {
   runMigrations();
   const db = getDb();
 
@@ -1489,8 +1691,15 @@ export function startAgentJob({ workspaceId, chatId, userContent, userMessageId,
 
   // Build initial conversation
   let systemPromptFinal = systemPrompt || buildSystemPrompt(workspaceId, effectiveMode, provider);
+  // Only inject Next.js tech stack when the user is explicitly building a web app.
+  // Don't inject for simple tasks like "create a file", "run a command", etc.
+  const webAppKeywords = /\b(website|web app|webapp|landing page|landing page|site|portfolio|dashboard|build a.*app|create a.*site|create a.*app|frontend|fullstack|spa|single page app)\b/i;
   const frameworkKeywords = /\b(next\.?js|nextjs|react|vue|angular|svelte|express|django|flask|fastapi|rails|laravel|static html|plain html|html only|vanilla js|python|go|rust|sveltekit|nuxt|remix|astro|gatsby|vite)\b/i;
-  const frameworkHint = frameworkKeywords.test(userContent) ? '' : '\n\nTECH STACK: Build this as a Next.js 16 + TypeScript + Tailwind CSS v3 project. Create files in the app/ directory (App Router). Do NOT use plain HTML.';
+  const userWantsWebApp = webAppKeywords.test(userContent);
+  const userSpecifiedFramework = frameworkKeywords.test(userContent);
+  const frameworkHint = (userWantsWebApp && !userSpecifiedFramework)
+    ? '\n\nTECH STACK: Build this as a Next.js 16 + TypeScript + Tailwind CSS v3 project. Create files in the app/ directory (App Router). Do NOT use plain HTML.'
+    : '';
 
   let effectiveUserContent = userContent;
 
@@ -1548,10 +1757,10 @@ export function startAgentJob({ workspaceId, chatId, userContent, userMessageId,
   }
 
   db.prepare(`
-    INSERT INTO agent_jobs (id, workspace_id, chat_id, status, model, provider, thinking_effort, agent_mode, user_request, plan_todos, plan_summary, iteration, conversation, file_manifest, api_keys)
-    VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, 0, ?, '[]', ?)
+    INSERT INTO agent_jobs (id, workspace_id, chat_id, user_id, status, model, provider, thinking_effort, agent_mode, user_request, plan_todos, plan_summary, iteration, conversation, file_manifest, api_keys)
+    VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, 0, ?, '[]', ?)
   `).run(
-    jobId, workspaceId, chatId,
+    jobId, workspaceId, chatId, userId || '',
     model, provider, thinkingEffort || 'high', effectiveMode, userContent,
     JSON.stringify(planTodos), planSummary,
     JSON.stringify(conversation),
@@ -1586,7 +1795,7 @@ export function cancelWorkspaceJobs(workspaceId) {
     const ac = _abortControllers.get(row.id);
     if (ac) {
       ac.abort();
-      _abortControllers.delete(row.job_id);
+      _abortControllers.delete(row.id);
     }
   }
 
