@@ -1,0 +1,29 @@
+{
+  "name": "aurora-code-server",
+  "version": "0.1.0",
+  "description": "Autonomous App Builder — Fork of code-server bundled with Cline, pre-configured for LM Studio",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "scripts": {
+    "build": "docker build -t aurora-code-server .",
+    "start": "bash scripts/entrypoint.sh",
+    "orchestrate": "node orchestrator/task-runner.js",
+    "api": "node orchestrator/api-server.js",
+    "install-ext": "bash scripts/install-cline.sh",
+    "preconfigure": "bash scripts/preconfigure-cline.sh",
+    "stop": "touch /tmp/orchestrator-stop",
+    "status": "cat /tmp/orchestrator-state.json 2>/dev/null || echo 'No state file — orchestrator not running'"
+  },
+  "keywords": [
+    "code-server",
+    "cline",
+    "lm-studio",
+    "autonomous-agent",
+    "coding-agent",
+    "vscode"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,76 @@
+# ── Dockerfile.slim — Lightweight code-server + Cline + Aurora orchestrator
+# Layers our orchestration on top of the official pre-built code-server image.
+# Much faster to build than the full source-compilation Dockerfile.
+#
+# Build:
+#   docker build -f Dockerfile.slim -t aurora-code-server .
+#
+# Run interactive:
+#   docker compose up -d
+#
+# Run headless:
+#   TASK="Build a React todo app" docker compose run --rm orchestrator
+
+FROM codercom/code-server:latest
+
+USER root
+
+# ── Install runtime deps ──────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    wget \
+    jq \
+    git \
+    openssh-client \
+    procps \
+    dumb-init \
+    npm \
+  && rm -rf /var/lib/apt/lists/*
+
+# ── Copy Aurora orchestration layer ───────────────────────────────────
+COPY scripts/ /opt/aurora/scripts/
+COPY orchestrator/ /opt/aurora/orchestrator/
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+COPY package.json /opt/aurora/package.json
+
+# Pre-install API server dependencies (express)
+RUN cd /opt/aurora && npm install --production
+
+RUN chmod +x /opt/aurora/scripts/*.sh /opt/aurora/orchestrator/task-runner.js /docker-entrypoint.sh
+
+# ── Make node available on PATH (code-server bundles its own) ─────────
+RUN ln -sf /usr/lib/code-server/lib/node /usr/local/bin/node && \
+    ln -sf /usr/lib/code-server/lib/node /usr/local/bin/nodejs
+
+ENV PATH="/usr/lib/code-server/lib:${PATH}"
+
+# ── Install Cline CLI globally (for headless orchestrator) ───────────
+RUN npm install -g cline
+
+# ── Set up workspace ──────────────────────────────────────────────────
+RUN mkdir -p /workspace && chown coder:coder /workspace
+
+# ── Pre-install Cline VS Code extension + preconfigure (cached) ──────
+ENV CODE_SERVER_DATA_DIR=/home/coder/.local/share/code-server \
+    LMSTUDIO_URL=http://localhost:1234/v1 \
+    LMSTUDIO_MODEL=qwen-coder \
+    WORKSPACE_DIR=/workspace
+
+# Install Cline extension during build so it's baked in
+RUN bash /opt/aurora/scripts/install-cline.sh || true
+
+# Preconfigure Cline settings (will be re-run at startup with actual env vars)
+RUN mkdir -p /home/coder/.local/share/code-server/User && \
+    bash /opt/aurora/scripts/preconfigure-cline.sh || true && \
+    chown -R coder:coder /home/coder/.local/share/code-server
+
+USER coder
+
+# ── Expose ───────────────────────────────────────────────────────────
+EXPOSE 8080 3001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:8080/healthz || exit 1
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/docker-entrypoint.sh"]
+CMD ["server"]

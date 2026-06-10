@@ -1,0 +1,20 @@
+{
+  "storage": {
+    "fs": {
+      "externalHost": "localhost:3000"
+    }
+  },
+  "services": {
+    "CoAuthoring": {
+      "request-filtering-agent": {
+        "allowPrivateIPAddress": true,
+        "allowMetaIPAddress": true
+      }
+    }
+  },
+  "externalRequest": {
+    "action": {
+      "blockPrivateIP": false
+    }
+  }
+}
