@@ -237,15 +237,42 @@ export async function POST(request, { params }) {
     const ext = path.extname(safePath).toLowerCase();
 
     if (ext === '.docx') {
-      if (content.type !== 'docx' || !content.html) {
+      let htmlContent = null;
+
+      // Structured format: { type: "docx", html: "..." }
+      if (content && typeof content === 'object' && content.type === 'docx' && content.html) {
+        htmlContent = content.html;
+      }
+      // Plain text content — wrap in HTML paragraphs
+      else if (typeof content === 'string') {
+        const paragraphs = content.split(/\n{2,}/).filter(Boolean);
+        htmlContent = paragraphs.map(p =>
+          `<p>${p.replace(/\n/g, '<br/>')}</p>`
+        ).join('\n');
+      }
+      // Plain text in object form (agent may send { content: "text" } or just the raw text)
+      else if (content && typeof content === 'object' && typeof content.content === 'string') {
+        const text = content.content;
+        const paragraphs = text.split(/\n{2,}/).filter(Boolean);
+        htmlContent = paragraphs.map(p =>
+          `<p>${p.replace(/\n/g, '<br/>')}</p>`
+        ).join('\n');
+      }
+      // Fallback: stringify whatever we got
+      else if (content) {
+        const text = typeof content === 'string' ? content : JSON.stringify(content);
+        htmlContent = `<p>${text.replace(/\n/g, '<br/>')}</p>`;
+      }
+
+      if (!htmlContent) {
         return NextResponse.json(
-          { error: { message: 'For .docx files, content must be { type: "docx", html: "..." }' } },
+          { error: { message: 'For .docx files, content must be { type: "docx", html: "..." } or a plain text string' } },
           { status: 400 }
         );
       }
 
       // Convert HTML to docx elements and build the document
-      const elements = htmlToDocxElements(content.html);
+      const elements = htmlToDocxElements(htmlContent);
       const doc = new Document({
         sections: [{
           properties: {},
@@ -256,9 +283,25 @@ export async function POST(request, { params }) {
       const buffer = await Packer.toBuffer(doc);
       fs.writeFileSync(safePath, buffer);
     } else if (ext === '.xlsx') {
-      if (content.type !== 'xlsx' || !content.sheets) {
+      // Accept plain 2D array as well as structured sheets format
+      let sheets = null;
+      if (content && typeof content === 'object' && content.type === 'xlsx' && content.sheets) {
+        sheets = content.sheets;
+      } else if (Array.isArray(content)) {
+        sheets = [{ name: 'Sheet1', rows: content }];
+      } else if (content && typeof content === 'object' && Array.isArray(content.sheets)) {
+        sheets = content.sheets;
+      } else if (typeof content === 'string') {
+        // Parse CSV-like string
+        const rows = content.split('\n').filter(Boolean).map(line =>
+          line.split(',').map(cell => cell.trim())
+        );
+        sheets = [{ name: 'Sheet1', rows }];
+      }
+
+      if (!sheets) {
         return NextResponse.json(
-          { error: { message: 'For .xlsx files, content must be { type: "xlsx", sheets: [...] }' } },
+          { error: { message: 'For .xlsx files, content must be { type: "xlsx", sheets: [...] }, a 2D array, or a CSV string' } },
           { status: 400 }
         );
       }

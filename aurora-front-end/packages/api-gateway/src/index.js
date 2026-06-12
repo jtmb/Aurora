@@ -86,6 +86,9 @@ export async function POST(request) {
       case 'anthropic':
         return await proxyToAnthropic(body, request);
       
+      case 'deepseek':
+        return await proxyToDeepSeek(body);
+      
       case 'ollama':
       case 'lmstudio':
         return await proxyToLocalProvider(modelName, body);
@@ -123,8 +126,15 @@ function detectProvider(modelName) {
     return { id: 'ollama', name: 'Ollama' };
   }
   
+  // Check for DeepSeek models (deepseek-chat, deepseek-reasoner, etc.)
+  if (/^deepseek/i.test(modelName)) {
+    const apiKey = getApiKey('DEEPSEEK');
+    if (apiKey) {
+      return { id: 'deepseek', name: 'DeepSeek' };
+    }
+  }
+  
   // Check for LM Studio models (they use OpenAI naming but run local)
-  const lmStudioBaseUrl = `http://${lmConfig.host}:${lmConfig.port}`;
   if (!process.env.OPENAI_API_KEY && !localStorage.getItem('OPENAI_API_KEY')) {
     // Without OpenAI API key, treat as local LM Studio
     return { id: 'lmstudio', name: 'LM Studio' };
@@ -201,6 +211,52 @@ async function proxyFetch(url, body) {
     }
     
     throw error;
+  }
+}
+
+/**
+ * Proxy request to DeepSeek API (OpenAI-compatible)
+ */
+async function proxyToDeepSeek(body) {
+  const apiKey = getApiKey('DEEPSEEK');
+  
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: 'No DeepSeek API key configured' },
+      { status: 401 }
+    );
+  }
+
+  const url = 'https://api.deepseek.com/v1/chat/completions';
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error?.message || `HTTP ${response.status}`);
+    }
+
+    return response;
+
+  } catch (error) {
+    console.error('DeepSeek proxy error:', error.message);
+    
+    return NextResponse.json(
+      { 
+        error: {
+          message: `Failed to connect to DeepSeek API: ${error.message}`
+        }
+      },
+      { status: 503 }
+    );
   }
 }
 

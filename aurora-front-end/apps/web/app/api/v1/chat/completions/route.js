@@ -100,11 +100,29 @@ const extractKeysFromHeaders = async (request) => {
     try {
       runMigrations();
       const db = getDb();
-      // Get the first available provider_settings row (single-user setups)
-      const row = db.prepare('SELECT settings_json FROM provider_settings LIMIT 1').get();
+      // Get ALL provider_settings rows and prefer one with deepseek enabled
+      const rows = db.prepare('SELECT settings_json FROM provider_settings').all();
+      let bestRow = null;
+      for (const row of rows) {
+        try {
+          const s = JSON.parse(row.settings_json);
+          // Prefer row where deepseek is enabled and has a key
+          if (s.providerEnabled?.deepseek && s.deepseek) {
+            bestRow = row;
+            break;
+          }
+          // Fallback: prefer row with lmstudio enabled
+          if (!bestRow && s.providerEnabled?.lmstudio) {
+            bestRow = row;
+          }
+          // Last resort: any row
+          if (!bestRow) bestRow = row;
+        } catch { /* skip malformed rows */ }
+      }
+      const row = bestRow || rows[0];
       if (row) {
         const s = JSON.parse(row.settings_json);
-        if (s.deepseek && !headerKeys.deepseek) headerKeys.deepseek = s.deepseek;
+        if (s.deepseek && !headerKeys.deepseek && s.providerEnabled?.deepseek !== false) headerKeys.deepseek = s.deepseek;
         if (s.lmStudioUrl && !headerKeys.lmStudioUrl) headerKeys.lmStudioUrl = s.lmStudioUrl;
         if (!headerKeys.lmStudioUrl && s.lmStudioHost && s.lmStudioPort) {
           headerKeys.lmStudioUrl = `http://${s.lmStudioHost}:${s.lmStudioPort}/v1`;
@@ -116,6 +134,12 @@ const extractKeysFromHeaders = async (request) => {
     } catch (err) {
       console.error('[Aurora] DB fallback (no-auth) failed:', err.message);
     }
+    // Final fallback: environment variables
+    if (!headerKeys.deepseek && process.env.DEEPSEEK_API_KEY) headerKeys.deepseek = process.env.DEEPSEEK_API_KEY;
+    if (!headerKeys.lmStudioUrl && process.env.LMSTUDIO_URL) headerKeys.lmStudioUrl = process.env.LMSTUDIO_URL;
+    if (!headerKeys.lmStudioHost && process.env.LM_STUDIO_HOST) headerKeys.lmStudioHost = process.env.LM_STUDIO_HOST;
+    if (!headerKeys.lmStudioPort && process.env.LM_STUDIO_PORT) headerKeys.lmStudioPort = process.env.LM_STUDIO_PORT;
+    if (!headerKeys.lmStudioApiKey && process.env.LMSTUDIO_API_KEY) headerKeys.lmStudioApiKey = process.env.LMSTUDIO_API_KEY;
     return headerKeys;
   }
 
@@ -136,6 +160,13 @@ const extractKeysFromHeaders = async (request) => {
     if (!headerKeys.lmStudioPort && dbKeys.lmStudioPort) headerKeys.lmStudioPort = dbKeys.lmStudioPort;
     if (!headerKeys.lmStudioApiKey && dbKeys.lmStudioApiKey) headerKeys.lmStudioApiKey = dbKeys.lmStudioApiKey;
   }
+
+  // Final fallback: environment variables (for both auth and no-auth paths)
+  if (!headerKeys.deepseek && process.env.DEEPSEEK_API_KEY) headerKeys.deepseek = process.env.DEEPSEEK_API_KEY;
+  if (!headerKeys.lmStudioUrl && process.env.LMSTUDIO_URL) headerKeys.lmStudioUrl = process.env.LMSTUDIO_URL;
+  if (!headerKeys.lmStudioHost && process.env.LM_STUDIO_HOST) headerKeys.lmStudioHost = process.env.LM_STUDIO_HOST;
+  if (!headerKeys.lmStudioPort && process.env.LM_STUDIO_PORT) headerKeys.lmStudioPort = process.env.LM_STUDIO_PORT;
+  if (!headerKeys.lmStudioApiKey && process.env.LMSTUDIO_API_KEY) headerKeys.lmStudioApiKey = process.env.LMSTUDIO_API_KEY;
 
   return headerKeys;
 };
@@ -215,16 +246,45 @@ const normalizeToOpenAIFormat = (data, providerId, modelName) => {
   // DeepSeek / LM Studio — already OpenAI-compatible
   // Preserve cache hit tokens when present (DeepSeek disk cache)
   const usage = data.usage || {};
+  // Preserve reasoning_content from providers that emit it (Qwen, DeepSeek R1, etc.)
+  const normalizeMessage = (msg) => {
+    const result = { role: msg?.role || 'assistant' };
+    const rawContent = msg?.content || '';
+    const rawReasoning = msg?.reasoning_content || '';
+
+    // If the model spent all tokens on reasoning and produced no content,
+    // surface the reasoning as content so the UI isn't blank
+    if (!rawContent && rawReasoning) {
+      result.content = rawReasoning;
+      result.reasoning_content = rawReasoning;
+      result.reasoning_truncated = true;
+    } else {
+      result.content = rawContent;
+      if (rawReasoning) result.reasoning_content = rawReasoning;
+    }
+
+    // Preserve tool_calls if present
+    if (msg?.tool_calls) result.tool_calls = msg.tool_calls;
+    return result;
+  };
+
+  const rawChoices = data.choices || [{
+    index: 0,
+    message: { role: 'assistant', content: data.message?.content || '' },
+    finish_reason: 'stop'
+  }];
+
   return {
     id: data.id || `chatcmpl-${Date.now()}`,
     object: 'chat.completion',
     created: data.created || Math.floor(Date.now() / 1000),
     model: data.model || modelName,
-    choices: data.choices || [{
-      index: 0,
-      message: { role: 'assistant', content: data.message?.content || '' },
-      finish_reason: 'stop'
-    }],
+    choices: rawChoices.map((c, i) => ({
+      index: c.index ?? i,
+      message: normalizeMessage(c.message),
+      finish_reason: c.finish_reason || 'stop',
+      logprobs: c.logprobs || null,
+    })),
     usage: {
       prompt_tokens: usage.prompt_tokens || 0,
       completion_tokens: usage.completion_tokens || 0,
@@ -241,6 +301,8 @@ const normalizeToOpenAIFormat = (data, providerId, modelName) => {
  */
 const buildProviderRequest = (provider, model, messages, temperature, maxTokens, stream = false, extraParams = {}) => {
   let url, body, headers = { 'Content-Type': 'application/json' };
+  // Reasoning models (Qwen, DeepSeek R1, etc.) need more tokens — default 8192
+  const effectiveMaxTokens = maxTokens || 8192;
 
   switch (provider.id) {
     case 'lmstudio':
@@ -248,7 +310,7 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens,
       // Ensure /v1 prefix regardless of whether settings already includes it
       const lmBase = provider.baseUrl.endsWith('/v1') ? provider.baseUrl : `${provider.baseUrl}/v1`;
       url = `${lmBase}/chat/completions`;
-      body = { model, messages, temperature, max_tokens: maxTokens, stream, ...extraParams };
+      body = { model, messages, temperature, max_tokens: effectiveMaxTokens, stream, ...extraParams };
       // OpenAI-compatible: request usage stats in stream chunks (needed for token tracking)
       if (stream) {
         body.stream_options = { include_usage: true };
@@ -264,7 +326,7 @@ const buildProviderRequest = (provider, model, messages, temperature, maxTokens,
       body = {
         model,
         messages,
-        max_tokens: maxTokens,
+        max_tokens: effectiveMaxTokens,
         stream,
         ...extraParams,
         // Only add temperature/top_p if NOT in thinking mode

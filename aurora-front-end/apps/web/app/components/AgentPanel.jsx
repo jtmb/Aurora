@@ -27,8 +27,7 @@ export default function AgentPanel({
   codeMode,
   previewInfo,
   onFileTreeChange,
-  showPlanTab = true,
-  hideBottomControls = false
+  onDocumentChanged
 }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -44,8 +43,8 @@ export default function AgentPanel({
   const retryTrimAfterIdRef = useRef(null);  // message ID to trim DB history after on retry
 
   // --- Copilot-style agent controls ---
-  const [agentMode, setAgentMode] = useState('chat');       // 'chat' | 'plan' | 'agent'
-  const agentModeRef = useRef('chat');                       // synchronous mirror for sendMessage
+  const [agentMode, setAgentMode] = useState('agent');       // always 'agent' — full tool access for document writes
+  const agentModeRef = useRef('agent');                      // synchronous mirror for sendMessage
   useEffect(() => { agentModeRef.current = agentMode; }, [agentMode]);
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedProvider, setSelectedProvider] = useState('lmstudio');
@@ -55,7 +54,6 @@ export default function AgentPanel({
   const [expandedThinkingIds, setExpandedThinkingIds] = useState(new Set());
   const [expandedToolIds, setExpandedToolIds] = useState(new Set());
   const [planTodos, setPlanTodos] = useState([]); // [{ id, text, done, dependsOn, complexity, phase, phaseNum }]
-  const [planGenerationPhase, setPlanGenerationPhase] = useState('idle'); // 'idle' | 'thinking' | 'generating' | 'complete'
   const [workspaceAgentsMd, setWorkspaceAgentsMd] = useState(''); // AGENTS.md content for system prompt injection
   const planTodosRef = useRef(planTodos); // stays in sync for async loop access
   useEffect(() => { planTodosRef.current = planTodos; }, [planTodos]);
@@ -76,7 +74,6 @@ export default function AgentPanel({
   const [activeJobId, setActiveJobId] = useState(null); // server-side agent job ID
   const pollingRef = useRef(null); // polling interval ref
 
-  const orchAbortRef = useRef(null); // orchestrator tail abort function
   // ── Self-improving corpus + agent-learned skills ──
   const [corpusEntries, setCorpusEntries] = useState([]);
   const [skills, setSkills] = useState([]);
@@ -225,227 +222,7 @@ export default function AgentPanel({
       }
     }
 
-    // Fallback: markdown heading sections with bullet points (### N. Title + - items)
-    if (todos.length === 0) {
-      const headingSectionRegex = /^#{1,4}\s*(?:\d+[\.\)]\s*)?([^\n]+)\n([\s\S]*?)(?=\n#{1,4}\s|\n*$)/gm;
-      let hMatch;
-      while ((hMatch = headingSectionRegex.exec(content)) !== null) {
-        const sectionTitle = hMatch[1].trim();
-        const sectionBody = hMatch[2];
-        // Skip non-task sections
-        if (/summary|overview|architecture|dependencies|edge\s*case|testing|conclusion|introduction/i.test(sectionTitle)) {
-          // Still try to extract bullet items from these sections
-          const bulletRegex = /^\s*[-*]\s+(.+)$/gm;
-          let bm;
-          while ((bm = bulletRegex.exec(sectionBody)) !== null) {
-            let text = bm[1].trim();
-            if (text.length < 5) continue;
-            if (/^\d+\s+tasks?$/i.test(text)) continue;
-            const dependsMatch = text.match(/\*\s*depends on\s+(.+?)\*\s*$/i);
-            todos.push({
-              id: `plan_${todos.length}`,
-              text: dependsMatch ? text.replace(dependsMatch[0], '').trim() : text,
-              done: false,
-              complexity: '🟢',
-              phase: sectionTitle,
-              phaseNum: todos.length,
-              dependsOn: dependsMatch ? dependsMatch[1].trim() : null
-            });
-          }
-        } else {
-          // Task section — each bullet is a todo
-          const bulletRegex = /^\s*[-*]\s+(.+)$/gm;
-          let bm;
-          while ((bm = bulletRegex.exec(sectionBody)) !== null) {
-            let text = bm[1].trim();
-            if (text.length < 5) continue;
-            const dependsMatch = text.match(/\*\s*depends on\s+(.+?)\*\s*$/i);
-            todos.push({
-              id: `plan_${todos.length}`,
-              text: dependsMatch ? text.replace(dependsMatch[0], '').trim() : text,
-              done: false,
-              complexity: '🟢',
-              phase: sectionTitle,
-              phaseNum: todos.length,
-              dependsOn: dependsMatch ? dependsMatch[1].trim() : null
-            });
-          }
-        }
-      }
-    }
-
-    // Fallback: numbered bold-header format (e.g. "1. **Create file**: description")
-    if (todos.length === 0) {
-      const numberedBoldRegex = /^\s*(\d+)[\.\)]\s*\*?\*?\s*([^*\n]+?)\*?\*?\s*[:—\-]\s*(.+)$/gm;
-      let m;
-      while ((m = numberedBoldRegex.exec(content)) !== null) {
-        const title = m[2].trim();
-        const desc = m[3].trim();
-        // Skip non-actionable sections
-        if (/architecture|overview|dependencies|edge\s*case|testing|strategy|conclusion|introduction/i.test(title)) {
-          continue;
-        }
-        const text = desc.length > 3 ? `${title}: ${desc}` : title;
-        todos.push({
-          id: `plan_${todos.length}`,
-          text,
-          done: false,
-          complexity: '🟢',
-          phase: 'Tasks',
-          phaseNum: todos.length,
-          dependsOn: null
-        });
-      }
-    }
-
-    // Fallback: simple numbered lines (last resort — "1. Do something")
-    if (todos.length === 0) {
-      const numberedRegex = /^\s*(\d+)[\.\)]\s+(.+)$/gm;
-      let m;
-      while ((m = numberedRegex.exec(content)) !== null) {
-        const text = m[2].trim();
-        // Filter out section headers and non-actionable lines
-        if (text.length < 8) continue;
-        if (/^(architecture|dependencies|edge\s*case|testing|strategy|conclusion|introduction|overview)/i.test(text)) continue;
-        if (/^\*{1,2}.+\*{1,2}\s*$/.test(text)) continue; // bare bold line (section header)
-        todos.push({
-          id: `plan_${todos.length}`,
-          text: text.replace(/^\*{1,2}|\*{1,2}$/g, '').trim(),
-          done: false,
-          complexity: '🟢',
-          phase: 'Tasks',
-          phaseNum: todos.length,
-          dependsOn: null
-        });
-      }
-    }
-
-    // Summary extraction: try multiple patterns
-    if (!summary) {
-      // Pattern 1: bold text after "Summary" heading
-      const sumHeadingMatch = content.match(/#{1,4}\s*Summary\s*\n+(.+?)(?=\n#{1,4}|\n\n|$)/is);
-      if (sumHeadingMatch) summary = sumHeadingMatch[1].trim();
-      // Pattern 2: first meaningful paragraph if no headings
-      if (!summary) {
-        const firstPara = content.match(/^([^#\n]{20,})/m);
-        if (firstPara) summary = firstPara[1].trim().slice(0, 300);
-      }
-    }
-
     return { todos, summary };
-  };
-
-  // Incremental plan parser — runs on every stream chunk in Plan mode.
-  // Extracts `- [ ]` / `- [x]` todo items as they arrive, updating planTodos in real-time.
-  // Returns { todos, summary, inProgress } — only emits fully-formed todo lines.
-  const parsePlanTodosIncremental = (text) => {
-    const todos = [];
-    let summary = '';
-    let inProgress = false;
-
-    // Extract summary text (between "### Summary" and "### Tasks" or end)
-    const summaryMatch = text.match(/###\s*Summary\s*\n([\s\S]*?)(?=\n###\s*Tasks|\n*$)/i);
-    if (summaryMatch && summaryMatch[1].trim().length > 10) {
-      summary = summaryMatch[1].trim();
-    }
-
-    // Check if we're still in the plan generation phase
-    if (!summary && !text.match(/###\s*(?:Summary|Tasks)/i)) {
-      inProgress = true;
-    }
-
-    const seen = new Set();
-
-    // Extract checkboxes: - [ ] or - [x] followed by task text
-    const taskRegex = /^\s*-\s*\[([ xX])\]\s+(.+)$/gm;
-    let match;
-    while ((match = taskRegex.exec(text)) !== null) {
-      const rawText = match[2].trim();
-      const done = match[1].toLowerCase() === 'x';
-      if (seen.has(rawText)) continue;
-      seen.add(rawText);
-      const dependsMatch = rawText.match(/[—\-]\s*\*?\s*depends?\s+on:\s*(.+?)\*?\s*$/i);
-      const text2 = dependsMatch
-        ? rawText.slice(0, dependsMatch.index).replace(/\s*[—\-]\s*$/, '').trim()
-        : rawText;
-      todos.push({
-        id: `plan_${todos.length}`, text: text2, done,
-        complexity: '🟢', phase: 'Tasks', phaseNum: 0,
-        dependsOn: dependsMatch ? dependsMatch[1].trim() : null
-      });
-    }
-
-    // Fallback: heading sections with bullet points
-    if (todos.length === 0) {
-      const headingSectionRegex = /^#{1,4}\s*(?:\d+[\.\)]\s*)?([^\n]+)\n([\s\S]*?)(?=\n#{1,4}\s|\n*$)/gm;
-      let hMatch;
-      while ((hMatch = headingSectionRegex.exec(text)) !== null) {
-        const sectionTitle = hMatch[1].trim();
-        const sectionBody = hMatch[2];
-        const bulletRegex = /^\s*[-*]\s+(.+)$/gm;
-        let bm;
-        while ((bm = bulletRegex.exec(sectionBody)) !== null) {
-          let t = bm[1].trim();
-          if (t.length < 5) continue;
-          if (seen.has(t)) continue;
-          seen.add(t);
-          if (/^\d+\s+tasks?$/i.test(t)) continue;
-          const dependsMatch = t.match(/\*\s*depends on\s+(.+?)\*\s*$/i);
-          todos.push({
-            id: `plan_${todos.length}`,
-            text: dependsMatch ? t.replace(dependsMatch[0], '').trim() : t,
-            done: false, complexity: '🟢',
-            phase: sectionTitle, phaseNum: todos.length,
-            dependsOn: dependsMatch ? dependsMatch[1].trim() : null
-          });
-        }
-      }
-    }
-
-    // Fallback: numbered bold-header format ("1. **Task**: desc")
-    if (todos.length === 0) {
-      const numberedBoldRegex = /^\s*(\d+)[\.\)]\s*\*?\*?\s*([^*\n]+?)\*?\*?\s*[:—\-]\s*(.+)$/gm;
-      let m;
-      while ((m = numberedBoldRegex.exec(text)) !== null) {
-        const title = m[2].trim();
-        const desc = m[3].trim();
-        if (/architecture|overview|dependencies|edge\s*case|testing|strategy|conclusion|introduction/i.test(title)) continue;
-        const taskText = desc.length > 3 ? `${title}: ${desc}` : title;
-        if (seen.has(taskText)) continue;
-        seen.add(taskText);
-        todos.push({
-          id: `plan_${todos.length}`, text: taskText, done: false,
-          complexity: '🟢', phase: 'Tasks', phaseNum: todos.length, dependsOn: null
-        });
-      }
-    }
-
-    // Fallback: simple numbered lines (last resort)
-    if (todos.length === 0) {
-      const numberedRegex = /^\s*(\d+)[\.\)]\s+(.+)$/gm;
-      let m;
-      while ((m = numberedRegex.exec(text)) !== null) {
-        const lineText = m[2].trim();
-        if (lineText.length < 8) continue;
-        if (/^(architecture|dependencies|edge\s*case|testing|strategy|conclusion|introduction|overview)/i.test(lineText)) continue;
-        if (/^\*{1,2}.+\*{1,2}\s*$/.test(lineText)) continue;
-        const clean = lineText.replace(/^\*{1,2}|\*{1,2}$/g, '').trim();
-        if (seen.has(clean)) continue;
-        seen.add(clean);
-        todos.push({
-          id: `plan_${todos.length}`, text: clean, done: false,
-          complexity: '🟢', phase: 'Tasks', phaseNum: todos.length, dependsOn: null
-        });
-      }
-    }
-
-    // Summary fallback
-    if (!summary) {
-      const sumHeadingMatch = text.match(/#{1,4}\s*Summary\s*\n+(.+?)(?=\n#{1,4}|\n\n|$)/is);
-      if (sumHeadingMatch) summary = sumHeadingMatch[1].trim();
-    }
-
-    return { todos, summary, inProgress };
   };
 
   // Flatten a file tree (from /api/workspace/[id]/tree) into a flat list of { name, path, type }
@@ -499,182 +276,22 @@ export default function AgentPanel({
 
   // Load saved prefs + fetch models on mount
   useEffect(() => {
-    const savedMode = localStorage.getItem('aurora_agent_mode');
-    if (savedMode) setAgentMode(savedMode);
+    console.log('[AgentPanel] useEffect mount: fetching models');
     const savedModel = localStorage.getItem('aurora_agent_model');
     if (savedModel) setSelectedModel(savedModel);
     const savedProvider = localStorage.getItem('aurora_agent_provider');
     if (savedProvider) setSelectedProvider(savedProvider);
     const savedThinking = localStorage.getItem('aurora_agent_thinking');
     if (savedThinking) setThinkingEffort(savedThinking);
-    fetchModels();
+    // Delay fetch slightly to ensure component is fully mounted
+    const timer = setTimeout(() => fetchModels(), 100);
+    return () => clearTimeout(timer);
   }, []);
 
   // Persist preferences
-  useEffect(() => { localStorage.setItem('aurora_agent_mode', agentMode); }, [agentMode]);
   useEffect(() => { if (selectedModel) localStorage.setItem('aurora_agent_model', selectedModel); }, [selectedModel]);
   useEffect(() => { localStorage.setItem('aurora_agent_provider', selectedProvider); }, [selectedProvider]);
   useEffect(() => { localStorage.setItem('aurora_agent_thinking', thinkingEffort); }, [thinkingEffort]);
-
-  // ── Reconnect to active orchestrator job on mount (survives page refresh) ──
-  const reconnectAttemptedRef = useRef(false);
-  useEffect(() => {
-    if (reconnectAttemptedRef.current) return;
-    if (!workspaceId) return;
-    reconnectAttemptedRef.current = true;
-
-    const savedJobId = typeof window !== 'undefined' ? localStorage.getItem('aurora_active_job_id') : null;
-    if (!savedJobId) return;
-
-    let cancelled = false;
-
-    (async () => {
-      try {
-        // Verify the job still exists and is running
-        const jobRes = await fetch(`/api/orchestrator/jobs/${savedJobId}`, {
-          headers: getAuthHeaders()
-        });
-        if (!jobRes.ok || cancelled) {
-          localStorage.removeItem('aurora_active_job_id');
-          return;
-        }
-        const job = await jobRes.json();
-        if (job.status !== 'running' || cancelled) {
-          localStorage.removeItem('aurora_active_job_id');
-          return;
-        }
-
-        // Job is still running — reconnect SSE stream
-        const { tailJob } = await import('@/lib/orchestrator-client');
-        setActiveJobId(savedJobId);
-        setIsStreaming(true);
-        setIsThinking(true);
-        console.log('[AgentPanel] Reconnected to running job', savedJobId);
-
-        let reconnectedContent = '';
-        let reconnectedThinking = '';
-        let messageCreated = false;
-        const assistantId = `agent_asst_${Date.now()}`;
-
-        const updateMsg = (content, thinking) => {
-          setMessages(prev => {
-            const existing = prev.find(m => m.id === assistantId);
-            if (existing) {
-              return prev.map(m => m.id === assistantId
-                ? { ...m, content, thinking: thinking || undefined }
-                : m);
-            }
-            return [...prev, {
-              id: assistantId, role: 'assistant',
-              content, thinking: thinking || undefined,
-              timestamp: new Date().toISOString(),
-              model: selectedModel, provider: 'orchestrator',
-              turnId: `reconnect_${Date.now()}`
-            }];
-          });
-        };
-
-        const abort = tailJob(savedJobId, {
-          onLine: (line) => {
-            if (cancelled) return;
-            const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
-            const stripped = stripAnsi(line);
-            const isThinkingLine = stripped.startsWith('[thinking]');
-            if (isThinkingLine) {
-              const thinkText = stripped.replace(/^\[thinking\]\s*/, '');
-              reconnectedThinking += (reconnectedThinking ? '\n' : '') + thinkText;
-            } else {
-              let cleanLine = stripped;
-              if (/^[╔╠╚║═]+$/.test(cleanLine.trim())) return;
-              if (/^\[hook:(?:agent_start|agent_end|tool_call|tool_result)\]\$/.test(cleanLine)) return;
-              if (/^\[model\]\s+/.test(cleanLine)) return;
-              if (/^\[.*\]$/.test(cleanLine) && cleanLine.length < 40) return;
-              if (/^(?:🧠\s*PLANNING|📋\s*Plan|\s*Provider:|\s*Model:|\s*Workspace:|\s*Timeout:|\s*Base\s*URL:|\s*API\s*Key:|\s*Plan\s*First:|\s*Max\s*Iters:|\s*Stop\s*File:|\s*LM\s*Studio:)/.test(cleanLine)) return;
-              if (/^🤖\s*Cline\s*CLI/.test(cleanLine)) return;
-              if (/^(?:Task|Workspace|Max\s+Iters|Plan\s+First|Stop\s+File|LM\s+Studio)\s*:/.test(cleanLine.trim())) return;
-              if (/^(?:📋\s*Plan\s+phase\s+exited|📝\s*Plan\s+captured|📊\s*FINAL\s*REPORT|⏹\s*Orchestrator\s+stopped)/.test(cleanLine)) return;
-              if (/^(?:✅\s*Task\s+completion\s+detected|✅\s*\*\*\s*Task\s+Complete)/.test(cleanLine)) return;
-              if (/^── (?:finished|start)/.test(cleanLine)) return;
-              if (/\[\d+\.\d+s\s*\|\s*\d+\s+(?:in|tokens)/.test(cleanLine)) return;
-              if (!cleanLine.trim()) return;
-              reconnectedContent += (reconnectedContent ? '\n' : '') + cleanLine;
-            }
-            updateMsg(reconnectedContent, reconnectedThinking);
-          },
-          onDone: () => {
-            if (cancelled) return;
-            setActiveJobId(null);
-            localStorage.removeItem('aurora_active_job_id');
-            setIsStreaming(false);
-            setIsThinking(false);
-            orchAbortRef.current = null;
-            if (reconnectedContent || reconnectedThinking) {
-              saveMessageToChat('assistant', reconnectedContent, selectedModel, 'orchestrator', assistantId, new Date().toISOString(), reconnectedThinking);
-            }
-            onFileTreeChange?.();
-          },
-          onError: () => {
-            if (cancelled) return;
-            setActiveJobId(null);
-            localStorage.removeItem('aurora_active_job_id');
-            setIsStreaming(false);
-            setIsThinking(false);
-            orchAbortRef.current = null;
-          }
-        });
-        orchAbortRef.current = abort;
-      } catch (err) {
-        console.error('[AgentPanel] Reconnect failed:', err.message || err);
-        localStorage.removeItem('aurora_active_job_id');
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [workspaceId]);
-
-  // ── Cleanup SSE connection on page leave (5s grace window handles reconnection) ──
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      // Only abort the SSE stream — do NOT stop the job via beacon.
-      // The orchestrator's 5-second disconnect timer will auto-stop
-      // the job if the page doesn't reconnect in time.
-      if (orchAbortRef.current) {
-        try { orchAbortRef.current(); } catch (_) {}
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []);
-
-  // ── Pause long-running job when tab is hidden for >30s ──
-  useEffect(() => {
-    let hiddenTimer = null;
-    const handleVisibility = () => {
-      if (document.hidden) {
-        hiddenTimer = setTimeout(() => {
-          const jobId = typeof window !== 'undefined' ? localStorage.getItem('aurora_active_job_id') : null;
-          if (jobId) {
-            console.log('[AgentPanel] Tab hidden >30s — stopping job', jobId);
-            fetch(`/api/orchestrator/jobs/${encodeURIComponent(jobId)}/stop`, { method: 'POST' }).catch(() => {});
-            if (orchAbortRef.current) {
-              try { orchAbortRef.current(); } catch (_) {}
-            }
-            setActiveJobId(null);
-            localStorage.removeItem('aurora_active_job_id');
-            setIsStreaming(false);
-            setIsThinking(false);
-          }
-        }, 30000);
-      } else {
-        if (hiddenTimer) { clearTimeout(hiddenTimer); hiddenTimer = null; }
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibility);
-      if (hiddenTimer) clearTimeout(hiddenTimer);
-    };
-  }, []);
 
   // ── Polling: fetch new messages and job status while a server-side job is active ──
   const pollingGraceRef = useRef(0);
@@ -683,9 +300,6 @@ export default function AgentPanel({
       if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
       return;
     }
-
-    // Orchestrator handles streaming via SSE callbacks — skip legacy polling
-    if (orchAbortRef.current) return;
 
     pollingGraceRef.current = Date.now() + 4000; // 4-second grace period before accepting "no active job"
 
@@ -797,7 +411,47 @@ export default function AgentPanel({
           if (!statusData.active) {
             // Don't kill polling during the grace period — the job may not be created yet
             if (Date.now() < pollingGraceRef.current) return;
-            // Job finished (completed or failed)
+            // Job finished — fetch messages one final time to ensure we catch the DB save
+            // Fixes race condition: DB save between message-fetch and status-fetch would
+            // otherwise leave messages invisible until page refresh
+            try {
+              const token2 = localStorage.getItem('auth_token');
+              const finalRes = await fetch(`/api/chats/${workspaceChatId}/messages`, {
+                headers: { 'Authorization': `Bearer ${token2}` }
+              });
+              if (finalRes.ok) {
+                const finalData = await finalRes.json();
+                const sms = finalData.messages || [];
+                setMessages(prev => {
+                  const existingById = new Map(prev.map(m => [m.id, m]));
+                  let changed = false;
+                  let merged = [...prev];
+                  for (const sm of sms) {
+                    const existing = existingById.get(sm.id);
+                    if (existing) {
+                      if (existing.role === 'assistant' &&
+                          (existing.content !== sm.content || (existing.thinking || '') !== (sm.thinking || ''))) {
+                        existing.content = sm.content;
+                        existing.thinking = sm.thinking || '';
+                        changed = true;
+                      }
+                    } else if (sm.role === 'assistant') {
+                      const msgObj = { id: sm.id, role: 'assistant', content: sm.content, thinking: sm.thinking || '', timestamp: sm.timestamp, model: sm.model, provider: sm.provider };
+                      const tcs = parseToolCalls(sm.content);
+                      if (tcs.length > 0) msgObj.toolCalls = tcs.map((tc, i) => ({ ...tc, id: `${msgObj.id}_tool_${i}`, status: 'done' }));
+                      merged.push(msgObj);
+                      changed = true;
+                    } else if (sm.role === 'user') {
+                      merged.push({ id: sm.id, role: 'user', content: sm.content, timestamp: sm.timestamp, turnId: sm.id });
+                      changed = true;
+                    }
+                  }
+                  const hasDb = sms.some(s => s.role === 'assistant' && !s.id.startsWith('agent_asst_'));
+                  if (hasDb) { merged = merged.filter(m => !m.id.startsWith('agent_asst_')); changed = true; }
+                  return changed ? [...merged] : prev;
+                });
+              }
+            } catch {}
             setIsStreaming(false);
             setIsThinking(false);
             setActiveJobId(null);
@@ -868,10 +522,6 @@ export default function AgentPanel({
   // ── On mount: reconnect to running/interrupted/awaiting jobs ──
   useEffect(() => {
     if (!workspaceId || !workspaceChatId) return;
-
-    // Orchestrator handles resume via its own job state — skip legacy agent polling
-    if (true) return; // legacy agent-runner routes removed; orchestrator is the only path now
-
     let cancelled = false;
     (async () => {
       try {
@@ -1008,6 +658,7 @@ export default function AgentPanel({
   }, [modelDropdownOpen]);
 
   // Load persisted messages when workspace chat changes
+  // ── Restore messages from props or fetch from DB ──
   useEffect(() => {
     if (initialMessages && initialMessages.length > 0) {
       const restored = initialMessages.map(m => {
@@ -1046,13 +697,43 @@ export default function AgentPanel({
       setPlanTodos([]);
       setPlanSummary('');
       setPlanMessageId(null);
+    } else if (!initialMessages && workspaceChatId) {
+      // No initialMessages provided — fetch from DB to survive page navigation
+      let cancelled = false;
+      (async () => {
+        try {
+          const token = localStorage.getItem('auth_token');
+          if (!token || cancelled) return;
+          const res = await fetch(`/api/chats/${workspaceChatId}/messages`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (!res.ok || cancelled) return;
+          const data = await res.json();
+          const msgs = (data.messages || []).map(m => {
+            const msg = { ...m, id: m.id, content: m.content || '' };
+            if (!msg.isError && m.role === 'assistant' && m.content && /\n###\s*Summary\s*\n/.test(m.content)) {
+              const { todos, summary } = parsePlanTodos(m.content);
+              if (todos.length > 0) { msg.isPlanResult = true; }
+            }
+            if (!msg.isError && m.role === 'assistant' && m.content) {
+              const tcs = parseToolCalls(m.content);
+              if (tcs.length > 0) msg.toolCalls = tcs.map((tc, i) => ({ ...tc, id: `${msg.id}_tool_${i}`, status: 'done' }));
+            }
+            return msg;
+          });
+          if (!cancelled) setMessages(msgs);
+        } catch {}
+      })();
+      return () => { cancelled = true; };
     }
   }, [workspaceChatId, initialMessages]);
 
   const fetchModels = async () => {
     try {
+      console.log('[AgentPanel] fetchModels: starting...');
       const headers = {};
       const token = localStorage.getItem('auth_token');
+      console.log('[AgentPanel] fetchModels: token exists?', !!token);
       if (token) headers['Authorization'] = `Bearer ${token}`;
       const deepseekKey = localStorage.getItem('DEEPSEEK_API_KEY');
       let lmStudioUrl = localStorage.getItem('LM_STUDIO_URL');
@@ -1072,12 +753,20 @@ export default function AgentPanel({
       if (lmStudioApiKey) headers['x-lmstudio-api-key'] = lmStudioApiKey;
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
       const res = await fetch('/api/providers/models', { headers, signal: controller.signal });
       clearTimeout(timeoutId);
+      console.log('[AgentPanel] fetchModels: res.ok?', res.ok, 'status:', res.status);
       if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        console.log('[AgentPanel] fetchModels: content-type:', contentType);
+        if (!contentType.includes('application/json')) {
+          throw new Error(`Expected JSON but got ${contentType}`);
+        }
         const data = await res.json();
+        console.log('[AgentPanel] fetchModels: data.models count:', data.models?.length, 'first:', data.models?.[0]?.id);
         if (data.models?.length > 0) {
+          console.log('[AgentPanel] fetchModels: setting availableModels');
           setAvailableModels(data.models);
           const saved = localStorage.getItem('aurora_agent_model');
           if (!saved || !data.models.find(m => m.id === saved)) {
@@ -1086,17 +775,37 @@ export default function AgentPanel({
             setSelectedProvider(mapSourceToProvider(first.source));
           }
         } else {
-          // No models available — clear stale selection so sendMessage falls back properly
+          console.log('[AgentPanel] fetchModels: no models in data, clearing');
           setAvailableModels([]);
           setSelectedModel('');
           setSelectedProvider('');
         }
+      } else {
+        throw new Error(`HTTP ${res.status}`);
       }
-    } catch {
-      // Network error fetching models — clear selection to avoid sending to dead provider
-      setAvailableModels([]);
-      setSelectedModel('');
-      setSelectedProvider('');
+    } catch (err) {
+      console.error('[AgentPanel] fetchModels failed:', err.message || err);
+      // If no models loaded, provide a fallback so the UI is usable
+      if (!fetchModels._retried && !fetchModels._fallbackSet) {
+        // Set a fallback model immediately so the dropdown isn't empty
+        const fallback = [{ id: 'deepseek-chat', name: 'DeepSeek Chat', owned_by: 'deepseek', source: 'DeepSeek' }];
+        setAvailableModels(fallback);
+        setSelectedModel('deepseek-chat');
+        setSelectedProvider('deepseek');
+        fetchModels._fallbackSet = true;
+      }
+      // Retry once after 2 seconds if this was a network/timing issue
+      if (!fetchModels._retried) {
+        fetchModels._retried = true;
+        setTimeout(() => {
+          fetchModels._retried = false;
+          fetchModels();
+        }, 2000);
+      } else if (!fetchModels._fallbackSet) {
+        setAvailableModels([]);
+        setSelectedModel('');
+        setSelectedProvider('');
+      }
     }
   };
 
@@ -1260,23 +969,7 @@ export default function AgentPanel({
 
   // Retry: remove last assistant turn and re-submit the user message
   const handleRetry = async (msgId) => {
-    // Force-stop any active streaming/job so retry isn't blocked
-    // (isStreaming may be stuck true if job crashed without cleanup)
-    setIsStreaming(false);
-    setIsThinking(false);
-    if (orchAbortRef.current) {
-      try { orchAbortRef.current(); } catch (_) {}
-      orchAbortRef.current = null;
-    }
-    if (activeJobId) {
-      const token = localStorage.getItem('auth_token');
-      await fetch('/api/orchestrator/jobs/' + encodeURIComponent(activeJobId) + '/stop', {
-        method: 'POST',
-        headers: token ? { 'Authorization': 'Bearer ' + token } : {}
-      }).catch(() => {});
-      setActiveJobId(null);
-    }
-
+    if (isStreaming) return;
     // Snapshot messages outside of setMessages to avoid stale closure
     const snapshot = messagesRef.current;
     const idx = snapshot.findIndex(m => m.id === msgId);
@@ -1318,44 +1011,18 @@ export default function AgentPanel({
     const trimmed = snapshot.slice(0, userIdx);
     setMessages(trimmed);
 
-    // Scroll to the trimmed bottom immediately
-    requestAnimationFrame(() => {
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
-    });
-
     // Re-trigger with the same user content
     let retryContent = userMsg.content;
     setInput(retryContent);
     // Submit after state settles — use requestSubmit for reliable React onSubmit trigger
     setTimeout(() => {
-      // Force scroll before submitting
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
       document.getElementById('agent-input-form')?.requestSubmit();
     }, 100);
   };
 
   // Retry from user message: trim to that point and resubmit original text
   const handleUserRetry = async (msgId) => {
-    // Force-stop any active streaming/job so retry isn't blocked
-    setIsStreaming(false);
-    setIsThinking(false);
-    if (orchAbortRef.current) {
-      try { orchAbortRef.current(); } catch (_) {}
-      orchAbortRef.current = null;
-    }
-    if (activeJobId) {
-      const token = localStorage.getItem('auth_token');
-      await fetch('/api/orchestrator/jobs/' + encodeURIComponent(activeJobId) + '/stop', {
-        method: 'POST',
-        headers: token ? { 'Authorization': 'Bearer ' + token } : {}
-      }).catch(() => {});
-      setActiveJobId(null);
-    }
-
+    if (isStreaming) return;
     const snapshot = messagesRef.current;
     const idx = snapshot.findIndex(m => m.id === msgId);
     if (idx < 0) return;
@@ -1387,18 +1054,7 @@ export default function AgentPanel({
     const trimmed = snapshot.slice(0, idx + 1);
     setMessages(trimmed);
     setInput(snapshot[idx].content);
-
-    // Scroll to bottom after trim
-    requestAnimationFrame(() => {
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
-    });
-
     setTimeout(() => {
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
       document.getElementById('agent-input-form')?.requestSubmit();
     }, 100);
   };
@@ -1412,24 +1068,7 @@ export default function AgentPanel({
 
   // Submit edited user message, trim from that point
   const handleEditSubmit = async (msgId) => {
-    if (!editInput.trim()) return;
-
-    // Force-stop any active streaming/job so re-submit isn't blocked
-    setIsStreaming(false);
-    setIsThinking(false);
-    if (orchAbortRef.current) {
-      try { orchAbortRef.current(); } catch (_) {}
-      orchAbortRef.current = null;
-    }
-    if (activeJobId) {
-      const token = localStorage.getItem('auth_token');
-      await fetch('/api/orchestrator/jobs/' + encodeURIComponent(activeJobId) + '/stop', {
-        method: 'POST',
-        headers: token ? { 'Authorization': 'Bearer ' + token } : {}
-      }).catch(() => {});
-      setActiveJobId(null);
-    }
-
+    if (!editInput.trim() || isStreaming) return;
     const snapshot = messagesRef.current;
     const idx = snapshot.findIndex(m => m.id === msgId);
     if (idx < 0) return;
@@ -1455,18 +1094,7 @@ export default function AgentPanel({
     setInput(editInput.trim());
     setEditingMessageId(null);
     setEditInput('');
-
-    // Scroll to bottom after trim
-    requestAnimationFrame(() => {
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
-    });
-
     setTimeout(() => {
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
       document.getElementById('agent-input-form')?.requestSubmit();
     }, 100);
   };
@@ -1484,18 +1112,18 @@ export default function AgentPanel({
       agentStreamAbortRef.current.abort();
       agentStreamAbortRef.current = null;
     }
-    // Abort active orchestrator job (Plan/Agent mode)
-    if (orchAbortRef.current) {
-      orchAbortRef.current();
-      orchAbortRef.current = null;
-    }
-    // Stop server-side orchestrator job via API
-    if (activeJobId) {
-      const token = localStorage.getItem('auth_token');
-      fetch('/api/orchestrator/jobs/' + encodeURIComponent(activeJobId) + '/stop', {
-        method: 'POST',
-        headers: token ? { 'Authorization': 'Bearer ' + token } : {}
-      }).catch(() => {});
+
+    // Cancel server-side agent job (Plan/Agent mode)
+    if (activeJobId && workspaceId) {
+      try {
+        const token = localStorage.getItem('auth_token');
+        await fetch(`/api/workspace/${workspaceId}/agent/run`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+      } catch (err) {
+        console.error('[AgentPanel] Failed to cancel job:', err.message);
+      }
     }
 
     // Stop streaming state (polling useEffect will clean up interval)
@@ -1718,10 +1346,8 @@ export default function AgentPanel({
 
     const userContent = input.trim();
     setInput('');
+    setIsStreaming(true);
     setIsThinking(true);
-    // Note: setIsStreaming(true) is set per-mode below:
-    //   - Chat mode: right before the SSE fetch
-    //   - Plan/Agent mode: after orchAbortRef is set (so polling useEffect skips legacy agent/status)
 
     // Detecting plan execution from the message is definitive — it works even if
     // React hasn't flushed setAgentMode('agent') yet (race condition with setTimeout).
@@ -1733,7 +1359,6 @@ export default function AgentPanel({
       setPlanTodos([]);
       setPlanSummary('');
       setPlanMessageId(null);
-      setPlanGenerationPhase('idle');
     }
 
     const turnId = `turn_${++turnCounterRef.current}`;
@@ -1776,7 +1401,6 @@ export default function AgentPanel({
 
     // ── Chat mode: Direct SSE streaming (no server-side agent loop) ──
     if (effectiveMode === 'chat') {
-      setIsStreaming(true);
       try {
         const chatMessages = messagesRef.current.concat([userMsg]).map(m => ({
           role: m.role === 'error' ? 'assistant' : m.role,
@@ -1902,13 +1526,6 @@ export default function AgentPanel({
                     : m
                 ));
               }
-
-              // Auto-scroll on every content chunk
-              requestAnimationFrame(() => {
-                if (scrollRef.current) {
-                  scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-                }
-              });
             } catch {}
           }
         }
@@ -1970,187 +1587,180 @@ export default function AgentPanel({
       return;
     }
 
-    // ── Orchestrator-driven agent execution (Plan/Agent modes) ──
+    // ── Start the server-side agent job (Plan/Agent modes) ──
     try {
-      // Stop any previous orchestrator job before starting a new one
-      if (orchAbortRef.current) {
-        try { orchAbortRef.current(); } catch (_) {}
-        orchAbortRef.current = null;
-      }
-      if (activeJobId) {
-        const token = localStorage.getItem('auth_token');
-        await fetch('/api/orchestrator/jobs/' + encodeURIComponent(activeJobId) + '/stop', {
-          method: 'POST',
-          headers: token ? { 'Authorization': 'Bearer ' + token } : {}
-        }).catch(() => {});
-        setActiveJobId(null);
-      }
-
+      const token = localStorage.getItem('auth_token');
+      // Collect API keys from localStorage so the server-side runner can use them
+      const apiKeys = {
+        lmStudioUrl: localStorage.getItem('LM_STUDIO_URL') || '',
+        lmStudioHost: localStorage.getItem('LM_STUDIO_HOST') || '',
+        lmStudioPort: localStorage.getItem('LM_STUDIO_PORT') || '',
+        lmStudioApiKey: localStorage.getItem('LM_STUDIO_API_KEY') || '',
+        deepseekKey: localStorage.getItem('DEEPSEEK_API_KEY') || '',
+        openaiKey: localStorage.getItem('OPENAI_API_KEY') || '',
+        anthropicKey: localStorage.getItem('ANTHROPIC_API_KEY') || '',
+      };
+      const res = await fetch(`/api/workspace/${workspaceId}/agent/run`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          chatId: workspaceChatId,
+          userContent,
+          userMessageId: userMsg.id,
+          model: selectedModel,
+          provider: msgProvider,
+          thinkingEffort,
+          agentMode: effectiveMode,
+          systemPrompt,
+          apiKeys,
+          activeFilePath: activeFilePath || undefined,
+          trimAfterMessageId: retryTrimAfterIdRef.current || undefined
+        })
+      });
       retryTrimAfterIdRef.current = null;  // clear for next send
 
-      const assistantId = `agent_asst_${Date.now()}`;
-      let streamedContent = '';
-      let streamedThinking = '';
-      let messageCreated = false;
-
-      // Dynamically import orchestrator client
-      const { sendMessage: orchSendMessage } = await import('@/lib/orchestrator-client');
-
-      // Determine model and provider for the orchestrator
-      const orchModel = selectedModel || localStorage.getItem('aurora_last_model') || '';
-      const orchProvider = currentModelInfo?.owned_by || '';
-      console.log('[AgentPanel] Orchestrator job — model:', orchModel, 'provider:', orchProvider);
-
-      // Plan mode: set generation phase to show "Generating plan..." UI
-      if (effectiveMode === 'plan') {
-        setPlanGenerationPhase('thinking');
-        setPlanTodos([]);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error?.message || `Failed to start agent job (${res.status})`);
       }
 
-      const { jobId, abort } = await orchSendMessage(userContent, workspaceId, orchModel, orchProvider, {
-        mode: effectiveMode === 'plan' ? 'plan' : 'agent',
-        onOutput: (line) => {
-          // Strip ANSI escape codes to detect thinking vs content
-          const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
-          const stripped = stripAnsi(line);
-          const isThinkingLine = stripped.startsWith('[thinking]');
-
-          if (isThinkingLine) {
-            // Extract thinking text (strip the [thinking] prefix and ANSI codes)
-            const thinkText = stripped.replace(/^\[thinking\]\s*/, '');
-            streamedThinking += (streamedThinking ? '\n' : '') + thinkText;
-          } else {
-            // Clean ANSI codes from content lines and normalize hook markers
-            let cleanLine = stripped;
-
-            // ── Filter orchestrator admin/debug lines from user-visible content ──
-            // Skip banner/box-drawing lines
-            if (/^[╔╠╚║═]+$/.test(cleanLine.trim())) return;
-            // Skip hook markers
-            if (/^\[hook:(?:agent_start|agent_end|tool_call|tool_result)\]$/.test(cleanLine)) return;
-            // Skip model info line
-            if (/^\[model\]\s+/.test(cleanLine)) return;
-            // Skip standalone square-bracket artifact lines
-            if (/^\[.*\]$/.test(cleanLine) && cleanLine.length < 40) return;
-            // Skip cost/iteration summary lines
-            if (/^── (?:finished|start)/.test(cleanLine)) return;
-            if (/\[\d+\.\d+s\s*\|\s*\d+\s+(?:in|tokens)/.test(cleanLine)) return;
-            // Skip plan/act phase header lines
-            if (/^(?:🧠\s*PLANNING|📋\s*Plan|\s*Provider:|\s*Model:|\s*Workspace:|\s*Timeout:|\s*Base\s*URL:|\s*API\s*Key:|\s*Plan\s*First:|\s*Max\s*Iters:|\s*Stop\s*File:|\s*LM\s*Studio:)/.test(cleanLine)) return;
-            // Skip cline iteration separator
-            if (/^🤖\s*Cline\s*CLI/.test(cleanLine)) return;
-            if (/^════/.test(cleanLine.trim())) return;
-            // Skip orchestrator header/banner
-            if (/^Autonomous\s+App\s+Builder/.test(cleanLine)) return;
-            // Skip "Task:" / "Workspace:" field lines in header
-            if (/^(?:Task|Workspace|Max\s+Iters|Plan\s+First|Stop\s+File|LM\s+Studio)\s*:/.test(cleanLine.trim())) return;
-            // Skip plan exit/capture summary
-            if (/^(?:📋\s*Plan\s+phase\s+exited|📝\s*Plan\s+captured)/.test(cleanLine)) return;
-            // Skip final report header
-            if (/^(?:📊\s*FINAL\s*REPORT|⏹\s*Orchestrator\s+stopped)/.test(cleanLine)) return;
-            // Skip orchestration completion markers
-            if (/^(?:✅\s*Task\s+completion\s+detected|✅\s*\*\*\s*Task\s+Complete)/.test(cleanLine)) return;
-
-            // Skip empty lines
-            if (!cleanLine.trim()) return;
-
-            streamedContent += (streamedContent ? '\n' : '') + cleanLine;
-          }
-
-          // ── Incremental plan parsing for Plan mode ──
-          if (effectiveMode === 'plan') {
-            const incremental = parsePlanTodosIncremental(stripAnsi(streamedContent));
-            if (incremental.todos.length > 0) {
-              setPlanTodos(incremental.todos);
-              setPlanGenerationPhase('generating');
-            }
-            if (incremental.summary) {
-              setPlanSummary(incremental.summary);
-            }
-          }
-
-          if (!messageCreated) {
-            messageCreated = true;
-            setMessages(prev => [...prev, {
-              id: assistantId,
-              role: 'assistant',
-              content: streamedContent,
-              thinking: streamedThinking || undefined,
-              timestamp: new Date().toISOString(),
-              model: selectedModel,
-              provider: 'orchestrator',
-              turnId
-            }]);
-          } else {
-            const curContent = streamedContent;
-            const curThinking = streamedThinking;
-            setMessages(prev => prev.map(m =>
-              m.id === assistantId
-                ? { ...m, content: curContent, thinking: curThinking || undefined }
-                : m
-            ));
-          }
-
-          // Auto-scroll on every output line
-          requestAnimationFrame(() => {
-            if (scrollRef.current) {
-              scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            }
-          });
-        },
-        onComplete: (result) => {
-          setActiveJobId(null);
-          if (typeof window !== 'undefined') localStorage.removeItem('aurora_active_job_id');
-          setIsStreaming(false);
-          setIsThinking(false);
-          orchAbortRef.current = null;
-          // Refresh file tree since orchestrator may have created files
-          onFileTreeChange?.();
-
-          // Persist assistant message to chat
-          if (streamedContent || streamedThinking) {
-            saveMessageToChat('assistant', streamedContent, selectedModel, 'orchestrator', assistantId, new Date().toISOString(), streamedThinking);
-
-            // Auto-detect plan format from completed output
-            const planResult = parsePlanTodos(streamedContent);
-            if (planResult.todos.length > 0) {
-              setPlanTodos(planResult.todos);
-              setPlanSummary(planResult.summary);
-              setPlanMessageId(assistantId);
-              setPlanGenerationPhase('complete');
-              setMessages(prev => prev.map(m =>
-                m.id === assistantId ? { ...m, isPlanResult: true } : m
-              ));
-            } else if (effectiveMode === 'plan') {
-              // Plan mode completed but no structured todos found
-              setPlanGenerationPhase('complete');
-            }
-          } else if (effectiveMode === 'plan') {
-            setPlanGenerationPhase('idle');
-          }
-        },
-        onError: (err) => {
-          setActiveJobId(null);
-          if (typeof window !== 'undefined') localStorage.removeItem('aurora_active_job_id');
-          setIsStreaming(false);
-          setIsThinking(false);
-          orchAbortRef.current = null;
-          setMessages(prev => [...prev, {
-            id: `agent_err_${Date.now()}`,
-            role: 'assistant',
-            content: `Orchestrator error: ${err.message}`,
-            isError: true,
-            timestamp: new Date().toISOString(),
-            turnId
-          }]);
-        }
-      });
-
-      setActiveJobId(jobId);
-      if (typeof window !== 'undefined') localStorage.setItem('aurora_active_job_id', jobId);
-      orchAbortRef.current = abort;
+      const data = await res.json();
+      setActiveJobId(data.jobId);
+      // Re-affirm streaming — polling may have been killed by an early poll that saw no job yet
       setIsStreaming(true);
       setIsThinking(true);
+
+      // ── Connect to real-time SSE stream for letter-by-letter thinking/content ──
+      let streamIterId = 0;
+      let streamAssistId = `agent_asst_${Date.now()}`;
+      let streamedThinking = '';
+      let streamedContent = '';
+      let streamMessageCreated = false;
+
+      // Create abort controller for agent SSE stream
+      const agentStreamController = new AbortController();
+      agentStreamAbortRef.current = agentStreamController;
+
+      (async () => {
+        try {
+          const token = localStorage.getItem('auth_token');
+          const streamRes = await fetch(
+            `/api/workspace/${workspaceId}/agent/stream?jobId=${encodeURIComponent(data.jobId)}`,
+            {
+              signal: agentStreamController.signal,
+              headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+            }
+          );
+          if (!streamRes.ok) return;
+          const reader = streamRes.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const jsonStr = line.slice(6).trim();
+              if (!jsonStr) continue;
+              try {
+                const evt = JSON.parse(jsonStr);
+                if (evt.type === 'done' || evt.type === 'error' || evt.type === 'stop') {
+                  // Final file tree refresh when job finishes
+                  onFileTreeChange?.();
+                  // Detect plan content so Execute Plan button shows immediately
+                  if (streamedContent && /\n###\s*Summary\s*\n/.test(streamedContent)) {
+                    const planResult = parsePlanTodos(streamedContent);
+                    if (planResult.todos.length > 0) {
+                      setPlanTodos(planResult.todos);
+                      setPlanSummary(planResult.summary);
+                      setPlanMessageId(streamAssistId);
+                      setMessages(prev => prev.map(m =>
+                        m.id === streamAssistId ? { ...m, isPlanResult: true } : m
+                      ));
+                    }
+                  }
+                  return;
+                }
+                if (evt.type === 'iteration_end') {
+                  // Current iteration's stream content is done; reset for next
+                  // (server-side agent-runner persists to DB, polling will sync)
+                  if (streamedContent && /\n###\s*Summary\s*\n/.test(streamedContent)) {
+                    const planResult = parsePlanTodos(streamedContent);
+                    if (planResult.todos.length > 0) {
+                      setPlanTodos(planResult.todos);
+                      setPlanSummary(planResult.summary);
+                      setPlanMessageId(streamAssistId);
+                      setMessages(prev => prev.map(m =>
+                        m.id === streamAssistId ? { ...m, isPlanResult: true, isPlanCard: true } : m
+                      ));
+                    }
+                  }
+                  // Refresh file tree — iteration may have written/patched files
+                  onFileTreeChange?.();
+                  streamIterId++;
+                  streamAssistId = `agent_asst_${Date.now()}`;
+                  streamedThinking = '';
+                  streamedContent = '';
+                  streamMessageCreated = false;
+                  continue;
+                }
+                if (evt.type === 'files_changed') {
+                  // Agent wrote files — trigger file tree refresh in parent
+                  onFileTreeChange?.();
+                  continue;
+                }
+                if (evt.type === 'document_changed') {
+                  // Agent modified a .docx file — trigger file tree refresh in parent,
+                  // which bumps documentVersion and remounts the OnlyOfficeEditor.
+                  onFileTreeChange?.();
+                  continue;
+                }
+                if (evt.type === 'thinking') {
+                  streamedThinking += evt.text;
+                } else if (evt.type === 'content') {
+                  streamedContent += evt.text;
+                }
+                if (!streamMessageCreated && (streamedThinking || streamedContent)) {
+                  streamMessageCreated = true;
+                  setMessages(prev => [...prev, {
+                    id: streamAssistId,
+                    role: 'assistant',
+                    content: streamedContent,
+                    thinking: streamedThinking || undefined,
+                    timestamp: new Date().toISOString(),
+                    model: selectedModel,
+                    provider: msgProvider,
+                    turnId
+                  }]);
+                } else if (streamMessageCreated) {
+                  const curId = streamAssistId;
+                  const curThinking = streamedThinking;
+                  const curContent = streamedContent;
+                  setMessages(prev => prev.map(m =>
+                    m.id === curId
+                      ? { ...m, content: curContent, thinking: curThinking || m.thinking }
+                      : m
+                  ));
+                }
+              } catch {}
+            }
+          }
+        } catch (err) {
+          if (err.name !== 'AbortError') {
+            console.error('[AgentPanel] Agent stream error:', err.message);
+          }
+        } finally {
+          agentStreamAbortRef.current = null;
+        }
+      })();
+
+      // Polling will start via the useEffect that watches isStreaming
     } catch (err) {
       setIsStreaming(false);
       setIsThinking(false);
@@ -2166,7 +1776,7 @@ export default function AgentPanel({
   };
 
   // Tool names that take a block body (the content is the body of the fenced block)
-  const CONTENT_TOOLS = ['create_file', 'replace_string_in_file', 'run_in_terminal', 'create_skill', 'write_sheet'];
+  const CONTENT_TOOLS = ['create_file', 'replace_string_in_file', 'run_in_terminal', 'create_skill'];
 
   // Parser: finds ```TOOL_NAME key="val"... blocks and extracts tool calls
   const parseToolCalls = (content) => {
@@ -2181,8 +1791,7 @@ export default function AgentPanel({
     const KNOWN_TOOL_NAMES = new Set([
       'list_dir', 'read_file', 'grep_search', 'create_file',
       'replace_string_in_file', 'run_in_terminal', 'dev_server_status',
-      'dev_server_start', 'dev_server_stop', 'show_preview', 'create_skill',
-      'read_sheet', 'write_sheet'
+      'dev_server_start', 'dev_server_stop', 'show_preview', 'create_skill'
     ]);
     const parseAttrs = (attrString) => {
       const a = {};
@@ -2203,8 +1812,8 @@ export default function AgentPanel({
       if (!KNOWN_TOOL_NAMES.has(toolName)) continue;
       const args = parseAttrs(scMatch[2]);
       const fp = args.filePath || args.path;
-      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file' || toolName === 'read_sheet' || toolName === 'write_sheet') && !fp) continue;
-      if ((toolName === 'create_file' || toolName === 'write_sheet') && args.content === undefined) continue;
+      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      if (toolName === 'create_file' && args.content === undefined) continue;
       calls.push({ name: toolName, args, raw: scMatch[0] });
     }
 
@@ -2247,8 +1856,8 @@ export default function AgentPanel({
 
       // Validate required args
       const fp = args.filePath || args.path;
-      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file' || toolName === 'read_sheet' || toolName === 'write_sheet') && !fp) continue;
-      if ((toolName === 'create_file' || toolName === 'write_sheet') && args.content === undefined) continue;
+      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      if (toolName === 'create_file' && args.content === undefined) continue;
       if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
 
       calls.push({ name: toolName, args, raw: xmlMatch[0] });
@@ -2280,8 +1889,8 @@ export default function AgentPanel({
       }
       if (args.filePath === undefined && args.path !== undefined) args.filePath = args.path;
       const fp = args.filePath || args.path;
-      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file' || toolName === 'read_sheet' || toolName === 'write_sheet') && !fp) continue;
-      if ((toolName === 'create_file' || toolName === 'write_sheet') && args.content === undefined) continue;
+      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      if (toolName === 'create_file' && args.content === undefined) continue;
       if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
       calls.push({ name: toolName, args, raw: invMatch[0] });
     }
@@ -2310,8 +1919,8 @@ export default function AgentPanel({
         }
       }
       const fp = args.filePath || args.path;
-      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file' || toolName === 'read_sheet' || toolName === 'write_sheet') && !fp) continue;
-      if ((toolName === 'create_file' || toolName === 'write_sheet') && args.content === undefined) continue;
+      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      if (toolName === 'create_file' && args.content === undefined) continue;
       if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
       calls.push({ name: toolName, args, raw: bMatch[0] });
     }
@@ -2325,7 +1934,7 @@ export default function AgentPanel({
       if (CONTENT_TOOLS.includes(toolName)) continue; // Content tools need a body block
       const args = parseAttrs(ibMatch[2]);
       const fp = args.filePath || args.path;
-      if ((toolName === 'read_file' || toolName === 'replace_string_in_file' || toolName === 'read_sheet') && !fp) continue;
+      if ((toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
       calls.push({ name: toolName, args, raw: ibMatch[0] });
     }
 
@@ -2352,8 +1961,8 @@ export default function AgentPanel({
         }
       }
       const fp = args.filePath || args.path;
-      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file' || toolName === 'read_sheet' || toolName === 'write_sheet') && !fp) continue;
-      if ((toolName === 'create_file' || toolName === 'write_sheet') && args.content === undefined) continue;
+      if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) continue;
+      if (toolName === 'create_file' && args.content === undefined) continue;
       if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) continue;
       calls.push({ name: toolName, args, raw: bareMatch[0] });
     }
@@ -2419,19 +2028,17 @@ export default function AgentPanel({
         'dev_server_start': 'dev_server_start',
         'dev_server_stop': 'dev_server_stop',
         'show_preview': 'show_preview',
-        'create_skill': 'create_skill',
-        'read_sheet': 'read_sheet',
-        'write_sheet': 'write_sheet'
+        'create_skill': 'create_skill'
       };
       if (nameMap[toolName]) {
         // Validate required args before accepting the tool call
         const fp = args.filePath || args.path;
-        if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file' || toolName === 'read_sheet' || toolName === 'write_sheet') && !fp) {
+        if ((toolName === 'create_file' || toolName === 'read_file' || toolName === 'replace_string_in_file') && !fp) {
           console.warn('[Agent] Skipping', toolName, 'call with no filePath — model omitted the path');
           continue;
         }
-        if ((toolName === 'create_file' || toolName === 'write_sheet') && args.content === undefined) {
-          console.warn('[Agent] Skipping', toolName, 'with no body — model wrote empty block for', fp);
+        if (toolName === 'create_file' && args.content === undefined) {
+          console.warn('[Agent] Skipping create_file with no body — model wrote empty block for', fp);
           continue;
         }
         if (toolName === 'replace_string_in_file' && (!args.oldString || args.newString === undefined)) {
@@ -2473,8 +2080,6 @@ export default function AgentPanel({
             case 'dev_server_stop': return await executeDevServerStop(wsId);
             case 'show_preview': return await executeShowPreview();
             case 'create_skill': return await executeCreateSkill(wsId, tc.args.name, tc.args.description || '', tc.args.keywords || tc.args.applyTo || '', tc.args.content || '');
-            case 'read_sheet': return await executeReadSheet(wsId, tc.args.filePath || tc.args.path);
-            case 'write_sheet': return await executeWriteSheet(wsId, tc.args.filePath || tc.args.path, tc.args.content);
             default: return { error: `Unknown tool: ${tc.name}` };
           }
         })(),
@@ -2484,52 +2089,6 @@ export default function AgentPanel({
     } catch (err) {
       return { error: err.message };
     }
-  };
-
-  // ── Spreadsheet tools ──
-  const executeReadSheet = async (wsId, filePath) => {
-    if (!filePath) return { error: 'filePath is required for read_sheet' };
-    const ext = filePath.split('.').pop()?.toLowerCase();
-    if (ext !== 'xlsx' && ext !== 'xls' && ext !== 'csv') {
-      return { error: `read_sheet only supports .xlsx/.xls/.csv files, got .${ext}` };
-    }
-    const res = await fetch(`/api/workspace/${wsId}/document/read`, {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ filePath })
-    });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.error?.message || `Read sheet failed (${res.status})`);
-    }
-    const data = await res.json();
-    // Return structured data: sheets array with name and rows, omit fortuneData for agent readability
-    return { type: data.type, sheets: data.sheets || [] };
-  };
-
-  const executeWriteSheet = async (wsId, filePath, content) => {
-    if (!filePath) return { error: 'filePath is required for write_sheet' };
-    if (!content) return { error: 'write_sheet requires a JSON body with sheets array' };
-    let parsed;
-    try {
-      parsed = typeof content === 'string' ? JSON.parse(content) : content;
-    } catch {
-      return { error: 'write_sheet content must be valid JSON with a sheets array' };
-    }
-    if (!parsed.sheets || !Array.isArray(parsed.sheets)) {
-      return { error: 'write_sheet content must have a "sheets" array. Each sheet: {name: "Sheet1", rows: [["col1","col2"],["val1","val2"]]}' };
-    }
-    const res = await fetch(`/api/workspace/${wsId}/document/write`, {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ filePath, content: { type: 'xlsx', sheets: parsed.sheets } })
-    });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.error?.message || `Write sheet failed (${res.status})`);
-    }
-    const data = await res.json();
-    return { success: true, filePath: data.filePath || filePath, sheets: parsed.sheets };
   };
 
   // Summarize a tool result for LLM feedback
@@ -2549,8 +2108,6 @@ export default function AgentPanel({
       case 'dev_server_stop': return result.message || 'Server stopped';
       case 'show_preview': return result.shown ? 'Preview panel opened' : 'Preview not available for this project';
       case 'run_in_terminal': return result.success ? `Command succeeded (exit ${result.exitCode}). ${(result.stdout || '').slice(0, 300)}` : `Command failed (exit ${result.exitCode}). ${(result.stderr || result.stdout || '').slice(0, 300)}`;
-      case 'read_sheet': return `Read sheet \`${fp}\` (${result.sheets?.length || 0} sheets, ${result.sheets?.reduce((t,s) => t + (s.rows?.length || 0), 0) || 0} rows)`;
-      case 'write_sheet': return `Updated sheet \`${fp}\` (${result.sheets?.length || 0} sheets)`;
       default: return 'Done';
     }
   };
@@ -2581,35 +2138,20 @@ export default function AgentPanel({
         skillsBlock += '\n';
       }
 
-      // ── Base system prompt: AGENTS.md + tool format ──
-      const toolSyntax = [
-        'create_file filePath="path/file.ext"',
-        '  FILE CONTENT HERE',
-        '```',
-        'read_file filePath="path/file.ext"',
-        'list_dir path="."',
-        'replace_string_in_file filePath="path/file.ext"',
-        '  ===FIND===',
-        '  old text',
-        '  ===REPLACE===',
-        '  new text',
-        'grep_search query="pattern"',
-        'dev_server_status',
-        'dev_server_start command="npm run dev"',
-        'dev_server_stop',
-        'show_preview',
-        'read_sheet filePath="data.xlsx"',
-        'write_sheet filePath="data.xlsx"',
-        '  {"sheets":[{"name":"Sheet1","rows":[["H1","H2"],["v1","v2"]]}]}'
-      ].join('\n');
-
+      // ── Base system prompt: AGENTS.md + workspace ref ──
+      // FATAL: Do NOT include tool format here. The server's buildToolSystemPrompt
+      // injects XML-format tool definitions. Including a conflicting format
+      // (like the old fenced-code-block style) confuses the LLM and causes
+      // it to produce garbled tool calls that fail to parse.
       let base = (workspaceAgentsMd
         ? '⚠️  AGENTS.md RULES (follow these — they override training defaults):\n\n' + workspaceAgentsMd + '\n\n---\n\n'
         : '') +
         learningsBlock +
         skillsBlock +
-        'Workspace API: /api/workspace/' + wsId + '. Use RELATIVE paths: "." is root.\n' +
-        'TOOL SYNTAX:\n' + toolSyntax + '\n';
+        'Workspace: /api/workspace/' + wsId + '. Use RELATIVE paths: "." is root.\n' +
+        'Tool format (use EXACTLY this XML syntax):\n' +
+        '<create_file>\n  <filePath>path/to/file</filePath>\n  <content>FILE CONTENT</content>\n</create_file>\n' +
+        '<replace_string_in_file>\n  <filePath>path/to/file</filePath>\n  <oldString>text to find</oldString>\n  <newString>replacement</newString>\n</replace_string_in_file>\n';
 
       // ── PRE-FLIGHT CHECKLIST at END for recency bias on small models ──
       if (resolved.length > 0) {
@@ -2656,9 +2198,6 @@ export default function AgentPanel({
       // ── Append guidance sections (tool format, conventions, rules) ──
       base += '\n- First step: `list_dir path="."` to see what exists.\n';
       base += '- create_file puts content INSIDE the block body, never as content="..." attribute.\n';
-      base += '- read_sheet returns structured sheet data as JSON. Use it to inspect .xlsx files. Each sheet has name and rows (2D array of cell values).\n';
-      base += '- write_sheet takes a JSON body with a "sheets" array. Each sheet: {name: "Sheet1", rows: [["H1","H2"],["v1","v2"]]}. The content inside the fenced block is valid JSON.\n';
-      base += '- For .xlsx files, use read_sheet/write_sheet instead of read_file/create_file.\n';
       base += '- Call ONE tool per response. Nothing outside the fenced block.\n';
       base += '\nTHINK-THEN-ACT \u2014 Before every action, briefly reason (1-3 lines max):\n';
       base += '1. WHAT file are you creating/modifying and WHY?\n';
@@ -2899,11 +2438,6 @@ new text
 \`\`\`
 \`\`\`run_in_terminal command="npm install"
 \`\`\`
-\`\`\`read_sheet filePath="data.xlsx"
-\`\`\`
-\`\`\`write_sheet filePath="data.xlsx"
-{"type":"xlsx","sheets":[{"name":"Sheet1","rows":[["Header1","Header2"],["val1","val2"]]}]}
-\`\`\`
 
 THINK-THEN-ACT — Before every action, briefly reason (1-3 lines max):
 1. WHAT file are you creating/modifying and WHY?
@@ -3038,13 +2572,30 @@ TESTING WORKFLOW — After creating/modifying project files:
       console.warn('[Agent] create_file called with undefined/null content for', filePath, '— defaulting to empty file');
       content = '';
     }
-    if (typeof content !== 'string') {
-      content = String(content);
+
+    // Determine file extension
+    const ext = (filePath || '').split('.').pop()?.toLowerCase();
+
+    // Route .docx and .xlsx through the document/write endpoint which handles
+    // proper format conversion (HTML → docx, arrays → xlsx)
+    const isDoc = ext === 'docx' || ext === 'xlsx';
+    const endpoint = isDoc
+      ? `/api/workspace/${wsId}/document/write`
+      : `/api/workspace/${wsId}/write`;
+
+    // Ensure content is a string for the generic writer, but pass as-is for doc types
+    let body;
+    if (isDoc) {
+      body = JSON.stringify({ filePath, content });
+    } else {
+      if (typeof content !== 'string') content = String(content);
+      body = JSON.stringify({ path: filePath, content });
     }
-    const res = await fetch(`/api/workspace/${wsId}/write`, {
+
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ path: filePath, content })
+      body
     });
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
@@ -3312,12 +2863,6 @@ TESTING WORKFLOW — After creating/modifying project files:
       case 'dev_server_start': return `Started dev server (${args.command || 'npm run dev'})`;
       case 'dev_server_stop': return `Stopped dev server`;
       case 'show_preview': return `Opened preview panel`;
-      case 'read_sheet': {
-        const s = result.sheets || [];
-        const totalRows = s.reduce((t, sh) => t + (sh.rows?.length || 0), 0);
-        return `Read \`${fp}\` (${s.length} sheets, ${totalRows} rows)`;
-      }
-      case 'write_sheet': return `Updated \`${fp}\` (${result.sheets?.length || 0} sheets)`;
       default: return 'Done';
     }
   };
@@ -3345,8 +2890,6 @@ TESTING WORKFLOW — After creating/modifying project files:
       case 'dev_server_status': return '🔍';
       case 'dev_server_start': return '▶️';
       case 'dev_server_stop': return '⏹️';
-      case 'read_sheet': return '📊';
-      case 'write_sheet': return '📝';
       default: return '🔧';
     }
   };
@@ -3458,7 +3001,7 @@ TESTING WORKFLOW — After creating/modifying project files:
           // Regular text — use ReactMarkdown for rich formatting
           if (!part.trim()) return null;
           return (
-            <div key={i} className="prose prose-sm prose-invert prose-zinc max-w-none prose-code:bg-zinc-700/50 prose-code:text-zinc-200 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-[11px] prose-code:before:content-none prose-code:after:content-none prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-700/40 prose-pre:rounded-xl prose-pre:text-xs prose-headings:text-zinc-100 prose-a:text-indigo-400 prose-strong:text-zinc-100 prose-li:marker:text-zinc-500 prose-p:my-1">
+            <div key={i} className="prose prose-invert prose-zinc max-w-none prose-code:bg-zinc-700/50 prose-code:text-zinc-200 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-[11px] prose-code:before:content-none prose-code:after:content-none prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-700/40 prose-pre:rounded-xl prose-pre:text-xs prose-headings:text-zinc-100 prose-a:text-indigo-400 prose-strong:text-zinc-100 prose-li:marker:text-zinc-500 prose-p:my-1">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {part}
               </ReactMarkdown>
@@ -3537,7 +3080,7 @@ TESTING WORKFLOW — After creating/modifying project files:
           <span className="font-semibold text-zinc-200">{tc.name}</span>
           {baseName && <span className="text-zinc-400 font-mono text-[10px] truncate max-w-[160px]">{baseName}</span>}
           {diffAnnotation && (
-            <span className={`font-mono text-[10px] font-medium ${diffAnnotation.color}`}>{diffAnnotation.text}</span>
+            <span className={`font-mono text-[10px] font-medium ml-0.5 ${diffAnnotation.color}`} title={`${diffAnnotation.text} lines changed`}>{diffAnnotation.text}</span>
           )}
           <span className="ml-auto flex-shrink-0">
             {tc.status === 'executing' ? (
@@ -3659,7 +3202,7 @@ TESTING WORKFLOW — After creating/modifying project files:
               className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800/60 transition-colors"
             >
               <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sourceColorMap[currentModelInfo?.source] || 'bg-zinc-500'}`} />
-              <span className="truncate max-w-[110px]">{currentModelInfo?.name || selectedModel || 'Select model'}</span>
+              <span className="truncate max-w-[110px]">{currentModelInfo?.name || selectedModel || 'Select model'}{availableModels.length > 0 ? ` (${availableModels.length})` : ''}</span>
               <svg className={`w-3 h-3 text-zinc-500 transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
@@ -3693,10 +3236,30 @@ TESTING WORKFLOW — After creating/modifying project files:
                   );
                 })}
                 {availableModels.length === 0 && (
-                  <div className="px-3 py-2 text-[10px] text-zinc-500">No models found</div>
+                  <div className="px-3 py-2 text-[10px] text-zinc-500">No models found{selectedModel ? ` (sel: ${selectedModel})` : ''}</div>
                 )}
               </div>
             )}
+          </div>
+
+          {/* Thinking effort selector — beside model picker */}
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] text-zinc-600">Think:</span>
+            <select
+              value={thinkingEffort}
+              onChange={(e) => setThinkingEffort(e.target.value)}
+              className="bg-zinc-800/60 border border-zinc-700/40 rounded-md px-1.5 py-0.5 text-[10px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 cursor-pointer"
+            >
+              <option value="low" className="bg-zinc-800">Low</option>
+              <option value="medium" className="bg-zinc-800">Med</option>
+              <option value="high" className="bg-zinc-800">High</option>
+            </select>
+            {/* Visual bar indicator */}
+            <div className="flex gap-0.5 ml-0.5">
+              <span className={`w-1 h-3 rounded-full transition-colors ${['low', 'medium', 'high'].includes(thinkingEffort) ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+              <span className={`w-1 h-3 rounded-full transition-colors ${['medium', 'high'].includes(thinkingEffort) ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+              <span className={`w-1 h-3 rounded-full transition-colors ${thinkingEffort === 'high' ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -3768,14 +3331,12 @@ TESTING WORKFLOW — After creating/modifying project files:
         </div>
       </div>
 
-      {/* Plan progress tracker — flat task list, shown during execution & plan generation */}
-      {planTodos.length > 0 && (agentMode === 'agent' || agentMode === 'plan') && messages.length > 0 && (
+      {/* Plan progress tracker — flat task list, shown during execution */}
+      {planTodos.length > 0 && messages.length > 0 && (
         <div className="px-3 pt-2 pb-1">
           <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-lg overflow-hidden">
             <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/40">
-              <span className="text-[10px] font-medium text-indigo-300 uppercase tracking-wider">
-                {agentMode === 'plan' && planGenerationPhase !== 'complete' ? 'Generating Plan' : 'Progress'}
-              </span>
+              <span className="text-[10px] font-medium text-indigo-300 uppercase tracking-wider">Progress</span>
               <span className="text-[9px] text-zinc-500">
                 {planTodos.filter(t => t.done).length}/{planTodos.length} tasks
               </span>
@@ -4024,15 +3585,11 @@ TESTING WORKFLOW — After creating/modifying project files:
                   ))}
                 </div>
 
-                {/* Execute plan button — only in Plan/Agent mode, NOT Chat */}
-                {agentMode !== 'chat' && (
+                {/* Execute plan button */}
                 <div className="mt-3 pt-2 border-t border-zinc-800/30 flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => {
-                      setAgentMode('agent');
-                      localStorage.setItem('aurora_agent_mode', 'agent');
-
                       // Plan state is already in the system prompt — just tell the
                       // agent to continue. No need to paste plan text as a user message.
                       setInput('Continue implementing the plan.');
@@ -4048,9 +3605,8 @@ TESTING WORKFLOW — After creating/modifying project files:
                     </svg>
                     Execute Plan
                   </button>
-                  <span className="text-[9px] text-zinc-600">Switches to Agent mode to implement the plan</span>
+                  <span className="text-[9px] text-zinc-600">Implement the plan with full file access</span>
                 </div>
-                )}
               </div>
             )}
 
@@ -4215,15 +3771,6 @@ TESTING WORKFLOW — After creating/modifying project files:
                   >
                     {renderMessageContent(msg)}
                   </div>
-                ) : (agentMode === 'plan' && isStreamingThis) ? (
-                  <div className="flex items-center gap-2 text-xs text-indigo-300/80">
-                    <span className="inline-flex gap-0.5">
-                      <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                    </span>
-                    Generating plan...
-                  </div>
                 ) : (
                   <>{renderMessageContent(msg)}{msg.isSuccess ? ' ✅' : ''}</>
                 )}
@@ -4283,7 +3830,6 @@ TESTING WORKFLOW — After creating/modifying project files:
       </div>
 
       {/* 🧠 Learnings Debug Panel — corpus + skills visibility */}
-      {!hideBottomControls && (
       <div className="border-t border-zinc-800/40">
         <button
           type="button"
@@ -4356,62 +3902,6 @@ TESTING WORKFLOW — After creating/modifying project files:
           </div>
         )}
       </div>
-      )}
-
-      {/* Agent mode toolbar */}
-      {!hideBottomControls && (
-      <div className="px-2 pt-1.5 pb-0.5 flex items-center gap-2 border-t border-zinc-800/20">
-        {/* Mode pills: Chat | Plan | Agent */}
-        <div className="flex items-center gap-0.5 bg-zinc-800/40 rounded-lg p-0.5">
-          {[
-            { id: 'chat', icon: '💬', label: 'Chat' },
-            ...(showPlanTab ? [{ id: 'plan', icon: '📋', label: 'Plan' }] : []),
-            { id: 'agent', icon: '🤖', label: 'Agent' },
-          ].map(mode => (
-            <button
-              key={mode.id}
-              type="button"
-              onClick={() => { setAgentMode(mode.id); agentModeRef.current = mode.id; }}
-              className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-colors ${
-                agentMode === mode.id
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-              title={
-                mode.id === 'chat' ? 'Chat mode — free conversation, ask questions'
-                : mode.id === 'plan' ? 'Plan only — no file changes'
-                : 'Agent mode — can read and edit files'
-              }
-            >
-              <span className="flex items-center gap-1">
-                <span>{mode.icon}</span>
-                <span>{mode.label}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-
-        {/* Thinking effort selector */}
-        <div className="flex items-center gap-1 ml-auto">
-          <span className="text-[10px] text-zinc-600">Think:</span>
-          <select
-            value={thinkingEffort}
-            onChange={(e) => setThinkingEffort(e.target.value)}
-            className="bg-zinc-800/60 border border-zinc-700/40 rounded-md px-1.5 py-0.5 text-[10px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 cursor-pointer"
-          >
-            <option value="low" className="bg-zinc-800">Low</option>
-            <option value="medium" className="bg-zinc-800">Med</option>
-            <option value="high" className="bg-zinc-800">High</option>
-          </select>
-          {/* Visual bar indicator */}
-          <div className="flex gap-0.5 ml-0.5">
-            <span className={`w-1 h-3 rounded-full transition-colors ${['low', 'medium', 'high'].includes(thinkingEffort) ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
-            <span className={`w-1 h-3 rounded-full transition-colors ${['medium', 'high'].includes(thinkingEffort) ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
-            <span className={`w-1 h-3 rounded-full transition-colors ${thinkingEffort === 'high' ? 'bg-indigo-500' : 'bg-zinc-700'}`} />
-          </div>
-        </div>
-      </div>
-      )}
 
       {/* Input */}
       <div className="p-2 border-t border-zinc-800/40">
@@ -4423,14 +3913,15 @@ TESTING WORKFLOW — After creating/modifying project files:
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                if (input.trim() && !isStreaming) sendMessage(e);
+                // Defer to let React flush state before reading input in sendMessage
+                setTimeout(() => {
+                  document.getElementById('agent-input-form')?.requestSubmit();
+                }, 100);
               }
             }}
             placeholder={
               activeJobId && messages.some(m => m.isClarification) ? 'Answer the question... (Shift+Enter for newline)'
-              : agentMode === 'chat' ? 'Ask anything... (Shift+Enter for newline)'
-              : agentMode === 'plan' ? 'Ask for a plan... (Shift+Enter for newline)'
-              : 'Ask agent to build, edit, or fix... (Shift+Enter for newline)'
+              : 'Ask anything — plan, build, edit, or fix... (Shift+Enter for newline)'
             }
             disabled={isStreaming}
             rows={1}

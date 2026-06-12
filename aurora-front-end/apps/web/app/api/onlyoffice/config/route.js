@@ -32,6 +32,68 @@ function hash(str) {
   return crypto.createHash('md5').update(str).digest('hex').slice(0, 20);
 }
 
+/**
+ * Build the AI plugin settings JSON string for OnlyOffice's built-in AI chatbot.
+ * Configures it to use Aurora's API gateway as an OpenAI-compatible provider,
+ * passing the user's auth token so all requests go through Aurora.
+ */
+function buildAiPluginSettings(request, externalOrigin) {
+  const authHeader = request.headers.get('Authorization') || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : '';
+
+  // Check which providers are available (so we can offer matching models)
+  const lmStudioUrl = request.headers.get('x-lmstudio-url') || '';
+
+  const apiBase = `${externalOrigin}/api/v1`;
+
+  // ── Aurora provider: all requests go through Aurora's API ──
+  // API key = user's JWT. The /api/v1/chat/completions endpoint handles
+  // provider routing based on model name (deepseek-* → DeepSeek,
+  // everything else → LM Studio, with env/DB fallback for keys).
+  const providers = {
+    Aurora: {
+      name: 'Aurora',
+      url: apiBase,
+      key: token,
+      models: [],
+    },
+  };
+
+  const models = [
+    {
+      id: 'deepseek-chat',
+      name: 'DeepSeek Chat',
+      provider: 'Aurora',
+      capabilities: 1, // Chat
+    },
+  ];
+
+  // If LM Studio is configured, offer additional model names
+  if (lmStudioUrl) {
+    models.push({
+      id: 'gpt-4o',
+      name: 'GPT-4o (via LM Studio)',
+      provider: 'Aurora',
+      capabilities: 1,
+    });
+    models.push({
+      id: 'claude-sonnet-4-20250514',
+      name: 'Claude Sonnet 4 (via LM Studio)',
+      provider: 'Aurora',
+      capabilities: 1,
+    });
+  }
+
+  const settings = {
+    version: 4,
+    providers,
+    models,
+    customProviders: {},
+  };
+
+  return JSON.stringify(settings);
+}
+
 export async function GET(request) {
   try {
     const url = new URL(request.url);
@@ -66,7 +128,8 @@ export async function GET(request) {
     const fileKey = hash(`${workspaceId}/${filePath}/${stat.mtimeMs}`);
 
     // Build the document serving URL (no token needed — DS JWT is disabled)
-    const documentUrl = `/api/onlyoffice/document?workspaceId=${encodeURIComponent(workspaceId)}&filePath=${encodeURIComponent(filePath)}`;
+    // Include mtimeMs as cache-buster so refreshFile() triggers a real re-fetch
+    const documentUrl = `/api/onlyoffice/document?workspaceId=${encodeURIComponent(workspaceId)}&filePath=${encodeURIComponent(filePath)}&v=${stat.mtimeMs}`;
 
     // Build the callback URL with workspace params
     const callbackUrl = `/api/onlyoffice/callback?workspaceId=${encodeURIComponent(workspaceId)}&filePath=${encodeURIComponent(filePath)}`;
@@ -74,6 +137,9 @@ export async function GET(request) {
     // DS-internal URL: with network_mode: host, the DS shares the host network,
     // so localhost:3000 reaches the Next.js server directly — no Docker networking needed.
     const appInternalOrigin = process.env.APP_INTERNAL_URL || 'http://localhost:3000';
+
+    // External origin for browser-based API calls (AI plugin runs in the iframe)
+    const appExternalOrigin = request.headers.get('origin') || 'http://localhost:3000';
 
     // ── Build editor config ──
     const config = {
@@ -102,6 +168,7 @@ export async function GET(request) {
         callbackUrl: `${appInternalOrigin}${callbackUrl}`,
         mode: mode,
         lang: 'en',
+        canRequestRefreshFile: true,
         customization: {
           uiTheme: 'dark',
           compactHeader: true,
@@ -116,6 +183,14 @@ export async function GET(request) {
         user: {
           id: userId || 'anonymous',
           name: userId || 'User',
+        },
+      },
+      plugins: {
+        autostart: [
+          'asc.{AURORA-BRIDGE-0000-0000-000000000001}',
+        ],
+        pluginsData: {
+          'asc.{AURORA-BRIDGE-0000-0000-000000000001}': `${appExternalOrigin}/onlyoffice-plugins/aurora-bridge/config.json`,
         },
       },
     };

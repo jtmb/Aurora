@@ -9,6 +9,7 @@ services:
       dockerfile: Dockerfile.slim
     ports:
       - "${CODE_SERVER_API_PORT:-3001}:3001"
+      - "${CODE_SERVER_PORT:-8080}:8080"
     volumes:
       - ${HOME:-~}/.aurora/workspaces:/workspaces
       - cline-config:/home/coder/.cline
@@ -19,18 +20,25 @@ services:
       - LMSTUDIO_URL=${LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
       - LMSTUDIO_MODEL=${LMSTUDIO_MODEL:-qwen-coder}
       - LMSTUDIO_API_KEY=${LMSTUDIO_API_KEY:-sk-lm-studio}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
       - ORCHESTRATOR_PLAN_FIRST=${ORCHESTRATOR_PLAN_FIRST:-true}
       - CLINE_TIMEOUT=${CLINE_TIMEOUT:-600}
       - MAX_ITERATIONS=${MAX_ITERATIONS:-50}
       - CODE_SERVER_API_PORT=${CODE_SERVER_API_PORT:-3001}
+      - CODE_SERVER_PORT=${CODE_SERVER_PORT:-8080}
       - ORCHESTRATOR_CORS_ORIGIN=${ORCHESTRATOR_CORS_ORIGIN:-http://localhost:3000}
-    command: ["api"]
+    command: ["both"]
     restart: unless-stopped
 
   onlyoffice-document-server:
     image: onlyoffice/documentserver:latest
     container_name: onlyoffice-ds
-    network_mode: host
+    ports:
+      - "${ONLYOFFICE_DS_PORT:-8082}:80"
+      - "80:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - JWT_ENABLED=false
     volumes:

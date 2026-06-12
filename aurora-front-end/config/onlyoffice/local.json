@@ -1,8 +1,6 @@
 {
   "storage": {
-    "fs": {
-      "externalHost": "localhost:3000"
-    }
+    "fs": {}
   },
   "services": {
     "CoAuthoring": {

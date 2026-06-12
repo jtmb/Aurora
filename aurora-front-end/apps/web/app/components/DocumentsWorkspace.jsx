@@ -1,259 +1,79 @@
-// @aurora/web - DocumentsWorkspace: Document viewer + Chat/Agent/Checkpoints panel
+// @aurora/web - DocumentsWorkspace: document hub + OnlyOffice editor
+// Shows document-type selection hub, creates blank Office files, and opens the editor.
 
 'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import OnlyOfficeEditor from './OnlyOfficeEditor';
 import AgentPanel from './AgentPanel';
 
-const MIN_PANEL = 280;
-const MAX_PANEL_RATIO = 0.5;
+const DOC_TYPES = [
+  { type: 'docx', label: 'Document', icon: '📄', desc: 'Word processor', ext: '.docx' },
+  { type: 'xlsx', label: 'Spreadsheet', icon: '📊', desc: 'Sheets & tables', ext: '.xlsx' },
+  { type: 'pptx', label: 'Presentation', icon: '📽️', desc: 'Slides & decks', ext: '.pptx' },
+];
+
+function getAuthHeaders() {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+  if (!token) return {};
+  return { 'Authorization': `Bearer ${token}` };
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(iso) {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const diffMs = now - d;
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'Just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    return d.toLocaleDateString();
+  } catch { return ''; }
+}
 
 export default function DocumentsWorkspace({
   workspace,
-  onWorkspaceDeleted,
-  onBack,
-  workspaceChatId: initialChatId,
-  initialMessages,
 }) {
-  // ── Panel layout state ──
-  const [chatPanelPosition, setChatPanelPosition] = useState('right'); // 'right' | 'bottom'
-  const [chatPanelCollapsed, setChatPanelCollapsed] = useState(false);
-  const [panelWidth, setPanelWidth] = useState(380);
-  const [panelHeight, setPanelHeight] = useState(280); // for bottom mode
-  const [activeTab, setActiveTab] = useState('chat'); // 'chat' | 'agent' | 'checkpoints'
-
-  // ── Document state ──
-  const [workspaceFiles, setWorkspaceFiles] = useState([]); // [{ path, name, type }]
-  const [activeDocument, setActiveDocument] = useState(null); // { path, name, type }
-  const [documentContent, setDocumentContent] = useState(null); // { type, html?, sheets? }
-  const [documentLoading, setDocumentLoading] = useState(false);
-  const [documentError, setDocumentError] = useState('');
-  const [dragOver, setDragOver] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [clearingWorkspace, setClearingWorkspace] = useState(false);
-
-  // ── Checkpoint state ──
-  const [checkpoints, setCheckpoints] = useState([]);
-  const [checkpointsLoading, setCheckpointsLoading] = useState(false);
-  const [restoringCheckpoint, setRestoringCheckpoint] = useState(null);
-
-  // ── Chat state ──
-  const [workspaceChatId, setWorkspaceChatId] = useState(initialChatId || null);
-  const [workspaceMessages, setWorkspaceMessages] = useState(initialMessages || null);
-
-  // Track file changes for OnlyOfficeEditor auto-refresh
+  const workspaceId = workspace?.id;
+  const [activeFile, setActiveFile] = useState(null);  // { path, type }
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(null);       // type being created
+  const [error, setError] = useState('');
   const [documentVersion, setDocumentVersion] = useState(0);
+  const versionTimerRef = useRef(null);  // debounce timer for agent-induced rapid version bumps
+  const hasAutoOpened = useRef(false);
 
-  // ── Refs ──
-  const panelDragRef = useRef(null);
-  const containerRef = useRef(null);
-  const fileInputRef = useRef(null);
+  // ── Chat panel state ────────────────────────────────────────────────────
+  const [chatVisible, setChatVisible] = useState(true);
+  const MIN_CHAT = 280;
+  const DEFAULT_CHAT = 380;
+  const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT);
+  const draggingRef = useRef(null);
+  const chatId = `docs_${workspaceId}_chat`;
+  const [chatMessages, setChatMessages] = useState(null); // null = not fetched yet
 
-
-  // ── Clear workspace handler ──
-  const handleClearWorkspace = async () => {
-    if (!workspace) return;
-    setClearingWorkspace(true);
-    try {
-      const token = localStorage.getItem('auth_token');
-      const res = await fetch(`/api/workspace/${workspace.id}/clear`, {
-        method: 'DELETE',
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      const data = await res.json();
-      if (data.error) {
-        console.error('[DocumentsWorkspace] Clear failed:', data.error.message);
-      } else {
-        // Reset all document state
-        setWorkspaceFiles([]);
-        setActiveDocument(null);
-        setDocumentContent(null);
-      }
-    } catch (err) {
-      console.error('[DocumentsWorkspace] Clear error:', err.message);
-    } finally {
-      setClearingWorkspace(false);
-      setShowClearConfirm(false);
-    }
-  };
-
-  // ── Load workspace files on mount ──
-  useEffect(() => {
-    if (!workspace) return;
-    loadWorkspaceFiles();
-    loadWorkspaceChatData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspace]);
-
-  // Load checkpoints when switching to checkpoints tab
-  useEffect(() => {
-    if (activeTab === 'checkpoints' && workspace) {
-      loadCheckpoints();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, workspace]);
-
-  const loadWorkspaceFiles = async () => {
-    if (!workspace) return;
-    try {
-      const token = localStorage.getItem('auth_token');
-      const res = await fetch(`/api/workspace/${workspace.id}/tree`, {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      const data = await res.json();
-      const tree = data.tree || [];
-
-      // Flatten tree to find .docx and .xlsx files
-      const docFiles = [];
-      const walk = (nodes, prefix = '') => {
-        for (const node of nodes) {
-          const fullPath = prefix ? `${prefix}/${node.name}` : node.name;
-          if (node.type === 'file') {
-            const ext = node.name.split('.').pop()?.toLowerCase();
-            if (ext === 'docx' || ext === 'xlsx' || ext === 'pptx') {
-              docFiles.push({ path: fullPath, name: node.name, type: ext });
-            }
-          } else if (node.type === 'directory' && node.children) {
-            walk(node.children, fullPath);
-          }
-        }
-      };
-      walk(tree);
-
-      setWorkspaceFiles(docFiles);
-
-      // Auto-select first document if none active
-      if (!activeDocument && docFiles.length > 0) {
-        loadDocument(docFiles[0]);
-      }
-    } catch (err) {
-      console.error('[DocumentsWorkspace] Failed to load files:', err);
-    }
-  };
-
-  const loadDocument = (file) => {
-    if (!workspace) return;
-    setDocumentLoading(true);
-    setDocumentError('');
-    setDocumentContent(null);
-    setActiveDocument(file);
-    setDocumentLoading(false);
-  };
-
-  const loadCheckpoints = async () => {
-    if (!workspace) return;
-    setCheckpointsLoading(true);
-    try {
-      const token = localStorage.getItem('auth_token');
-      const res = await fetch(`/api/workspace/${workspace.id}/checkpoint/list`, {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      const data = await res.json();
-      if (!data.error) {
-        setCheckpoints(data.checkpoints || []);
-      }
-    } catch (err) {
-      console.error('[DocumentsWorkspace] Failed to load checkpoints:', err);
-    } finally {
-      setCheckpointsLoading(false);
-    }
-  };
-
-  const handleRestoreCheckpoint = async (tag) => {
-    if (!workspace) return;
-    setRestoringCheckpoint(tag);
-    try {
-      const token = localStorage.getItem('auth_token');
-      const res = await fetch(`/api/workspace/${workspace.id}/checkpoint/restore`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ tag })
-      });
-      const data = await res.json();
-      if (data.error) {
-        console.error('Restore failed:', data.error.message);
-      } else {
-        // Refresh document and checkpoints list
-        if (activeDocument) {
-          loadDocument(activeDocument);
-        }
-        await loadCheckpoints();
-      }
-    } catch (err) {
-      console.error('Restore error:', err);
-    } finally {
-      setRestoringCheckpoint(null);
-    }
-  };
-
-  const loadWorkspaceChatData = async () => {
-    if (!workspace || initialChatId) return;
-    const token = localStorage.getItem('auth_token');
-    if (!token) return;
-
-    try {
-      const wsChats = JSON.parse(localStorage.getItem('aurora_ws_chats') || '{}');
-      let chatId = wsChats[workspace.id];
-
-      if (chatId) {
-        const chatRes = await fetch(`/api/chats/${chatId}`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (chatRes.ok) {
-          const chatData = await chatRes.json();
-          setWorkspaceChatId(chatId);
-          setWorkspaceMessages(chatData.messages || []);
-          return;
-        }
-        delete wsChats[workspace.id];
-        localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
-      }
-
-      const listRes = await fetch(`/api/chats?workspaceId=${encodeURIComponent(workspace.id)}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (listRes.ok) {
-        const listData = await listRes.json();
-        if (listData.chats?.length > 0) {
-          chatId = listData.chats[0].id;
-          wsChats[workspace.id] = chatId;
-          localStorage.setItem('aurora_ws_chats', JSON.stringify(wsChats));
-          setWorkspaceChatId(chatId);
-        }
-      }
-    } catch (err) {
-      console.error('[DocumentsWorkspace] Chat load error:', err);
-    }
-  };
-
-  // ── Panel drag handlers ──
+  // Resize drag handlers
   useEffect(() => {
     const onMouseMove = (e) => {
-      if (!panelDragRef.current) return;
-      const { position, startX, startY, startSize } = panelDragRef.current;
-      const containerRect = containerRef.current?.getBoundingClientRect();
-      if (!containerRect) return;
-
-      if (position === 'right') {
-        const delta = startX - e.clientX;
-        const maxWidth = containerRect.width * MAX_PANEL_RATIO;
-        setPanelWidth(Math.max(MIN_PANEL, Math.min(maxWidth, startSize + delta)));
-      } else if (position === 'bottom') {
-        const delta = startY - e.clientY;
-        const maxHeight = containerRect.height * MAX_PANEL_RATIO;
-        setPanelHeight(Math.max(120, Math.min(maxHeight, startSize + delta)));
-      }
+      if (!draggingRef.current) return;
+      const { startX, startSize } = draggingRef.current;
+      const delta = startX - e.clientX;
+      setChatWidth(Math.max(MIN_CHAT, startSize + delta));
     };
-
     const onMouseUp = () => {
-      panelDragRef.current = null;
+      draggingRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
     };
-
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
     return () => {
@@ -262,547 +82,356 @@ export default function DocumentsWorkspace({
     };
   }, []);
 
-  const startPanelDrag = (position, e, currentSize) => {
+  const startDrag = (e, currentSize) => {
     e.preventDefault();
-    panelDragRef.current = { position, startX: e.clientX, startY: e.clientY, startSize: currentSize };
+    draggingRef.current = { startX: e.clientX, startSize: currentSize };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
   };
 
-  const togglePanelPosition = () => {
-    setChatPanelPosition(prev => prev === 'right' ? 'bottom' : 'right');
-    setChatPanelCollapsed(false);
-  };
+  // ── Document-aware agent callbacks ──────────────────────────────────────
+  // NOTE: defined after loadFiles so they can reference it
+  const handleReadFile = useCallback(async (filePath) => {
+    if (!workspaceId) return null;
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/document/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ filePath }),
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch { return null; }
+  }, [workspaceId]);
 
-  const togglePanelCollapse = () => {
-    setChatPanelCollapsed(prev => !prev);
-  };
+  const handleFileEdit = useCallback(async (filePath, newContent) => {
+    if (!workspaceId) return null;
+    try {
+      const res = await fetch(`/api/workspace/${workspaceId}/document/write`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ filePath, content: newContent }),
+      });
+      if (!res.ok) return null;
+      setDocumentVersion(t => t + 1);
+      loadFiles();
+      return await res.json();
+    } catch { return null; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
 
-  // ── Tab buttons ──
-  const tabs = [
-    { id: 'chat', label: 'Chat', icon: (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-      </svg>
-    )},
-    { id: 'agent', label: 'Agent', icon: (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
-      </svg>
-    )},
-    { id: 'checkpoints', label: 'Checkpoints', icon: (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    )}
-  ];
+  const handleFileTreeChange = useCallback(() => {
+    loadFiles();
+    // Debounce version bumps — agent SSE fires files_changed/iteration_end/done
+    // within milliseconds; we only need one editor remount per burst.
+    if (versionTimerRef.current) clearTimeout(versionTimerRef.current);
+    versionTimerRef.current = setTimeout(() => {
+      setDocumentVersion(t => t + 1);
+      versionTimerRef.current = null;
+    }, 2000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // ── Auto-refresh on agent file changes ──
-  const handleAgentFileChange = useCallback(async () => {
-    if (!activeDocument || !workspace) return;
-    setDocumentVersion(v => v + 1);
-    loadDocument(activeDocument);
-    loadWorkspaceFiles(); // refresh file list in case of new files
-    if (activeTab === 'checkpoints') {
-      await loadCheckpoints();
+  // ── Handle document_changed SSE event (agent wrote to .docx) ──
+  // Bumps documentVersion so the OnlyOfficeEditor remounts with a fresh config,
+  // which picks up the new file content via updated mtime-based document key.
+  const handleDocumentChanged = useCallback((filePath, content) => {
+    // Reload file list and bump version to force editor remount
+    loadFiles();
+    if (versionTimerRef.current) clearTimeout(versionTimerRef.current);
+    versionTimerRef.current = setTimeout(() => {
+      setDocumentVersion(t => t + 1);
+      versionTimerRef.current = null;
+    }, 2000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Load existing documents ──────────────────────────────────────────────
+  const loadFiles = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      setLoading(true);
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`/api/workspace/${workspaceId}/documents/list`, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setFiles(data.files || []);
+      }
+    } catch (e) {
+      // Silent — list endpoint isn't critical
+    } finally {
+      setLoading(false);
     }
-  }, [activeDocument, workspace, activeTab]);
+  }, [workspaceId]);
 
-  // ── File upload handler ──
-  const handleFileUpload = async (file) => {
-    if (!workspace || !file) return;
-    const ext = file.name.split('.').pop()?.toLowerCase();
-    if (ext !== 'docx' && ext !== 'xlsx' && ext !== 'pptx') {
-      setDocumentError('Only .docx, .xlsx, and .pptx files are supported.');
+  useEffect(() => {
+    loadFiles();
+  }, [loadFiles]);
+
+  // ── Auto-open pending doc or first document on initial mount ─────────────
+  useEffect(() => {
+    if (hasAutoOpened.current) return;
+
+    const pendingDoc = workspace?._pendingDoc;
+    if (pendingDoc) {
+      const ext = pendingDoc.split('.').pop()?.toLowerCase() || 'docx';
+      setActiveFile({ path: pendingDoc, type: ext });
+      hasAutoOpened.current = true;
       return;
     }
-    setUploading(true);
-    setDocumentError('');
+
+    if (!loading && files.length > 0) {
+      const first = files[0];
+      const ext = first.type || first.path?.split('.').pop()?.toLowerCase() || 'docx';
+      setActiveFile({ path: first.path, type: ext });
+      hasAutoOpened.current = true;
+    }
+  }, [files, loading, workspace?._pendingDoc]);
+
+  // ── Fetch chat messages when opening a document (survives back/forth nav) ──
+  useEffect(() => {
+    if (!activeFile || !workspaceId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = localStorage.getItem('auth_token');
+        if (!token) return;
+        const res = await fetch(`/api/chats/${chatId}/messages`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setChatMessages(data.messages || []);
+      } catch { /* silent */ }
+    })();
+    return () => { cancelled = true; };
+  }, [activeFile, workspaceId, chatId]);
+
+  // ── Create a new blank document ──────────────────────────────────────────
+  const createDocument = useCallback(async (type, label) => {
+    if (!workspaceId || creating) return;
+    setCreating(type);
+    setError('');
     try {
       const token = localStorage.getItem('auth_token');
-      const formData = new FormData();
-      formData.append('file', file);
-      const res = await fetch(`/api/workspace/${workspace.id}/upload`, {
+      const res = await fetch(`/api/workspace/${workspaceId}/documents/create`, {
         method: 'POST',
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
-        body: formData,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ type, name: `New ${label}` }),
       });
+
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error?.message || 'Upload failed');
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error?.message || `Failed to create ${label} (${res.status})`);
       }
+
       const data = await res.json();
-      // Refresh file list and auto-open the uploaded file
-      await loadWorkspaceFiles();
-      if (data.file) {
-        loadDocument(data.file);
-      }
-    } catch (err) {
-      setDocumentError(err.message || 'Failed to upload file.');
+      setActiveFile({ path: data.path, type: data.type });
+      // Reload file list in background
+      loadFiles();
+    } catch (e) {
+      setError(e.message);
     } finally {
-      setUploading(false);
-      setDragOver(false);
+      setCreating(null);
     }
-  };
+  }, [workspaceId, creating, loadFiles]);
 
-  const handleDrop = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-    const file = e.dataTransfer?.files?.[0];
-    if (file) handleFileUpload(file);
-  }, [workspace]);
-
-  const handleDragOver = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(true);
+  // ── Open an existing document ────────────────────────────────────────────
+  const openFile = useCallback((file) => {
+    const ext = file.type || file.path?.split('.').pop()?.toLowerCase();
+    setActiveFile({ path: file.path, type: ext || 'docx' });
+    setError('');
   }, []);
 
-  const handleDragLeave = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-  }, []);
+  // ── Back to hub ──────────────────────────────────────────────────────────
+  const backToHub = useCallback(() => {
+    setActiveFile(null);
+    setDocumentVersion(t => t + 1);  // Force editor re-init on next open
+    loadFiles();                   // Refresh file list
+  }, [loadFiles]);
 
-  // ── Render ──
-  const isRightPanel = chatPanelPosition === 'right';
+  // ── Editor view ──────────────────────────────────────────────────────────
+  if (activeFile) {
+    const activeFilePath = activeFile.path;
+    const activeFileName = activeFile.path.split('/').pop();
 
-  return (
-    <div className="flex-1 flex flex-col min-h-0 bg-zinc-950" ref={containerRef}>
-      {/* ── Header Bar ── */}
-      <div className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800/40 flex-shrink-0">
-        <div className="flex items-center gap-3">
-          {/* Back button */}
+    return (
+      <div className="flex-1 flex flex-col min-h-0">
+        {/* Top bar with file name, back button, and chat toggle */}
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 border-b border-zinc-800/40 flex-shrink-0">
           <button
-            onClick={onBack}
-            className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+            onClick={backToHub}
+            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-0.5 rounded hover:bg-zinc-800/50"
           >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            ← Documents
+          </button>
+          <span className="text-zinc-600 text-xs">/</span>
+          <span className="text-xs text-zinc-300 font-medium truncate flex-1">
+            {activeFileName}
+          </span>
+          {/* Chat toggle button */}
+          <button
+            onClick={() => setChatVisible(v => !v)}
+            title={chatVisible ? 'Hide chat' : 'Show chat'}
+            className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
+              chatVisible
+                ? 'text-blue-400 bg-blue-900/30 hover:bg-blue-900/50'
+                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'
+            }`}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
             </svg>
-            <span className="font-medium truncate max-w-[140px]">{workspace?.name || 'Documents'}</span>
+            Chat
           </button>
-
-          {/* Document selector dropdown */}
-          {workspaceFiles.length > 0 && (
-            <div className="relative">
-              <select
-                value={activeDocument?.path || ''}
-                onChange={(e) => {
-                  const selected = workspaceFiles.find(f => f.path === e.target.value);
-                  if (selected) loadDocument(selected);
-                }}
-                className="appearance-none bg-zinc-800 border border-zinc-700/50 rounded-lg pl-3 pr-8 py-1.5 text-xs text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 transition-all cursor-pointer"
-              >
-                {workspaceFiles.map(f => (
-                  <option key={f.path} value={f.path}>
-                    {f.name}
-                  </option>
-                ))}
-              </select>
-              <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-zinc-500 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            </div>
-          )}
         </div>
 
-        <div className="flex items-center gap-1">
-          {/* Panel position toggle */}
-          <button
-            onClick={togglePanelPosition}
-            className="p-1.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-            title={isRightPanel ? 'Move panel to bottom' : 'Move panel to right'}
-          >
-            {isRightPanel ? (
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-              </svg>
-            ) : (
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-              </svg>
-            )}
-          </button>
+        {/* Editor + Chat split */}
+        <div className="flex-1 flex min-h-0">
+          {/* Left: OnlyOffice editor */}
+          <div className="flex-1 min-w-0 p-4 bg-zinc-950 overflow-hidden relative">
+            <OnlyOfficeEditor
+              key={documentVersion}
+              workspaceId={workspaceId}
+              filePath={activeFilePath}
+              fileName={activeFileName}
+              fileType={activeFile.type}
+              mode="edit"
+              containerClassName="h-full rounded-lg shadow-2xl border border-zinc-800/40 overflow-hidden"
+            />
+          </div>
 
-          {/* Panel collapse toggle */}
-          <button
-            onClick={togglePanelCollapse}
-            className="p-1.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-            title={chatPanelCollapsed ? 'Expand panel' : 'Collapse panel'}
-          >
-            {chatPanelCollapsed ? (
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-              </svg>
-            ) : (
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-              </svg>
-            )}
-          </button>
-
-          {/* Clear workspace button */}
-          {workspaceFiles.length > 0 && (
-            <button
-              onClick={() => setShowClearConfirm(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-              title="Clear all files from workspace"
-            >
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-              </svg>
-              Clear
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* ── Main Content Area ── */}
-      <div className={`flex-1 min-h-0 flex ${isRightPanel ? 'flex-row' : 'flex-col'}`}>
-        {/* ── Document Viewer ── */}
-        <div
-          className={`${isRightPanel ? 'flex-1' : 'flex-1'} flex flex-col min-h-0 min-w-0 relative`}
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-        >
-          {/* Drag overlay */}
-          {dragOver && (
-            <div className="absolute inset-0 z-50 bg-indigo-500/10 border-2 border-dashed border-indigo-400 rounded-xl m-2 flex items-center justify-center pointer-events-none">
-              <div className="text-center">
-                <svg className="w-10 h-10 text-indigo-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                </svg>
-                <p className="text-sm text-indigo-300 font-medium">Drop file to upload</p>
-                <p className="text-xs text-indigo-400/60 mt-0.5">.docx, .xlsx, or .pptx</p>
-              </div>
-            </div>
-          )}
-          {uploading && (
-            <div className="absolute inset-0 z-50 bg-zinc-950/60 flex items-center justify-center">
-              <div className="flex items-center gap-3 text-zinc-400">
-                <div className="w-5 h-5 border-2 border-zinc-600 border-t-indigo-500 rounded-full animate-spin" />
-                <span className="text-sm">Uploading…</span>
-              </div>
-            </div>
-          )}
-          {(() => {
-            if (documentLoading) {
-              return (
-                <div className="flex items-center justify-center h-full">
-                  <div className="flex items-center gap-3 text-zinc-500">
-                    <div className="w-5 h-5 border-2 border-zinc-600 border-t-indigo-500 rounded-full animate-spin" />
-                    <span className="text-sm">Loading document…</span>
-                  </div>
-                </div>
-              );
-            }
-            if (documentError) {
-              return (
-                <div className="flex items-center justify-center h-full">
-                  <div className="text-center">
-                    <svg className="w-10 h-10 text-red-400/60 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                    </svg>
-                    <p className="text-sm text-red-400 mb-2">{documentError}</p>
-                    <button
-                      onClick={() => activeDocument && loadDocument(activeDocument)}
-                      className="text-xs text-zinc-400 hover:text-zinc-200 underline transition-colors"
-                    >
-                      Try again
-                    </button>
-                  </div>
-                </div>
-              );
-            }
-            if (!activeDocument) {
-              return (
-                <div
-                  className="flex items-center justify-center h-full cursor-pointer group"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <div className="text-center max-w-sm p-8 rounded-2xl border-2 border-dashed border-zinc-700/50 group-hover:border-indigo-500/40 group-hover:bg-indigo-500/[0.03] transition-all">
-                    <svg className="w-12 h-12 text-zinc-600 mx-auto mb-4 group-hover:text-indigo-400/60 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                    </svg>
-                    <p className="text-sm text-zinc-500 mb-1 group-hover:text-zinc-300 transition-colors">
-                      {workspaceFiles.length === 0
-                        ? 'Drop a .docx, .xlsx, or .pptx file here'
-                        : 'Select a document from the dropdown above.'}
-                    </p>
-                    <p className="text-xs text-zinc-600 group-hover:text-zinc-500 transition-colors">
-                      {workspaceFiles.length === 0
-                        ? 'or click to browse files on your system'
-                        : 'or drop a new file here to add it'}
-                    </p>
-                  </div>
-                </div>
-              );
-            }
-            // All supported document types use OnlyOffice
-            const supportedTypes = ['docx', 'xlsx', 'pptx'];
-            if (activeDocument && supportedTypes.includes(activeDocument.type)) {
-              return (
-                <div className="absolute inset-0 overflow-hidden">
-                  <OnlyOfficeEditor
-                    workspaceId={workspace.id}
-                    filePath={activeDocument.path}
-                    fileName={activeDocument.name}
-                    fileType={activeDocument.type}
-                    mode="edit"
-                    refreshToken={documentVersion}
-                    onSaved={() => {
-                      if (activeTab === 'checkpoints') {
-                        loadCheckpoints();
-                      }
-                    }}
-                  />
-                </div>
-              );
-            }
-            if (activeDocument && !supportedTypes.includes(activeDocument.type)) {
-              return (
-                <div className="flex items-center justify-center h-full">
-                  <p className="text-sm text-zinc-500">Unsupported file type: .{activeDocument.type}</p>
-                </div>
-              );
-            }
-            return null;
-          })()}
-          {/* Hidden file input for click-to-browse */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".docx,.xlsx,.pptx"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleFileUpload(file);
-              e.target.value = ''; // reset so same file can be re-selected
-            }}
-          />
-        </div>
-
-          {/* ── Resize Handle ── */}
-          {!chatPanelCollapsed && (
+          {/* Resize handle */}
+          {chatVisible && (
             <div
-              className={`flex-shrink-0 relative ${isRightPanel ? 'w-0' : 'h-0'}`}
+              className="w-1.5 bg-zinc-800 hover:bg-blue-600/60 cursor-col-resize flex-shrink-0 transition-colors relative group"
+              onMouseDown={(e) => startDrag(e, chatWidth)}
             >
-              <div
-                className={`absolute z-10 ${isRightPanel ? 'inset-y-0 -left-[3px] w-[6px] cursor-col-resize' : 'inset-x-0 -top-[3px] h-[6px] cursor-row-resize'} hover:bg-indigo-500/30 bg-transparent transition-colors`}
-                onMouseDown={(e) => startPanelDrag(chatPanelPosition, e, isRightPanel ? panelWidth : panelHeight)}
+              <div className="absolute inset-y-0 -left-1 -right-1" />
+            </div>
+          )}
+
+          {/* Right: Chat panel */}
+          {chatVisible && (
+            <div style={{ width: chatWidth }} className="flex-shrink-0 min-h-0 border-l border-zinc-800/40 bg-zinc-950">
+              <AgentPanel
+                workspaceId={workspaceId}
+                workspaceChatId={chatId}
+                initialMessages={chatMessages}
+                activeFilePath={activeFilePath}
+                onFileEdit={handleFileEdit}
+                onReadFile={handleReadFile}
+                onFileTreeChange={handleFileTreeChange}
+                onDocumentChanged={handleDocumentChanged}
               />
             </div>
           )}
+        </div>
+      </div>
+    );
+  }
 
-        {/* ── Chat / Agent / Checkpoints Panel ── */}
-        {!chatPanelCollapsed ? (
-          <div
-            className={`flex-shrink-0 flex flex-col min-h-0 bg-zinc-900 border-zinc-800/40 ${isRightPanel ? 'border-l' : 'border-t'}`}
-            style={isRightPanel ? { width: panelWidth } : { height: panelHeight }}
-          >
-            {/* Tab bar */}
-            <div className="flex items-center border-b border-zinc-800/40 px-2 flex-shrink-0">
-              {tabs.map(tab => (
+  // ── Document Hub ─────────────────────────────────────────────────────────
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      {/* Scrollable content */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-3xl mx-auto p-8">
+
+          {/* ── Header ── */}
+          <div className="mb-8">
+            <h1 className="text-2xl font-bold text-zinc-100 mb-1">Documents</h1>
+            <p className="text-sm text-zinc-500">
+              Create and edit Office documents in {workspace?.name || 'this workspace'}
+            </p>
+          </div>
+
+          {/* ── Error banner ── */}
+          {error && (
+            <div className="mb-4 p-3 bg-red-900/40 border border-red-800/50 rounded-lg text-sm text-red-300 flex items-center justify-between">
+              <span>{error}</span>
+              <button onClick={() => setError('')} className="text-red-400 hover:text-red-200 ml-2">✕</button>
+            </div>
+          )}
+
+          {/* ── New Document buttons ── */}
+          <div className="mb-8">
+            <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">Create New</h2>
+            <div className="grid grid-cols-3 gap-3">
+              {DOC_TYPES.map(({ type, label, icon, desc }) => (
                 <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors border-b-2 -mb-[1px] ${
-                    activeTab === tab.id
-                      ? 'text-indigo-400 border-indigo-500'
-                      : 'text-zinc-500 border-transparent hover:text-zinc-300'
-                  }`}
+                  key={type}
+                  onClick={() => createDocument(type, label)}
+                  disabled={!!creating}
+                  className="flex flex-col items-center gap-2 p-5 rounded-xl border border-zinc-800/60 bg-zinc-900/60 hover:bg-zinc-800/60 hover:border-zinc-700/60 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-left"
                 >
-                  {tab.icon}
-                  {tab.label}
+                  <span className="text-3xl">{icon}</span>
+                  <div className="text-center">
+                    <div className="text-sm font-medium text-zinc-200">{label}</div>
+                    <div className="text-[11px] text-zinc-500">{desc}</div>
+                  </div>
+                  {creating === type && (
+                    <span className="text-[11px] text-blue-400 animate-pulse mt-1">Creating…</span>
+                  )}
                 </button>
               ))}
             </div>
+          </div>
 
-            {/* Tab content */}
-            <div className="flex-1 min-h-0 overflow-auto">
-              {/* Chat + Agent tabs */}
-              {(activeTab === 'chat' || activeTab === 'agent') && (
-                <AgentPanel
-                  workspaceId={workspace?.id}
-                  workspaceChatId={workspaceChatId}
-                  initialMessages={workspaceMessages}
-                  activeFilePath={activeDocument?.path || null}
-                  onFileEdit={async (filePath, content) => {
-                    // Save document content after agent writes
-                    await handleAgentFileChange();
-                  }}
-                  onFileTreeChange={handleAgentFileChange}
-                  onReadFile={async (path) => {
-                    if (!workspace) return null;
-                    const token = localStorage.getItem('auth_token');
-                    const res = await fetch(`/api/workspace/${workspace.id}/read`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                      body: JSON.stringify({ path })
-                    });
-                    return res.json();
-                  }}
-                  currentFileContent={null}
-                  onOpenPreview={null}
-                  codeMode="documents"
-                  showPlanTab={false}
-                  hideBottomControls={true}
-                />
-              )}
-
-              {/* Checkpoints tab */}
-              {activeTab === 'checkpoints' && (
-                <div className="p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-xs font-semibold text-zinc-300">Document Checkpoints</h3>
+          {/* ── Recent Documents ── */}
+          <div>
+            <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">
+              Recent Documents {files.length > 0 && `(${files.length})`}
+            </h2>
+            {loading ? (
+              <div className="text-sm text-zinc-500 py-4">Loading documents…</div>
+            ) : files.length === 0 ? (
+              <div className="text-sm text-zinc-600 py-4">
+                No documents yet. Create one above to get started.
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {files.map((file, i) => {
+                  const ext = (file.type || file.path?.split('.').pop() || '').toLowerCase();
+                  const iconMap = { docx: '📄', xlsx: '📊', pptx: '📽️', doc: '📄', xls: '📊', ppt: '📽️' };
+                  const icon = iconMap[ext] || '📄';
+                  return (
                     <button
-                      onClick={loadCheckpoints}
-                      disabled={checkpointsLoading}
-                      className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-                      title="Refresh"
+                      key={file.path || i}
+                      onClick={() => openFile(file)}
+                      className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-zinc-800/50 transition-colors text-left group"
                     >
-                      <svg className={`w-3.5 h-3.5 ${checkpointsLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                    </button>
-                  </div>
-
-                  {checkpointsLoading ? (
-                    <div className="flex items-center justify-center py-8 text-zinc-500 text-xs">
-                      <div className="w-4 h-4 border-2 border-zinc-600 border-t-indigo-500 rounded-full animate-spin mr-2" />
-                      Loading…
-                    </div>
-                  ) : checkpoints.length === 0 ? (
-                    <div className="text-center py-8">
-                      <svg className="w-8 h-8 text-zinc-600 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      <p className="text-xs text-zinc-500">No checkpoints yet</p>
-                      <p className="text-[11px] text-zinc-600 mt-1">Checkpoints are created automatically when changes are made to documents.</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-1.5">
-                      {checkpoints.map(cp => (
-                        <div
-                          key={cp.tag}
-                          className="flex items-center justify-between bg-zinc-800/60 border border-zinc-700/40 rounded-lg px-3 py-2 group hover:border-zinc-600/50 transition-colors"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-mono text-zinc-300 truncate">{cp.tag}</span>
-                              {cp.hash && cp.hash !== 'unknown' && (
-                                <span className="text-[10px] font-mono text-zinc-600">{cp.hash}</span>
-                              )}
-                            </div>
-                            {cp.date && (
-                              <p className="text-[10px] text-zinc-500 mt-0.5">
-                                {new Date(cp.date).toLocaleString()}
-                              </p>
-                            )}
-                          </div>
-                          <button
-                            onClick={() => handleRestoreCheckpoint(cp.tag)}
-                            disabled={restoringCheckpoint === cp.tag}
-                            className="opacity-0 group-hover:opacity-100 text-[11px] px-2 py-1 rounded bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30 disabled:opacity-50 transition-all flex-shrink-0"
-                          >
-                            {restoringCheckpoint === cp.tag ? 'Restoring…' : 'Restore'}
-                          </button>
+                      <span className="text-lg flex-shrink-0">{icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-zinc-300 group-hover:text-zinc-100 truncate">
+                          {file.name || file.path?.split('/').pop()}
                         </div>
-                      ))}
-                    </div>
-                  )}
+                        <div className="text-[11px] text-zinc-600">
+                          {file.path?.split('/').slice(0, -1).join('/') || 'root'} — {formatSize(file.size)} · {formatDate(file.modifiedAt)}
+                        </div>
+                      </div>
+                      <span className="text-[10px] text-zinc-600 uppercase flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                        Open →
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
 
-                  <p className="text-[10px] text-zinc-600 mt-3 text-center">
-                    Restoring a checkpoint reverts the entire workspace to that point in time. This action cannot be undone.
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          /* Collapsed panel tab — thin strip to expand */
-          <div
-            className={`flex-shrink-0 bg-zinc-900 border-zinc-800/40 flex items-center justify-center cursor-pointer hover:bg-zinc-800 transition-colors ${isRightPanel ? 'border-l w-6' : 'border-t h-6'}`}
-            onClick={togglePanelCollapse}
-            title="Expand panel"
-          >
-            <svg className={`w-3 h-3 text-zinc-500 ${isRightPanel ? '' : 'rotate-90'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={isRightPanel ? 'M9 5l7 7-7 7' : 'M5 15l7-7 7 7'} />
-            </svg>
-          </div>
-        )}
+        </div>
       </div>
 
-      {/* ── Clear Workspace Confirmation Modal ── */}
-      {showClearConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60" onClick={() => setShowClearConfirm(false)}>
-          <div
-            className="bg-zinc-900 border border-zinc-700/50 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-9 h-9 rounded-full bg-red-500/10 flex items-center justify-center flex-shrink-0">
-                <svg className="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                </svg>
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-100">Clear Workspace</h3>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  This will permanently delete all {workspaceFiles.length} file{workspaceFiles.length !== 1 ? 's' : ''} in this workspace.
-                </p>
-              </div>
-            </div>
-            <p className="text-xs text-zinc-500 mb-5">This action cannot be undone. The workspace structure and settings will be preserved.</p>
-            <div className="flex items-center justify-end gap-2">
-              <button
-                onClick={() => setShowClearConfirm(false)}
-                disabled={clearingWorkspace}
-                className="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleClearWorkspace}
-                disabled={clearingWorkspace}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white transition-colors"
-              >
-                {clearingWorkspace ? (
-                  <>
-                    <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Clearing…
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                    Delete All
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Status Bar ── */}
+      {/* Bottom status bar */}
       <div className="flex items-center justify-between px-3 py-1 bg-zinc-900 border-t border-zinc-800/40 flex-shrink-0">
-        <div className="flex items-center gap-3 text-[10px] text-zinc-500">
-          {activeDocument ? (
-            <>
-              <span>{activeDocument.name}</span>
-              <span className="text-zinc-700">|</span>
-              <span className="uppercase">{activeDocument.type}</span>
-            </>
-          ) : (
-            <span>No document</span>
-          )}
-        </div>
-        <div className="text-[10px] text-zinc-600">
-          Powered by OnlyOffice
-        </div>
+        <span className="text-[10px] text-zinc-500">{workspace?.name || 'Documents'}</span>
+        <span className="text-[10px] text-zinc-600">Powered by OnlyOffice</span>
       </div>
     </div>
   );

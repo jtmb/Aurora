@@ -43,14 +43,18 @@ const extractKeys = async (request) => {
   };
 
   const userId = getUserId(request);
-  if (!userId) return headerKeys;
 
   // Fallback: provider_settings DB table (survives cache clears)
+  // When authenticated: read that user's row. When unauthenticated (e.g.
+  // container setup scripts): read ALL rows to find any configured keys.
   try {
     runMigrations();
     const db = getDb();
-    const row = db.prepare('SELECT settings_json FROM provider_settings WHERE user_id = ?').get(userId);
-    if (row) {
+    const rows = userId
+      ? [db.prepare('SELECT settings_json FROM provider_settings WHERE user_id = ?').get(userId)].filter(Boolean)
+      : db.prepare('SELECT settings_json FROM provider_settings').all();
+
+    for (const row of rows) {
       const settings = JSON.parse(row.settings_json);
       if (!headerKeys.openai && settings.openai) headerKeys.openai = settings.openai;
       if (!headerKeys.anthropic && settings.anthropic) headerKeys.anthropic = settings.anthropic;
@@ -66,6 +70,15 @@ const extractKeys = async (request) => {
     }
   } catch (err) {
     console.error('[Aurora] Failed to load provider_settings fallback:', err.message);
+  }
+
+  // Final fallback: server-side environment variables (.env.local)
+  if (!headerKeys.deepseek && process.env.DEEPSEEK_API_KEY) headerKeys.deepseek = process.env.DEEPSEEK_API_KEY;
+  if (!headerKeys.lmStudioHost && process.env.LM_STUDIO_HOST) headerKeys.lmStudioHost = process.env.LM_STUDIO_HOST;
+  if (!headerKeys.lmStudioPort && process.env.LM_STUDIO_PORT) headerKeys.lmStudioPort = process.env.LM_STUDIO_PORT;
+  if (!headerKeys.lmStudioApiKey && process.env.LMSTUDIO_API_KEY) headerKeys.lmStudioApiKey = process.env.LMSTUDIO_API_KEY;
+  if (!headerKeys.lmStudioUrl && headerKeys.lmStudioHost && headerKeys.lmStudioPort) {
+    headerKeys.lmStudioUrl = `http://${headerKeys.lmStudioHost}:${headerKeys.lmStudioPort}/v1`;
   }
 
   return headerKeys;
@@ -196,6 +209,41 @@ const fetchLmStudioModels = async (url, apiKey) => {
   } catch { return []; }
 };
 
+/**
+ * Static fallback model lists — used when live provider APIs are unreachable.
+ * Returns known models for any provider with a configured key, so the UI
+ * always shows something useful even when provider servers are down.
+ */
+const STATIC_MODELS = {
+  deepseek: [
+    { id: 'deepseek-chat', name: 'DeepSeek Chat (V4)', owned_by: 'deepseek', source: 'DeepSeek' },
+    { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', owned_by: 'deepseek', source: 'DeepSeek' },
+    { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', owned_by: 'deepseek', source: 'DeepSeek' },
+  ],
+  openai: [
+    { id: 'gpt-4o', name: 'GPT-4o', owned_by: 'openai', source: 'OpenAI' },
+    { id: 'gpt-4o-mini', name: 'GPT-4o Mini', owned_by: 'openai', source: 'OpenAI' },
+    { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', owned_by: 'openai', source: 'OpenAI' },
+    { id: 'o3-mini', name: 'o3 Mini', owned_by: 'openai', source: 'OpenAI' },
+  ],
+  anthropic: [
+    { id: 'claude-4-sonnet-20250514', name: 'Claude 4 Sonnet', owned_by: 'anthropic', source: 'Anthropic' },
+    { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', owned_by: 'anthropic', source: 'Anthropic' },
+    { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', owned_by: 'anthropic', source: 'Anthropic' },
+  ],
+  ollama: [], // Ollama is local-only; no static fallback
+  lmstudio: [], // LM Studio is local-only; no static fallback
+};
+
+const getStaticFallbackModels = (keys) => {
+  const models = [];
+  if (keys.deepseek) models.push(...STATIC_MODELS.deepseek);
+  if (keys.openai) models.push(...STATIC_MODELS.openai);
+  if (keys.anthropic) models.push(...STATIC_MODELS.anthropic);
+  if (keys.ollamaBase) models.push(...STATIC_MODELS.ollama);
+  return models;
+};
+
 export async function GET(request) {
   try {
     const keys = await extractKeys(request);
@@ -222,6 +270,18 @@ export async function GET(request) {
       ...ollamaModels,
       ...lmStudioModels
     ];
+
+    // Per-provider static fallback: if a provider has a key but its live fetch
+    // returned nothing, use static models so the UI always shows known models.
+    if (openaiModels.length === 0 && keys.openai) allModels.push(...STATIC_MODELS.openai);
+    if (anthropicModels.length === 0 && keys.anthropic) allModels.push(...STATIC_MODELS.anthropic);
+    if (deepseekModels.length === 0 && keys.deepseek) allModels.push(...STATIC_MODELS.deepseek);
+    if (ollamaModels.length === 0 && keys.ollamaBase) allModels.push(...STATIC_MODELS.ollama);
+
+    // If absolutely nothing, use static fallback for any provider with a key
+    if (allModels.length === 0) {
+      allModels = getStaticFallbackModels(keys);
+    }
 
     // For non-admin users, filter models to only those provisioned via user_model_access
     const userId = getUserId(request);

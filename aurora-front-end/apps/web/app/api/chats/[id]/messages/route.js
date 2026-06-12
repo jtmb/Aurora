@@ -56,6 +56,16 @@ export async function POST(request, { params }) {
     const messageId = body.id || `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const timestamp = body.timestamp || new Date().toISOString();
 
+    // Auto-create chat if it doesn't exist (handles docs_xxx_chat format IDs, etc.)
+    const chatExists = db.prepare('SELECT id FROM chats WHERE id = ?').get(id);
+    if (!chatExists) {
+      const chatTitle = body.chatTitle || 'Workspace Chat';
+      db.prepare(`
+        INSERT INTO chats (id, user_id, title, model_id, provider, message_count, workspace_id, created_at)
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+      `).run(id, userId, chatTitle, body.model || '', body.provider || '', body.workspaceId || '', timestamp);
+    }
+
     // Get next position
     const lastMsg = db.prepare('SELECT MAX(position) as maxPos FROM messages WHERE chat_id = ?').get(id);
     const position = (lastMsg?.maxPos ?? -1) + 1;
