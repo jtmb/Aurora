@@ -74,13 +74,14 @@ echo ""
 echo "[1/6] Detecting Aurora providers..."
 
 PROVIDERS_JSON=""
-if curl -s --max-time 5 "${AURORA_GATEWAY_BASE}/api/v1/providers" > /tmp/aurora-providers.json 2>/dev/null; then
-  PROVIDERS_JSON=$(cat /tmp/aurora-providers.json)
+PROVIDERS_TMP="${CLINE_DATA_DIR}/providers-tmp.json"
+if curl -s --max-time 5 "${AURORA_GATEWAY_BASE}/api/v1/providers" > "$PROVIDERS_TMP" 2>/dev/null; then
+  PROVIDERS_JSON=$(cat "$PROVIDERS_TMP")
   echo "  ✓ Fetched provider list from Aurora API"
 else
   echo "  ⚠ Could not reach Aurora API — using env-var fallback"
   # Fallback: use env vars to determine providers
-  cat > /tmp/aurora-providers.json << EOF
+  cat > "$PROVIDERS_TMP" << EOF
 {
   "providers": {
     "deepseek": ${DEEPSEEK_API_KEY:+true}${DEEPSEEK_API_KEY:-false},
@@ -146,48 +147,30 @@ if [ -z "$LMSTUDIO_BASE" ]; then
   LMSTUDIO_BASE="http://localhost:1234"
 fi
 
-# ── Step 2: Provider enum mapping (Cline uses int32 for planModeApiProvider) ──
-# These MUST be numeric — Cline serializes planModeApiProvider as int32!
-# Enum values from Cline source:
-#   anthropic=0, openrouter=1, openai=4, ollama=5, lmstudio=6, gemini=7,
-#   deepseek=11, vscode-lm=15, xai=21
-declare -A PROVIDER_ENUM=(
-  ["deepseek"]=11
-  ["lmstudio"]=6
-  ["openai"]=4
-  ["ollama"]=5
-  ["anthropic"]=0
-)
-
+# ── Step 2: Primary provider selection ───────────────────────────────────
 # Primary: first available from [DeepSeek, LM Studio, OpenAI, Anthropic]
-PRIMARY_PROVIDER=""          # string name for providers.json
-PRIMARY_PROVIDER_ENUM=""     # int32 enum for globalState.json
+PRIMARY_PROVIDER=""          # string name for both globalState.json and providers.json
 PRIMARY_MODEL=""
 
 if [ "$HAS_DEEPSEEK" = "true" ]; then
   PRIMARY_PROVIDER="deepseek"
-  PRIMARY_PROVIDER_ENUM="${PROVIDER_ENUM[deepseek]}"
   PRIMARY_MODEL="$DEFAULT_DEEPSEEK_MODEL"
 elif [ "$HAS_LMSTUDIO" = "true" ]; then
   PRIMARY_PROVIDER="lmstudio"
-  PRIMARY_PROVIDER_ENUM="${PROVIDER_ENUM[lmstudio]}"
   PRIMARY_MODEL="$DEFAULT_LMSTUDIO_MODEL"
 elif [ "$HAS_OPENAI" = "true" ]; then
   PRIMARY_PROVIDER="openai"
-  PRIMARY_PROVIDER_ENUM="${PROVIDER_ENUM[openai]}"
   PRIMARY_MODEL="$DEFAULT_OPENAI_MODEL"
 elif [ "$HAS_ANTHROPIC" = "true" ]; then
   PRIMARY_PROVIDER="anthropic"
-  PRIMARY_PROVIDER_ENUM="${PROVIDER_ENUM[anthropic]}"
   PRIMARY_MODEL="$DEFAULT_ANTHROPIC_MODEL"
 else
   echo "  ⚠ WARNING: No providers detected! Cline will have nothing to use."
   PRIMARY_PROVIDER="deepseek"
-  PRIMARY_PROVIDER_ENUM="11"
   PRIMARY_MODEL="deepseek-chat"
 fi
 
-echo "  Primary:   $PRIMARY_PROVIDER (enum=$PRIMARY_PROVIDER_ENUM) / $PRIMARY_MODEL"
+echo "  Primary:   $PRIMARY_PROVIDER / $PRIMARY_MODEL"
 
 # ── Step 3: Build hidden providers list ────────────────────────────────
 # All Cline native providers that could appear in the dropdown
@@ -207,6 +190,21 @@ for p in $(echo "$ALL_CLINE_PROVIDERS" | tr ',' ' '); do
 done
 
 echo "  Hidden providers: $HIDDEN"
+
+# Build VISIBLE list for JavaScript array (comma-separated quoted names)
+VISIBLE_PROVIDERS=""
+for p in $(echo "$ALL_CLINE_PROVIDERS" | tr ',' ' '); do
+  case "$p" in
+    deepseek)  [ "$HAS_DEEPSEEK" = "true" ] || continue ;;
+    lmstudio)  [ "$HAS_LMSTUDIO" = "true" ] || continue ;;
+    openai)    [ "$HAS_OPENAI" = "true" ] || continue ;;
+    anthropic) [ "$HAS_ANTHROPIC" = "true" ] || continue ;;
+    ollama)    [ "$HAS_OLLAMA" = "true" ] || continue ;;
+    *) continue ;;
+  esac
+  VISIBLE_PROVIDERS="${VISIBLE_PROVIDERS}${VISIBLE_PROVIDERS:+,}\"$p\""
+done
+echo "  Visible providers: $VISIBLE_PROVIDERS"
 
 # ── Step 4: Write secrets.json ─────────────────────────────────────────
 echo ""
@@ -340,9 +338,9 @@ state['welcomeViewCompleted'] = True
 state['__vscodeMigrationVersion'] = state.get('__vscodeMigrationVersion', 1)
 state['clineVersion'] = state.get('clineVersion', '3.89.2')
 
-# Primary provider — use NATIVE provider enum (int32, NOT string!)
-state['planModeApiProvider'] = ${PRIMARY_PROVIDER_ENUM}
-state['actModeApiProvider'] = ${PRIMARY_PROVIDER_ENUM}
+# Primary provider — use STRING name, not int32 (Cline maps strings internally)
+state['planModeApiProvider'] = '${PRIMARY_PROVIDER}'
+state['actModeApiProvider'] = '${PRIMARY_PROVIDER}'
 state['planActSeparateModelsSetting'] = False
 
 # Provider-specific model IDs
@@ -443,35 +441,47 @@ if [ -f "$EXT_JS" ]; then
   [ -f "${EXT_JS}.orig" ] || cp "$EXT_JS" "${EXT_JS}.orig"
 
   # ── Provider hiding patch ──────────────────────────────────────────
-  # Write hidden providers to a marker file that Cline reads via binary patch
+  # Strategy: Prepend a require() call to extension.js that loads our
+  # monkey-patch hook. The hook patches getRemoteConfigSettings() to inject
+  # remoteConfiguredProviders from hidden_providers.json at runtime.
+  # This works regardless of whether NODE_OPTIONS propagates to the extension host.
   python3 << PYEOF
 import json, os
+
 hidden = '${HIDDEN}'.split(',') if '${HIDDEN}' else []
 hidden_set = sorted(set(h for h in hidden if h))
+visible = sorted(set(['deepseek','lmstudio','openai','anthropic','ollama']) - set(hidden_set))
+visible = [v for v in ['deepseek','lmstudio','openai','anthropic','ollama'] if v not in hidden_set]
 
-if hidden_set:
-    marker_dir = '${CLINE_DATA_DIR}'
-    os.makedirs(marker_dir, exist_ok=True)
-    with open(os.path.join(marker_dir, 'hidden_providers.json'), 'w') as f:
-        json.dump({'hidden': hidden_set}, f, indent=2)
-    print(f'  ✓ Written hidden_providers.json: {hidden_set}')
+marker_dir = '${CLINE_DATA_DIR}'
+os.makedirs(marker_dir, exist_ok=True)
+
+# Write hidden_providers.json with remoteConfiguredProviders (visible list)
+with open(os.path.join(marker_dir, 'hidden_providers.json'), 'w') as f:
+    json.dump({'remoteConfiguredProviders': visible}, f, indent=2)
+print(f'  ✓ Written hidden_providers.json: visible={visible}, hidden={hidden_set}')
+
+# Prepend require() hook to extension.js
+ext_path = '${EXT_JS}'
+hook_path = '/opt/aurora/scripts/cline-provider-filter.cjs'
+
+if os.path.exists(hook_path):
+    with open(ext_path, 'rb') as f:
+        original = f.read()
+    
+    # Only prepend if not already prepended
+    if not original.startswith(b'require("/opt/aurora/scripts/cline-provider-filter.cjs")'):
+        prepend = b'require("/opt/aurora/scripts/cline-provider-filter.cjs");'
+        with open(ext_path, 'wb') as f:
+            f.write(prepend + original)
+        print(f'  ✓ Prepended require() hook to extension.js ({len(prepend)} bytes)')
+    else:
+        print('  ✓ Hook already prepended to extension.js')
 else:
-    print('  No providers to hide')
+    print(f'  ⚠ Hook script not found at {hook_path} — skipping prepend')
 PYEOF
 
-  # ── URL patches (always applied) ───────────────────────────────────
-  # Patch 1: Redirect DeepSeek base URL to Aurora gateway
-  LC_ALL=C sed -i "s|https://api.deepseek.com/v1|${AURORA_GATEWAY_URL}|g" "$EXT_JS"
-
-  # Patch 2: Change hardcoded default model kVr
-  LC_ALL=C sed -i "s/kVr=\"claude-sonnet-4-5-20250929\"/kVr=\"${DEFAULT_DEEPSEEK_MODEL}\"/g" "$EXT_JS"
-  LC_ALL=C sed -i "s/kVr=\"deepseek-chat\"/kVr=\"${DEFAULT_DEEPSEEK_MODEL}\"/g" "$EXT_JS"
-
-  # Patch 3: LM Studio model listing fix
-  # Cline uses "api/v0/models" by default which LM Studio supports natively.
-  # Our previous api/v0→api/v1 patch BROKE this (LM Studio returns empty for /api/v1/models).
-  # Restore: if the binary was previously patched, revert api/v1/models → api/v0/models.
-  # Use Python bytearray since sed can't distinguish the two occurrences.
+  # ── Binary patches (URL redirects, xqt filter, model listing fix) ──
   python3 << PYEOF
 import re
 
@@ -479,25 +489,125 @@ path = '${EXT_JS}'
 with open(path, 'rb') as f:
     c = bytearray(f.read())
 
-# We need to ensure api/v0/models is used (LM Studio supports it)
-# Check if it was previously patched to api/v1/models
+# ── xqt provider filter patch ──
+# Replace the xqt arrow function body to use globalThis.__aurora_providers
+# instead of remoteConfiguredProviders from StateManager.
+# Original: xqt=(t,e)=>{let r=e?.remoteConfiguredProviders??\$i.get().getRemoteConfigSettings().remoteConfiguredProviders;return!r||!r.length?!0:t&&r.includes(t)}
+# New:      xqt=(t,e)=>{let r=globalThis.__aurora_providers||["deepseek","lmstudio","ollama"];return r.includes(t)}
+xqt_marker = b'xqt=(t,e)=>{let r=e?.remoteConfiguredProviders??\$i.get()'
+xqt_idx = c.find(xqt_marker)
+if xqt_idx >= 0:
+    # Find opening brace after arrow
+    brace_open = c.find(b'{', xqt_idx)
+    # Find closing brace (before ;VIf or next statement)
+    brace_close = c.find(b'};', brace_open + 1)
+    if brace_close < 0:
+        brace_close = c.find(b'}', brace_open + 1)
+    if brace_open >= 0 and brace_close >= 0:
+        original_body = bytes(c[brace_open+1:brace_close])
+        # Build replacement: use globalThis var with hardcoded fallback
+        providers_list = '${VISIBLE_PROVIDERS}'
+        new_body_str = 'let r=globalThis.__aurora_providers||[' + providers_list + '];return r.includes(t)'
+        new_body = new_body_str.encode('latin-1')
+        if len(new_body) < len(original_body):
+            new_body += b';' * (len(original_body) - len(new_body))
+        if len(new_body) == len(original_body):
+            c[brace_open+1:brace_close] = new_body
+            print(f'  ✓ Patched xqt provider filter ({len(original_body)} bytes)')
+        else:
+            print(f'  ⚠ xqt patch length mismatch: {len(new_body)} vs {len(original_body)}, skipping')
+    else:
+        print('  ⚠ Could not find xqt body braces, skipping')
+else:
+    print('  ⚠ xqt function not found, skipping')
+
+# ── api/v0/models fix ──
 v1_count = c.count(b'api/v1/models')
 v0_count = c.count(b'api/v0/models')
-
 if v1_count > 0 and v0_count == 0:
-    # Revert: api/v1/models → api/v0/models (same length, safe replacement)
-    # This fixes LM Studio model listing
     c = c.replace(b'api/v1/models', b'api/v0/models')
-    with open(path, 'wb') as f:
-        f.write(c)
     print('  ✓ Restored api/v0/models for LM Studio compatibility')
 elif v0_count > 0:
     print('  ✓ LM Studio model path already correct (api/v0/models)')
 else:
     print('  ⚠ Warning: neither api/v0/models nor api/v1/models found')
+
+# ── DeepSeek URL redirect ──
+aurora_url = b'${AURORA_GATEWAY_URL}'
+c = c.replace(b'https://api.deepseek.com/v1', aurora_url)
+print('  ✓ DeepSeek URL redirected to Aurora gateway')
+
+# ── Default model kVr ──
+default_model = b'${DEFAULT_DEEPSEEK_MODEL}'
+c = c.replace(b'kVr="claude-sonnet-4-5-20250929"', b'kVr="' + default_model + b'"')
+c = c.replace(b'kVr="deepseek-chat"', b'kVr="' + default_model + b'"')
+print(f'  ✓ Default model kVr patched to {default_model.decode()}')
+
+with open(path, 'wb') as f:
+    f.write(c)
 PYEOF
 
-  echo "  ✓ URL patches applied"
+  echo "  ✓ Binary patches applied"
+
+  # ── Webview provider dropdown filter ──────────────────────────────
+  # The webview UI (ApiOptions.tsx) imports providers.json and renders
+  # ALL providers in the dropdown. We must patch the webview bundle to
+  # show only our configured providers.
+  WEBVIEW_JS="${CLINE_EXT_DIR}/webview-ui/build/assets/index.js"
+  if [ -f "$WEBVIEW_JS" ]; then
+    python3 << PYEOF
+import os
+
+wv_path = '${WEBVIEW_JS}'
+with open(wv_path, 'rb') as f:
+    wv = bytearray(f.read())
+
+# Find the ven providers array: ven=[{value:"cline",label:"Cline"},...]
+ven_marker = b'ven=[{value:"cline"'
+ven_start = wv.find(ven_marker)
+if ven_start >= 0:
+    # Find closing ] of the array followed by ,yen=
+    arr_start = ven_start + 4  # skip 'ven='
+    yen_marker = b'}],yen='
+    yen_idx = wv.find(yen_marker, arr_start + 50)
+    if yen_idx >= 0:
+        arr_end = yen_idx + 1  # include ']'
+        old_arr = bytes(wv[arr_start:arr_end+1])
+        
+        # Build new array from visible providers
+        visible_raw = '${VISIBLE_PROVIDERS}'
+        pairs = [p.strip().strip('"') for p in visible_raw.split(',') if p.strip()]
+        
+        labels = {
+            'deepseek': 'DeepSeek',
+            'lmstudio': 'LM Studio',
+            'ollama': 'Ollama',
+        }
+        entries = []
+        for p in pairs:
+            label = labels.get(p, p.title())
+            entries.append('{value:"' + p + '",label:"' + label + '"}')
+        
+        new_arr_str = '[' + ','.join(entries) + ']'
+        new_arr = new_arr_str.encode('latin-1')
+        
+        if len(new_arr) <= len(old_arr):
+            new_arr += b' ' * (len(old_arr) - len(new_arr))
+            wv[arr_start:arr_end+1] = new_arr
+            print(f'  ✓ Webview provider dropdown filtered ({len(entries)} providers, {len(old_arr)} bytes)')
+        else:
+            print(f'  ⚠ Webview new array too long: {len(new_arr)} > {len(old_arr)}, skipping')
+    else:
+        print('  ⚠ Webview providers array end not found, skipping')
+else:
+    print('  ⚠ Webview providers array start not found, skipping')
+
+with open(wv_path, 'wb') as f:
+    f.write(wv)
+PYEOF
+  else
+    echo "  ⚠ Webview index.js not found at $WEBVIEW_JS — skipping webview patch"
+  fi
 else
   echo "  ⚠ Cline extension not found at $EXT_JS — skipping binary patches"
 fi
