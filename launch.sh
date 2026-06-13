@@ -50,12 +50,18 @@ for i in {1..30}; do
   sleep 1
 done
 
-# ── Step 4: Start Next.js dev server ───────────────────────────────
-info "Starting Next.js dev server..."
+# ── Step 4: Install dependencies ───────────────────────────────────
+info "Installing npm dependencies..."
+cd "$FRONTEND_DIR"
+npm install --no-audit --no-fund
+info "Dependencies installed"
+
+# ── Step 5: Start Next.js + code-server proxy ──────────────────────
+info "Starting Next.js + code-server proxy..."
 cd "$FRONTEND_DIR/apps/web"
-npx next dev &
+node server.js &
 NEXT_PID=$!
-info "Next.js dev server running (PID $NEXT_PID)"
+info "Next.js + code-server proxy running (PID $NEXT_PID)"
 
 # Wait for Next.js to be ready
 for i in {1..30}; do

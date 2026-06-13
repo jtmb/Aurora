@@ -17,10 +17,13 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      - LMSTUDIO_URL=${LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
-      - LMSTUDIO_MODEL=${LMSTUDIO_MODEL:-qwen-coder}
+      - AURORA_GATEWAY_URL=${AURORA_GATEWAY_URL:-http://host.docker.internal:3000/api/v1}
+      - LMSTUDIO_URL=${LMSTUDIO_URL:-http://192.168.0.13:1234/v1}
       - LMSTUDIO_API_KEY=${LMSTUDIO_API_KEY:-sk-lm-studio}
+      - CLINE_API_KEY=${CLINE_API_KEY:-aurora-no-key}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
       - ORCHESTRATOR_PLAN_FIRST=${ORCHESTRATOR_PLAN_FIRST:-true}
       - CLINE_TIMEOUT=${CLINE_TIMEOUT:-600}

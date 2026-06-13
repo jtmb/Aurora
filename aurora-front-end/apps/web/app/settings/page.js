@@ -223,6 +223,16 @@ export default function SettingsPage() {
           ? new Set(cached.removedProviders)
           : getDefaultRemoved(cached);
         setRemovedProviders(computedRemoved);
+
+        // Auto-sync localStorage keys → server DB so Cline/API clients can use them
+        if (token && (cached.deepseek || cached.lmStudioUrl || cached.openai || cached.anthropic)) {
+          saveSettingsToDb(token, {
+            ...cached,
+            providerEnabled: cached.providerEnabled || {},
+            lmStudioApiKeyEnabled: cached.lmStudioApiKeyEnabled ?? false,
+            removedProviders: cached.removedProviders || [],
+          });
+        }
       }
 
       if (!cancelled) setHydrated(true);

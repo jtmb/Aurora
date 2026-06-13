@@ -204,7 +204,7 @@ const fetchLmStudioModels = async (url, apiKey) => {
     const data = await response.json();
     const models = data.data || (Array.isArray(data) ? data : []);
     return models.map(m => ({
-      id: m.id, name: m.id, owned_by: 'lmstudio', source: 'LM Studio'
+      id: String(m.id || '').replace(/\//g, '-'), name: String(m.id || '').replace(/\//g, '-'), owned_by: 'lmstudio', source: 'LM Studio'
     }));
   } catch { return []; }
 };

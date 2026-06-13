@@ -97,6 +97,16 @@ const extractKeysFromHeaders = async (request) => {
   // If no userId (no JWT), try to read keys from provider_settings DB anyway
   // This supports server-side callers like agent-runner that don't have auth tokens
   if (!userId && !headerKeys.deepseek && !headerKeys.lmStudioUrl) {
+    // Check Authorization header for API key (OpenAI-compatible clients like Cline)
+    const authHeader = request.headers.get('Authorization') || '';
+    if (authHeader.startsWith('Bearer ') && !authHeader.startsWith('Bearer eyJ')) {
+      const token = authHeader.substring(7);
+      // If token looks like an API key (not a JWT), use it as DeepSeek key
+      if (token && token !== 'aurora-no-key' && token.length > 10) {
+        headerKeys.deepseek = token;
+        return headerKeys;
+      }
+    }
     try {
       runMigrations();
       const db = getDb();
@@ -150,8 +160,7 @@ const extractKeysFromHeaders = async (request) => {
   if (userKeys.lmStudioUrl && !headerKeys.lmStudioUrl) headerKeys.lmStudioUrl = userKeys.lmStudioUrl;
   if (userKeys.deepseek && !headerKeys.deepseek) headerKeys.deepseek = userKeys.deepseek;
 
-  // Fallback 2: provider_settings DB (survives cache clears)
-  // Check per-key fallback — only read DB for keys still missing after headers + api_keys table
+  // Fallback 2: provider_settings DB — this user first, then ANY user (survives cache clears)
   if (!headerKeys.deepseek || !headerKeys.lmStudioUrl) {
     const dbKeys = loadProviderSettingsFromDb(userId);
     if (!headerKeys.deepseek && dbKeys.deepseek) headerKeys.deepseek = dbKeys.deepseek;
@@ -161,7 +170,32 @@ const extractKeysFromHeaders = async (request) => {
     if (!headerKeys.lmStudioApiKey && dbKeys.lmStudioApiKey) headerKeys.lmStudioApiKey = dbKeys.lmStudioApiKey;
   }
 
-  // Final fallback: environment variables (for both auth and no-auth paths)
+  // Fallback 3: ALL users' provider_settings when this user has none (server-side callers)
+  if (!headerKeys.deepseek && !headerKeys.lmStudioUrl) {
+    try {
+      runMigrations();
+      const db = getDb();
+      const rows = db.prepare('SELECT settings_json FROM provider_settings').all();
+      for (const row of rows) {
+        try {
+          const s = JSON.parse(row.settings_json);
+          if (!headerKeys.deepseek && s.deepseek && s.providerEnabled?.deepseek !== false) headerKeys.deepseek = s.deepseek;
+          if (!headerKeys.lmStudioUrl && s.lmStudioUrl) headerKeys.lmStudioUrl = s.lmStudioUrl;
+          if (!headerKeys.lmStudioUrl && s.lmStudioHost && s.lmStudioPort) {
+            headerKeys.lmStudioUrl = `http://${s.lmStudioHost}:${s.lmStudioPort}/v1`;
+          }
+          if (!headerKeys.lmStudioHost && s.lmStudioHost) headerKeys.lmStudioHost = String(s.lmStudioHost);
+          if (!headerKeys.lmStudioPort && s.lmStudioPort) headerKeys.lmStudioPort = String(s.lmStudioPort);
+          if (!headerKeys.lmStudioApiKey && s.lmStudioApiKey) headerKeys.lmStudioApiKey = s.lmStudioApiKey;
+          if (headerKeys.deepseek || headerKeys.lmStudioUrl) break;
+        } catch { /* skip malformed */ }
+      }
+    } catch (err) {
+      console.error('[Aurora] All-users DB fallback failed:', err.message);
+    }
+  }
+
+  // Final fallback: environment variables
   if (!headerKeys.deepseek && process.env.DEEPSEEK_API_KEY) headerKeys.deepseek = process.env.DEEPSEEK_API_KEY;
   if (!headerKeys.lmStudioUrl && process.env.LMSTUDIO_URL) headerKeys.lmStudioUrl = process.env.LMSTUDIO_URL;
   if (!headerKeys.lmStudioHost && process.env.LM_STUDIO_HOST) headerKeys.lmStudioHost = process.env.LM_STUDIO_HOST;
@@ -351,7 +385,15 @@ export async function POST(request) {
     const messages = body.messages || [];
     const temperature = body.temperature ?? 0.7;
     const requestedProvider = body.provider || '';
-
+    
+    // DEBUG: Log incoming request to diagnose Jinja template errors
+    const msgRoles = messages.map(m => m.role).join(',');
+    const msgTypes = messages.map(m => `${m.role}:${typeof m.content}${Array.isArray(m.content)?'['+m.content.length+']':''}`).join('|');
+    console.log(`[COPILOT-DEBUG] model=${model} roles=[${msgRoles}] types=[${msgTypes}] bodyKeys=${Object.keys(body).join(',')}`);
+    if (model.includes('qwen') || model.includes('coder')) {
+      console.log('[COPILOT-DEBUG] Full body:', JSON.stringify(body).slice(0, 2000));
+    }
+    
     if (messages.length === 0) {
       return NextResponse.json(
         { error: { message: 'Messages array is required', type: 'invalid_request_error' } },
@@ -363,6 +405,51 @@ export async function POST(request) {
     if (!messages.some(m => m.role === 'system')) {
       messages.unshift({ role: 'system', content: 'You are a helpful assistant.' });
     }
+    
+    // Normalize messages for providers that use strict Jinja templates (LM Studio Qwen, etc.)
+    // Some clients (Copilot LM API) may send content as arrays of parts; flatten to string
+    // Also ensure string content for strict Jinja template compatibility
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      // Flatten array content to string
+      if (Array.isArray(msg.content)) {
+        msg.content = msg.content
+          .map(part => (typeof part === 'string') ? part : (part.text || part.value || JSON.stringify(part)))
+          .join('\n');
+      }
+      // Ensure content is a string
+      if (typeof msg.content !== 'string') {
+        msg.content = String(msg.content || '');
+      }
+    }
+    
+    // Ensure there's at least one user message (some Jinja templates require it)
+    if (!messages.some(m => m.role === 'user')) {
+      // If there's only a system prompt but no user message, move system to user
+      const systemOnly = messages.every(m => m.role === 'system');
+      if (systemOnly && messages.length > 0) {
+        // Convert the last system message to user
+        messages[messages.length - 1].role = 'user';
+        console.log('[COPILOT-DEBUG] Normalized: converted last system→user');
+      } else if (messages.length === 0) {
+        messages.push({ role: 'user', content: 'Hello' });
+        console.log('[COPILOT-DEBUG] Normalized: added default user message');
+      } else {
+        // Mixed roles but no user — convert first non-system to user
+        const firstNonSystem = messages.findIndex(m => m.role !== 'system');
+        if (firstNonSystem >= 0) {
+          console.log(`[COPILOT-DEBUG] Normalized: converted messages[${firstNonSystem}] ${messages[firstNonSystem].role}→user`);
+          messages[firstNonSystem].role = 'user';
+        } else {
+          console.log('[COPILOT-DEBUG] WARNING: no user message and no non-system to convert!');
+          messages.push({ role: 'user', content: 'Hello' });
+        }
+      }
+    }
+    
+    // DEBUG: Log messages AFTER normalization
+    const normalizedRoles = messages.map(m => m.role).join(',');
+    console.log(`[COPILOT-DEBUG] After normalization: roles=[${normalizedRoles}]`);
 
     // Extract API keys from request headers
     const keys = await extractKeysFromHeaders(request);
@@ -437,6 +524,7 @@ export async function POST(request) {
     );
 
     console.log(`[Aurora] Routing to ${selectedProvider.name} (${selectedProvider.id}) -> ${url}${streamMode ? ' [stream]' : ''}`);
+    console.log(`[COPILOT-DEBUG] Sending to ${selectedProvider.id}: model=${providerBody.model} stream=${streamMode} msgs=${JSON.stringify(providerBody.messages?.map(m => ({role:m.role,content:typeof m.content==='string'?m.content.substring(0,100):typeof m.content})))}`);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 120000);
@@ -456,6 +544,7 @@ export async function POST(request) {
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
       let errorMessage = `${selectedProvider.name} returned ${response.status}`;
+      console.error(`[COPILOT-DEBUG] ${selectedProvider.id} HTTP ${response.status} — body: ${errorText.substring(0, 1000)}`);
       try {
         const errorJson = JSON.parse(errorText);
         errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
@@ -586,11 +675,20 @@ export async function POST(request) {
     }
 
     // Non-streaming mode: return normalized JSON
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch (jsonErr) {
+      const rawText = await response.text().catch(() => '');
+      console.error(`[COPILOT-DEBUG] ${selectedProvider.id} response.json() failed — raw body: ${rawText.substring(0, 2000)}`);
+      throw new Error(`${selectedProvider.name} returned non-JSON response: ${rawText.substring(0, 200)}`);
+    }
     console.log(`[Aurora] ${selectedProvider.id} raw response - id: ${data.id}, model: ${data.model}, choices: ${data.choices?.length || 0}, usage: ${JSON.stringify(data.usage || {})}`);
     if (data.choices?.[0]) {
       const c = data.choices[0];
       console.log(`[Aurora] choice[0] finish_reason: ${c.finish_reason}, content length: ${c.message?.content?.length || 0}, content[:200]: ${(c.message?.content || '').substring(0, 200)}`);
+    } else {
+      console.error(`[COPILOT-DEBUG] ${selectedProvider.id} response has no choices — full: ${JSON.stringify(data).substring(0, 1000)}`);
     }
     const normalized = normalizeToOpenAIFormat(data, selectedProvider.id, model);
     normalized.provider = selectedProvider.id;

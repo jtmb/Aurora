@@ -30,18 +30,18 @@ case "$MODE" in
     # Ensure node is on PATH (code-server bundles its own)
     export PATH="/usr/lib/code-server/lib:${PATH}"
 
-    # Use openai-compatible provider with custom base URL for LM Studio
+    # Use openai-compatible provider pointing at Aurora's API gateway
     CLINE_PROVIDER="${CLINE_PROVIDER:-openai-compatible}"
-    LMSTUDIO_URL="${LMSTUDIO_URL:-http://localhost:1234/v1}"
-    LMSTUDIO_MODEL="${LMSTUDIO_MODEL:-qwen-coder}"
-    LMSTUDIO_API_KEY="${LMSTUDIO_API_KEY-lm-studio}"
+    AURORA_GATEWAY_URL="${AURORA_GATEWAY_URL:-http://host.docker.internal:3000/api/v1}"
+    CLINE_MODEL="${CLINE_MODEL:-deepseek-chat}"
+    CLINE_API_KEY="${CLINE_API_KEY:-aurora-no-key}"
 
-    echo "  Configuring Cline CLI provider via cline auth..."
+    echo "  Configuring Cline CLI provider via cline auth (Aurora gateway)..."
     cline auth \
       --provider "$CLINE_PROVIDER" \
-      --apikey "${LMSTUDIO_API_KEY:-sk-lm-studio}" \
-      --baseurl "${LMSTUDIO_URL%/}" \
-      --modelid "$LMSTUDIO_MODEL" \
+      --apikey "$CLINE_API_KEY" \
+      --baseurl "${AURORA_GATEWAY_URL%/}" \
+      --modelid "$CLINE_MODEL" \
       2>&1 || echo "  ⚠ cline auth had issues (continuing anyway)"
 
     # Run the task runner (iterative loop that calls cline --auto-approve)
@@ -56,18 +56,18 @@ case "$MODE" in
     # Ensure node is on PATH (code-server bundles its own)
     export PATH="/usr/lib/code-server/lib:${PATH}"
 
-    # Use openai-compatible provider with custom base URL for LM Studio
+    # Use openai-compatible provider pointing at Aurora's API gateway
     CLINE_PROVIDER="${CLINE_PROVIDER:-openai-compatible}"
-    LMSTUDIO_URL="${LMSTUDIO_URL:-http://localhost:1234/v1}"
-    LMSTUDIO_MODEL="${LMSTUDIO_MODEL:-qwen-coder}"
-    LMSTUDIO_API_KEY="${LMSTUDIO_API_KEY:-sk-lm-studio}"
+    AURORA_GATEWAY_URL="${AURORA_GATEWAY_URL:-http://host.docker.internal:3000/api/v1}"
+    CLINE_MODEL="${CLINE_MODEL:-deepseek-chat}"
+    CLINE_API_KEY="${CLINE_API_KEY:-aurora-no-key}"
 
-    echo "  Configuring Cline CLI provider via cline auth..."
+    echo "  Configuring Cline CLI provider via cline auth (Aurora gateway)..."
     cline auth \
       --provider "$CLINE_PROVIDER" \
-      --apikey "${LMSTUDIO_API_KEY}" \
-      --baseurl "${LMSTUDIO_URL%/}" \
-      --modelid "$LMSTUDIO_MODEL" \
+      --apikey "$CLINE_API_KEY" \
+      --baseurl "${AURORA_GATEWAY_URL%/}" \
+      --modelid "$CLINE_MODEL" \
       2>&1 || echo "  ⚠ cline auth had issues (continuing anyway)"
 
     # Dependencies pre-installed during Docker build
@@ -78,18 +78,18 @@ case "$MODE" in
     echo "🚀 Starting code-server (interactive) + Orchestrator API (headless)..."
     export PATH="/usr/lib/code-server/lib:${PATH}"
 
-    # Configure Cline CLI for orchestrator
+    # Configure Cline CLI for orchestrator via Aurora gateway
     CLINE_PROVIDER="${CLINE_PROVIDER:-openai-compatible}"
-    LMSTUDIO_URL="${LMSTUDIO_URL:-http://localhost:1234/v1}"
-    LMSTUDIO_MODEL="${LMSTUDIO_MODEL:-qwen-coder}"
-    LMSTUDIO_API_KEY="${LMSTUDIO_API_KEY:-sk-lm-studio}"
+    AURORA_GATEWAY_URL="${AURORA_GATEWAY_URL:-http://host.docker.internal:3000/api/v1}"
+    CLINE_MODEL="${CLINE_MODEL:-deepseek-chat}"
+    CLINE_API_KEY="${CLINE_API_KEY:-aurora-no-key}"
 
-    echo "  Configuring Cline CLI provider via cline auth..."
+    echo "  Configuring Cline CLI provider via cline auth (Aurora gateway)..."
     cline auth \
       --provider "$CLINE_PROVIDER" \
-      --apikey "${LMSTUDIO_API_KEY}" \
-      --baseurl "${LMSTUDIO_URL%/}" \
-      --modelid "$LMSTUDIO_MODEL" \
+      --apikey "$CLINE_API_KEY" \
+      --baseurl "${AURORA_GATEWAY_URL%/}" \
+      --modelid "$CLINE_MODEL" \
       2>&1 || echo "  ⚠ cline auth had issues (continuing anyway)"
 
     # Start orchestrator API in background
