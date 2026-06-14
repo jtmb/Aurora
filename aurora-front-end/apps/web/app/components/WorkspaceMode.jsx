@@ -3,8 +3,6 @@
 'use client';
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import DocumentsWorkspace from './DocumentsWorkspace';
-
 export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, onWorkspaceOpened }) {
   const [workspaces, setWorkspaces] = useState([]);
   const [workspacePage, setWorkspacePage] = useState(1);
@@ -20,7 +18,6 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
   const [error, setError] = useState('');
   const [creationStep, setCreationStep] = useState(null); // null | 'select' | 'form'
   const [creationMode, setCreationMode] = useState('full'); // 'full' | 'vibe'
-  const [creationType, setCreationType] = useState('code'); // 'code' | 'documents'
   const [codeMode, setCodeMode] = useState(() => pendingWorkspace?.codeMode || 'full'); // active workspace's mode
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneName, setCloneName] = useState('');
@@ -504,7 +501,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       const res = await fetch('/api/workspace/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ name: cloneName.trim(), repoUrl: cloneUrl.trim(), type: 'git', codeMode: creationMode, workspaceType: creationType })
+        body: JSON.stringify({ name: cloneName.trim(), repoUrl: cloneUrl.trim(), type: 'git', codeMode: creationMode, workspaceType: 'code' })
       });
       const data = await res.json();
       if (data.error) {
@@ -535,7 +532,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       const res = await fetch('/api/workspace/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ name: createName.trim(), type: 'blank', codeMode: creationMode, workspaceType: creationType })
+        body: JSON.stringify({ name: createName.trim(), type: 'blank', codeMode: creationMode, workspaceType: 'code' })
       });
       const data = await res.json();
       if (data.error) {
@@ -548,45 +545,6 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
       }
     } catch (err) {
       setError('Failed to create workspace');
-    } finally {
-      setCloneLoading(false);
-    }
-  };
-
-  // ── Create documents workspace + document from hub landing ──
-  const handleCreateDocumentsHub = async (docType, docLabel) => {
-    if (createName.trim() || cloneLoading) return;
-    setCloneLoading(true);
-    setError('');
-
-    const token = localStorage.getItem('auth_token');
-    try {
-      // 1. Create the documents workspace
-      const wsRes = await fetch('/api/workspace/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ name: `New ${docLabel}`, type: 'blank', workspaceType: 'documents' })
-      });
-      const wsData = await wsRes.json();
-      if (wsData.error) throw new Error(wsData.error.message);
-
-      // 2. Create the document inside it
-      const docRes = await fetch(`/api/workspace/${wsData.id}/documents/create`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ type: docType, name: `New ${docLabel}` })
-      });
-      const docData = await docRes.json();
-      if (docData.error) throw new Error(docData.error.message);
-
-      // 3. Open the workspace (DocumentsWorkspace will auto-open the doc)
-      await loadWorkspaces();
-      openWorkspace({ ...wsData, _pendingDoc: docData.path });
-    } catch (err) {
-      setError(err.message);
     } finally {
       setCloneLoading(false);
     }
@@ -696,29 +654,15 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     }
   };
 
-  // No workspace selected — show document hub + code
+  // No workspace selected — show code hub
   if (!activeWorkspace) {
-    const docWorkspaces = workspaces.filter(w => w.workspaceType === 'documents');
     const codeWorkspaces = workspaces.filter(w => w.workspaceType !== 'documents');
-    const DOC_HUB_TYPES = [
-      { type: 'docx', label: 'Document', icon: '📄', desc: 'Word processor' },
-      { type: 'xlsx', label: 'Spreadsheet', icon: '📊', desc: 'Sheets & tables' },
-      { type: 'pptx', label: 'Presentation', icon: '📽️', desc: 'Slides & decks' },
-    ];
 
     return (
       <div className="flex-1 flex flex-col min-h-0 bg-zinc-950">
         {/* Scrollable content */}
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto p-8">
-
-            {/* ── Header ── */}
-            <div className="mb-8">
-              <h1 className="text-2xl font-bold text-zinc-100 mb-1">Documents</h1>
-              <p className="text-sm text-zinc-500">
-                Create and edit Office documents with AI assistance
-              </p>
-            </div>
 
             {/* ── Error banner ── */}
             {error && (
@@ -728,71 +672,48 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
               </div>
             )}
 
-            {/* ── New Document buttons ── */}
+            {/* ── Documents header ── */}
+            <div className="mb-6 opacity-50">
+              <div className="flex items-center gap-3 mb-1">
+                <h1 className="text-2xl font-bold text-zinc-400">Documents</h1>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400/70 border border-amber-500/20 font-medium">
+                  Coming Soon
+                </span>
+              </div>
+              <p className="text-sm text-zinc-600">
+                Create, edit, and collaborate on documents with AI assistance
+              </p>
+            </div>
+
+            {/* ── Documents: Create New (Coming Soon) ── */}
             {creationStep === null && (
-              <div className="mb-8">
-                <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">Create New</h2>
-                <div className="grid grid-cols-3 gap-3">
-                  {DOC_HUB_TYPES.map(({ type, label, icon, desc }) => (
-                    <button
-                      key={type}
-                      onClick={() => handleCreateDocumentsHub(type, label)}
-                      disabled={cloneLoading}
-                      className="flex flex-col items-center gap-2 p-5 rounded-xl border border-zinc-800/60 bg-zinc-900/60 hover:bg-zinc-800/60 hover:border-zinc-700/60 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-left"
-                    >
-                      <span className="text-3xl">{icon}</span>
-                      <div className="text-center">
-                        <div className="text-sm font-medium text-zinc-200">{label}</div>
-                        <div className="text-[11px] text-zinc-500">{desc}</div>
-                      </div>
-                      {cloneLoading && (
-                        <span className="text-[11px] text-blue-400 animate-pulse mt-1">Creating…</span>
-                      )}
-                    </button>
-                  ))}
+              <div className="mb-4 opacity-40 pointer-events-none select-none">
+                <h2 className="text-xs font-semibold text-zinc-600 uppercase tracking-wider mb-3">Create New</h2>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-zinc-900/40 border border-zinc-800/30 rounded-xl p-4">
+                    <div className="w-9 h-9 rounded-lg bg-zinc-800/40 flex items-center justify-center mb-3">
+                      <svg className="w-5 h-5 text-zinc-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                      </svg>
+                    </div>
+                    <h4 className="text-sm font-semibold text-zinc-500 mb-1">Upload DOCX</h4>
+                    <p className="text-[11px] text-zinc-600">Import existing documents</p>
+                  </div>
+                  <div className="bg-zinc-900/40 border border-zinc-800/30 rounded-xl p-4">
+                    <div className="w-9 h-9 rounded-lg bg-zinc-800/40 flex items-center justify-center mb-3">
+                      <svg className="w-5 h-5 text-zinc-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4v16m8-8H4" />
+                      </svg>
+                    </div>
+                    <h4 className="text-sm font-semibold text-zinc-500 mb-1">New Document</h4>
+                    <p className="text-[11px] text-zinc-600">Start from a blank canvas</p>
+                  </div>
                 </div>
               </div>
             )}
 
-            {/* ── Recent Document Workspaces ── */}
-            {creationStep === null && (
-              <div className="mb-8">
-                <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">
-                  Recent Documents {docWorkspaces.length > 0 && `(${docWorkspaces.length})`}
-                </h2>
-                {docWorkspaces.length === 0 ? (
-                  <div className="text-sm text-zinc-600 py-4">
-                    No documents yet. Create one above to get started.
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap gap-1">
-                    {docWorkspaces.slice(0, 6).map((ws, i) => (
-                      <button
-                        key={ws.id}
-                        onClick={() => openWorkspace(ws)}
-                        className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-zinc-800/50 transition-colors text-left group"
-                      >
-                        <span className="text-lg flex-shrink-0">📄</span>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm text-zinc-300 group-hover:text-zinc-100 truncate">
-                            {ws.name}
-                          </div>
-                          <div className="text-[11px] text-zinc-600">
-                            {ws.updatedAt ? new Date(ws.updatedAt).toLocaleDateString() : ''}
-                          </div>
-                        </div>
-                        {i < docWorkspaces.slice(0, 6).length - 1 && (
-                          <span className="text-zinc-700">·</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── Divider ── */}
-            <div className="border-t border-zinc-800/40 my-8" />
+            {/* Divider */}
+            <div className="mb-8 border-t border-zinc-800/30" />
 
             {/* ── Code header ── */}
             <div className="mb-8">
@@ -966,8 +887,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
 
         {/* Bottom status bar */}
         <div className="flex items-center justify-between px-3 py-1 bg-zinc-900 border-t border-zinc-800/40 flex-shrink-0">
-          <span className="text-[10px] text-zinc-500">Documents</span>
-          <span className="text-[10px] text-zinc-600">Powered by OnlyOffice</span>
+          <span className="text-[10px] text-zinc-500">Aurora</span>
         </div>
       </div>
     );
@@ -975,20 +895,6 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
 
   // Computed for Git badge
   const changedCount = gitStatus?.files?.length || 0;
-
-  // Documents layout
-  if (activeWorkspace?.workspaceType === 'documents') {
-    return (
-      <DocumentsWorkspace
-        workspace={activeWorkspace}
-        onWorkspaceDeleted={() => {
-          setActiveWorkspace(null);
-          loadWorkspaces();
-        }}
-        onBack={() => setActiveWorkspace(null)}
-      />
-    );
-  }
 
   if (codeMode === '_loading') {
     // Cold cache — waiting for API to return workspace metadata

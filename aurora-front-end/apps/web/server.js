@@ -191,9 +191,6 @@ const csProxyPort = parseInt(process.env.CS_PROXY_PORT || '3090', 10);
 const app = next({ dev, hostname, port: nextPort });
 const handle = app.getRequestHandler();
 
-const DS_HOST = process.env.ONLYOFFICE_DS_RAW_HOST || 'localhost';
-const DS_PORT = parseInt(process.env.ONLYOFFICE_DS_RAW_PORT || '80', 10);
-
 // ── code-server proxy target ──
 const CS_HOST = process.env.CODE_SERVER_HOST || 'localhost';
 const CS_PORT = parseInt(process.env.CODE_SERVER_PORT || '8080', 10);
@@ -551,111 +548,12 @@ app.prepare().then(() => {
       return;
     }
 
-    // ── OnlyOffice HTTP proxy: catch DS-generated URLs that don't have /api/onlyoffice/ prefix ──
-    // The OnlyOffice editor JavaScript generates absolute URLs (e.g. http://localhost/cache/...)
-    // based on the DS's own hostname. When the browser and server are on the same machine,
-    // localhost reaches this server. We proxy these requests to the DS container.
-    const ooPathMatch = req.url && req.url.match(/^\/(cache|web-apps|sdkjs|sdkjs-plugins|fonts|doc|internal|info|meta|ai-proxy)\//);
-    if (ooPathMatch) {
-      console.log('[oo-proxy] HTTP', req.method, req.url);
-      const ph = { ...req.headers, host: `${DS_HOST}:${DS_PORT}` };
-      delete ph['accept-encoding'];  // Request uncompressed
-      const pr = httpRequest(
-        { hostname: DS_HOST, port: DS_PORT, path: req.url, method: req.method, headers: ph },
-        (pres) => { res.writeHead(pres.statusCode, pres.headers); pres.pipe(res); }
-      );
-      pr.on('error', () => badGateway(res));
-      req.pipe(pr);
-      return;
-    }
-
     // All normal HTTP requests → Next.js
     handle(req, res, parse(req.url, true));
   });
 
-  // ── OnlyOffice Socket.IO WebSocket proxy ──
-  server.on('upgrade', (req, socket, head) => {
-    console.log('[ws-proxy] UPGRADE request:', req.url);
-    if (!req.url) { socket.destroy(); return; }
-    if (req.url.startsWith('/_next/webpack-hmr')) return;
-
-    const isOnlyOffice =
-      req.url.startsWith('/doc/') ||
-      req.url.startsWith('/api/onlyoffice/') ||
-      req.url.startsWith('/web-apps/') ||
-      req.url.startsWith('/sdkjs-plugins/') ||
-      req.url.startsWith('/cache/') ||
-      req.url.startsWith('/fonts/');
-    if (!isOnlyOffice) return;
-
-    console.log('[ws-proxy]  -> OnlyOffice WS, proxying to DS');
-    let requestPath = req.url;
-    if (requestPath.startsWith('/api/onlyoffice/')) {
-      requestPath = requestPath.slice('/api/onlyoffice'.length);
-    }
-
-    const dsSocket = net.connect({ host: DS_HOST, port: DS_PORT }, () => {
-      const lines = [`${req.method} ${requestPath} HTTP/${req.httpVersion}`];
-      for (const [key, val] of Object.entries(req.headers)) {
-        if (Array.isArray(val)) { for (const v of val) lines.push(`${key}: ${v}`); }
-        else if (val !== undefined) {
-          lines.push(key.toLowerCase() === 'host' ? `Host: ${DS_HOST}` : `${key}: ${val}`);
-        }
-      }
-      lines.push('', '');
-      dsSocket.write(lines.join('\r\n'));
-      if (head.length > 0) dsSocket.write(head);
-
-      let buf = Buffer.alloc(0);
-      let upgraded = false;
-      const onData = (chunk) => {
-        if (upgraded) { socket.write(chunk); return; }
-        buf = Buffer.concat([buf, chunk]);
-        const hEnd = buf.indexOf('\r\n\r\n');
-        if (hEnd < 0) return;
-        const headStr = buf.toString('utf-8', 0, hEnd);
-        const sm = headStr.match(/^HTTP\/\S+\s+(\d+)/);
-        const sc = sm ? parseInt(sm[1], 10) : 502;
-        if (sc === 101) {
-          upgraded = true;
-          const hLines = headStr.split('\r\n').slice(1);
-          const respHeaders = {};
-          for (const line of hLines) {
-            const ci = line.indexOf(':');
-            if (ci > 0) respHeaders[line.slice(0, ci).trim()] = line.slice(ci + 1).trim();
-          }
-          socket.write('HTTP/1.1 101 Switching Protocols\r\n');
-          for (const [k, v] of Object.entries(respHeaders)) socket.write(`${k}: ${v}\r\n`);
-          socket.write('\r\n');
-          const rest = buf.slice(hEnd + 4);
-          if (rest.length > 0) socket.write(rest);
-          socket.pipe(dsSocket, { end: false });
-          dsSocket.pipe(socket, { end: false });
-          socket.on('close', () => dsSocket.destroy());
-          dsSocket.on('close', () => socket.destroy());
-          dsSocket.removeListener('data', onData);
-        } else {
-          socket.write(buf);
-          dsSocket.pipe(socket, { end: false });
-          dsSocket.removeListener('data', onData);
-        }
-      };
-      dsSocket.on('data', onData);
-      dsSocket.on('error', (err) => {
-        console.error('[ws-proxy] DS socket error:', err.message);
-        if (!upgraded) socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-        socket.destroy();
-      });
-    });
-    dsSocket.on('error', (err) => {
-      console.error('[ws-proxy] DS connect error:', err.message);
-      socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-      socket.destroy();
-    });
-  });
-
   server.listen(nextPort, (err) => {
     if (err) throw err;
-    console.log(`> Aurora ready on http://${hostname}:${nextPort} (DS WebSocket → ${DS_HOST}:${DS_PORT})`);
+    console.log(`> Aurora ready on http://${hostname}:${nextPort}`);
   });
 });

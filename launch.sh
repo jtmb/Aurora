@@ -35,7 +35,7 @@ for PORT in {3000..3005}; do
 done
 
 # ── Step 3: Start Docker services ──────────────────────────────────
-info "Starting Docker services (code-server + onlyoffice)..."
+info "Starting Docker services (code-server)..."
 cd "$FRONTEND_DIR"
 docker compose up -d --remove-orphans
 info "Docker services started"
@@ -86,7 +86,6 @@ echo "════════════════════════�
 info "Aurora stack is up!"
 echo "   Frontend:    http://localhost:3000 (or 3001/3002)"
 echo "   Orchestrator: http://127.0.0.1:${CODE_SERVER_API_PORT:-3001}"
-echo "   OnlyOffice:  http://localhost"
 echo ""
 info "Next.js PID: $NEXT_PID"
 echo "   To stop: kill $NEXT_PID && docker compose down"

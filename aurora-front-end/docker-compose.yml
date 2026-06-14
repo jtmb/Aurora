@@ -37,28 +37,6 @@ services:
     restart: unless-stopped
     mem_limit: 6g
 
-  onlyoffice-document-server:
-    image: onlyoffice/documentserver:latest
-    container_name: onlyoffice-ds
-    ports:
-      - "${ONLYOFFICE_DS_PORT:-8082}:80"
-      - "80:80"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      - JWT_ENABLED=false
-    volumes:
-      - onlyoffice_data:/var/www/onlyoffice/Data
-      - onlyoffice_logs:/var/log/onlyoffice
-      - onlyoffice_fonts:/usr/share/fonts
-      - ./config/onlyoffice/local.json:/etc/onlyoffice/documentserver/local.json
-      - ./config/onlyoffice/ds-cache-override.conf:/etc/nginx/includes/ds-cache-override.conf
-    mem_limit: 2g
-    restart: unless-stopped
-
 volumes:
-  onlyoffice_data:
-  onlyoffice_logs:
-  onlyoffice_fonts:
   cline-config:
   cline-hooks:
