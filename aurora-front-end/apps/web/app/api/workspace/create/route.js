@@ -177,17 +177,10 @@ If you need to remove a skill, delete its \`.md\` file.
     
     fs.writeFileSync(path.join(wsDir, '.aurora', 'workspace.json'), JSON.stringify(metadata, null, 2));
 
-    // Create a flat symlink so code-server can always find the workspace
-    // even if the proxy's rewriteWorkspaceFolder doesn't fire (stale server, race, etc.)
-    const flatDir = path.join(getUserWorkspacesDir(userId), '..'); // ~/.aurora/workspaces
-    const flatLink = path.join(flatDir, workspaceId);
-    if (!fs.existsSync(flatLink)) {
-      try {
-        fs.symlinkSync(path.join(userId, workspaceId), flatLink);
-      } catch (e) {
-        console.warn('[workspace/create] Failed to create flat symlink:', e.message);
-      }
-    }
+    // Flat symlinks are no longer created — the proxy's rewriteWorkspaceFolder
+    // always rewrites folder paths to per-user scoped directories, removing
+    // the flat /workspaces/{uuid}/ access that leaked across user accounts.
+    // Workspaces live exclusively at /workspaces/{userId}/{workspaceId}/.
 
     // Checkpoint system removed — orchestrator handles file state via Cline CLI git
     

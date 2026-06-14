@@ -27,6 +27,7 @@ import {
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { execSync } from "node:child_process";
 import crypto from "crypto";
 
 // ── JWT generation using built-in crypto (no external deps) ────────────────
@@ -575,6 +576,56 @@ app.get("/api/jobs/:id/tail", (req, res) => {
     console.log(`[api] SSE client disconnected from job ${jobId}, scheduling auto-stop in 5s`);
     scheduleDisconnectStop(jobId, 30000);
   });
+});
+
+// ── Workspace isolation symlink ──────────────────────────────────────────
+// The host volume is mounted at /all-workspaces (not /workspaces). This
+// endpoint creates a per-user symlink so code-server's file explorer only
+// sees one user's workspaces at a time. Called by the proxy on user switch.
+app.post("/api/workspace/activate", (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    const allWorkspaces = "/all-workspaces";
+    const wsLink = "/workspaces";
+    const targetDir = path.join(allWorkspaces, userId);
+
+    // Run symlink operations via sudo — the orchestrator runs as
+    // 'coder' but / is root-owned. docker-entrypoint.sh ensures
+    // passwordless sudo is available.
+
+    // Remove old symlink if it exists
+    try {
+      const lstat = fs.lstatSync(wsLink);
+      if (lstat.isSymbolicLink()) {
+        execSync(`sudo rm -f ${wsLink}`, { stdio: "pipe" });
+        console.log(`[api] Workspace old symlink removed`);
+      } else {
+        // Real directory — remove it
+        execSync(`sudo rm -rf ${wsLink}`, { stdio: "pipe" });
+        console.log(`[api] Workspace old directory removed`);
+      }
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+
+    // Ensure target directory exists
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    // Create new symlink: /workspaces → /all-workspaces/{userId}
+    execSync(`sudo ln -sf ${targetDir} ${wsLink}`, { stdio: "pipe" });
+    console.log(`[api] Workspace activated: /workspaces → /all-workspaces/${userId}`);
+    saveLastUserId(userId);
+    res.json({ ok: true, userId, path: targetDir });
+  } catch (err) {
+    console.error(`[api] Workspace activate error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Stop a running job

@@ -118,26 +118,19 @@ function stripAuthParams(url) {
 }
 
 /**
- * Rewrite workspace folder path to be per-user.
- * /workspaces/myProject → /workspaces/{userId}/myProject
+ * Workspace path validation.
  *
- * Only rewrites if the per-user workspace directory actually exists on disk.
- * Flat (legacy) workspaces stored at /workspaces/{uuid}/ are left unchanged so
- * the proxy doesn't break old workspaces during the migration period.
+ * With the symlink-based isolation (code-server container has
+ * /workspaces → /all-workspaces/{activeUserId}/), no URL rewriting
+ * is needed. The symlink ensures code-server only sees the active
+ * user's workspace directory.
+ *
+ * The orchestrator's /api/workspace/activate endpoint updates the
+ * symlink when the proxy detects a user change.
  */
 function rewriteWorkspaceFolder(url, userId) {
-  const folderPattern = /folder=\/workspaces\/([^/&?\s]+)/;
-  const match = url.match(folderPattern);
-  if (match && !match[1].startsWith(userId + '/')) {
-    const workspaceName = match[1];
-    // Check if this workspace exists in the per-user directory
-    const wsDir = join(homedir(), '.aurora', 'workspaces');
-    const perUserPath = join(wsDir, userId, workspaceName);
-    if (existsSync(perUserPath)) {
-      return url.replace(match[0], `folder=/workspaces/${userId}/${workspaceName}`);
-    }
-    // Flat workspace — leave path unchanged
-  }
+  // No rewriting needed — filesystem symlink handles isolation.
+  // Keeping this function as a no-op anchor for future path validation.
   return url;
 }
 
@@ -181,6 +174,48 @@ async function updateClineAuth(userId, jwtToken) {
   } catch (err) {
     // Non-critical — Cline will use build-time configured key
     console.warn('[cs-proxy] Failed to update Cline auth:', err.message);
+  }
+}
+
+/**
+ * Notify the code-server orchestrator to update the /workspaces symlink
+ * inside the container so code-server's file explorer only sees this
+ * user's workspace directory. With the symlink approach, the Docker
+ * volume mounts /all-workspaces and the symlink /workspaces → /all-workspaces/{userId}
+ * provides per-user filesystem isolation.
+ */
+async function activateWorkspaceSymlink(userId) {
+  const orchHost = process.env.CODE_SERVER_HOST || 'localhost';
+  const orchPort = process.env.CODE_SERVER_API_PORT || '3001';
+  try {
+    const { request } = await import('node:http');
+    const postData = JSON.stringify({ userId });
+    const options = {
+      hostname: orchHost,
+      port: parseInt(orchPort, 10),
+      path: '/api/workspace/activate',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+      timeout: 3000,
+    };
+    await new Promise((resolve, reject) => {
+      const req = request(options, (res) => {
+        let body = '';
+        res.on('data', (chunk) => body += chunk);
+        res.on('end', () => resolve());
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+      req.write(postData);
+      req.end();
+    });
+    console.log('[cs-proxy] Activated workspace symlink for user:', userId);
+  } catch (err) {
+    // Non-critical — symlink stays at previous user
+    console.warn('[cs-proxy] Failed to activate workspace symlink:', err.message);
   }
 }
 
@@ -443,9 +478,6 @@ const csServer = createServer((req, res) => {
   if (csLastAuthUser !== userId) {
     csLastAuthUser = userId;
     // Expose the active code-server user to API routes via globalThis.
-    // Cline sends aurora-no-key (no JWT), so v1 routes can't identify the
-    // user from the Authorization header. This bridge lets them apply
-    // per-user model access restrictions even for unauthenticated calls.
     globalThis.__aurora_cs_user_id = userId;
     // Try multiple token sources: Authorization header, URL param, or cookie
     const cookieHeader = req.headers['cookie'] || '';
@@ -457,10 +489,11 @@ const csServer = createServer((req, res) => {
     if (token) {
       updateClineAuth(userId, token).catch(() => {});
     } else {
-      // No token available yet — still update Cline config with just userId.
-      // The orchestrator will skip secrets.json when apiKey is empty.
       updateClineAuth(userId, '').catch(() => {});
     }
+    // Update code-server's /workspaces symlink to point to this user's dir
+    // so the file explorer only shows this user's workspaces.
+    activateWorkspaceSymlink(userId).catch(() => {});
   }
 
   // Set a session cookie so subsequent iframe requests (which lack token param)

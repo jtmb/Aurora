@@ -131,6 +131,36 @@ else
 fi
 echo ""
 
+# ── Step 6b: Bootstrap /workspaces symlink ────────────────────────────
+# All user workspace dirs live at /all-workspaces/{userId}/{id}.
+# A per-user symlink /workspaces → /all-workspaces/{userId} ensures
+# code-server's file explorer only sees the active user's workspaces.
+# The /api/workspace/activate endpoint updates this on user switch.
+# Uses sudo because / is root-owned and this script runs as 'coder'.
+echo ""
+echo "[6b/7] Bootstrapping /workspaces symlink..."
+# If /workspaces is a real directory (not a symlink), remove it.
+# This handles the transition from the old direct bind-mount days.
+if [ -d /workspaces ] && [ ! -L /workspaces ]; then
+  sudo rm -rf /workspaces
+  echo "  ✓ Removed stale /workspaces directory (will recreate as symlink)"
+fi
+if [ ! -L /workspaces ]; then
+  # Find the first non-empty user directory to symlink
+  FIRST_USER=$(ls -1d /all-workspaces/*/ 2>/dev/null | head -1 | xargs basename 2>/dev/null || true)
+  if [ -n "$FIRST_USER" ] && [ -d "/all-workspaces/$FIRST_USER" ]; then
+    sudo ln -sf "/all-workspaces/$FIRST_USER" /workspaces
+    echo "  ✓ /workspaces → /all-workspaces/$FIRST_USER"
+  else
+    # No users yet — create a placeholder that orchestrator will update
+    sudo mkdir -p /all-workspaces/_placeholder
+    sudo ln -sf /all-workspaces/_placeholder /workspaces
+    echo "  ⚠ No user dirs found — using /all-workspaces/_placeholder"
+  fi
+else
+  echo "  ✓ /workspaces symlink already exists, unchanged"
+fi
+
 # ── Step 7: Start code-server ────────────────────────────────────────────
 echo ""
 echo "[7/7] Starting code-server on port ${CODE_SERVER_PORT}..."

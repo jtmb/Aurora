@@ -7,8 +7,11 @@ set -euo pipefail
 # ── Fix volume mount permissions (named volumes are root-owned by default) ──
 sudo mkdir -p /home/coder/.cline/data /home/coder/.cline/settings 2>/dev/null || true
 sudo chown -R coder:coder /home/coder/.cline 2>/dev/null || true
-sudo mkdir -p /workspaces 2>/dev/null || true
-sudo chown -R coder:coder /workspaces 2>/dev/null || true
+# NOTE: /workspaces is now a per-user symlink managed by the orchestrator.
+# The volume mounts at /all-workspaces; the bootstrap in entrypoint.sh
+# creates /workspaces → /all-workspaces/{firstUser}. The
+# /api/workspace/activate endpoint updates it on user switch.
+# Do NOT mkdir /workspaces here — it must be a symlink, not a real dir.
 
 MODE="${1:-server}"
 
@@ -78,7 +81,7 @@ case "$MODE" in
       2>&1 || echo "  ⚠ cline auth had issues (continuing anyway)"
 
     # Dependencies pre-installed during Docker build
-    mkdir -p /workspaces /tmp/jobs
+    mkdir -p /tmp/jobs
     exec node /opt/aurora/orchestrator/api-server.js
     ;;
   both)
@@ -100,7 +103,7 @@ case "$MODE" in
       2>&1 || echo "  ⚠ cline auth had issues (continuing anyway)"
 
     # Start orchestrator API in background
-    mkdir -p /workspaces /tmp/jobs
+    mkdir -p /tmp/jobs
     node /opt/aurora/orchestrator/api-server.js &
     API_PID=$!
     echo "  Orchestrator API started (PID $API_PID)"

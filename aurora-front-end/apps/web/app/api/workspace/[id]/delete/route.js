@@ -2,6 +2,8 @@
 
 import { NextResponse } from 'next/server';
 import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { validateWorkspace } from '../../../../../lib/workspace-utils';
 import { getUserId } from '../../../../../lib/auth-utils';
 import { getDb } from '@aurora/shared/db-client';
@@ -23,6 +25,23 @@ export async function DELETE(request, { params }) {
     
     // Remove the entire workspace directory
     fs.rmSync(wsDir, { recursive: true, force: true });
+
+    // ── Clean up any stale flat symlink (legacy workspaces) ──
+    // Flat symlinks at /workspaces/{id} → {userId}/{id} are no longer
+    // created, but legacy symlinks may still exist. Remove them on delete.
+    const flatLink = path.join(os.homedir(), '.aurora', 'workspaces', id);
+    try {
+      if (fs.existsSync(flatLink)) {
+        const lstat = fs.lstatSync(flatLink);
+        if (lstat.isSymbolicLink()) {
+          fs.unlinkSync(flatLink);
+          console.log(`[workspace/delete] Removed legacy flat symlink: ${flatLink}`);
+        }
+      }
+    } catch (symErr) {
+      // Best-effort — workspace dir is already gone
+      console.warn('[workspace/delete] Flat symlink cleanup failed:', symErr.message);
+    }
 
     // ── Clean up all database records for this workspace ──
     try {

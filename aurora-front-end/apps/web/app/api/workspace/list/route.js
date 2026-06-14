@@ -3,7 +3,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { getWorkspacesDir, getUserWorkspacesDir } from '../../../../lib/workspace-utils';
+import { getUserWorkspacesDir } from '../../../../lib/workspace-utils';
 import { getUserId } from '../../../../lib/auth-utils';
 
 export async function GET(request) {
@@ -87,30 +87,9 @@ export async function GET(request) {
       }
     }
 
-    // 2. Fallback: scan flat workspace directory for legacy workspaces owned by this user
-    //    Only include workspaces not already found in the per-user directory.
-    const flatDir = getWorkspacesDir();
-    if (fs.existsSync(flatDir)) {
-      const flatEntries = fs.readdirSync(flatDir, { withFileTypes: true });
-      
-      for (const entry of flatEntries) {
-        if (!entry.isDirectory()) continue;
-        if (seenIds.has(entry.name)) continue; // Already in per-user dir
-        
-        const wsPath = path.join(flatDir, entry.name);
-        const metaPath = path.join(wsPath, '.aurora', 'workspace.json');
-        if (!fs.existsSync(metaPath)) continue; // Not a legacy workspace
-        
-        // Check ownership — only show if owned by this user
-        try {
-          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-          if (meta.ownerId && meta.ownerId !== userId) continue; // Not owned by this user
-        } catch { continue; }
-        
-        workspaces.push(buildEntry(wsPath, entry.name));
-        seenIds.add(entry.name);
-      }
-    }
+    // Flat workspace directory scan removed — workspaces are now exclusively
+    // stored under per-user directories (/workspaces/{userId}/{workspaceId}/).
+    // The flat /workspaces/{uuid}/ path was a cross-user access vector.
 
     // Sort by lastOpened desc, then name
     workspaces.sort((a, b) => {
