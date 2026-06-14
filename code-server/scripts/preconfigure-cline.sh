@@ -347,6 +347,23 @@ if '${HAS_ANTHROPIC}' == 'true':
     state['planModeAnthropicModelId'] = '${DEFAULT_ANTHROPIC_MODEL}'
     state['actModeAnthropicModelId'] = '${DEFAULT_ANTHROPIC_MODEL}'
 
+# Browser settings — enable browser tool by default with Chromium
+if 'browserSettings' not in state:
+    state['browserSettings'] = {}
+state['browserSettings']['disableToolUse'] = False
+state['browserSettings']['remoteBrowserEnabled'] = False
+state['browserSettings']['chromeExecutablePath'] = '/usr/bin/chromium'
+state['browserSettings'].setdefault('viewport', {'width': 900, 'height': 600})
+state['browserSettings'].setdefault('customArgs', '')
+
+# Auto-approval — allow browser usage
+if 'autoApprovalSettings' not in state:
+    state['autoApprovalSettings'] = {}
+state['autoApprovalSettings']['enabled'] = True
+if 'actions' not in state['autoApprovalSettings']:
+    state['autoApprovalSettings']['actions'] = {}
+state['autoApprovalSettings']['actions']['useBrowser'] = True
+
 with open(path, 'w') as f:
     json.dump(state, f, indent=2)
 print('  ✓ Written globalState.json — primary: ${PRIMARY_PROVIDER} / ${PRIMARY_MODEL}')

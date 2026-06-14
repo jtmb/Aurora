@@ -72,8 +72,37 @@ const extractKeys = async (request) => {
     console.error('[Aurora] Failed to load provider_settings fallback:', err.message);
   }
 
+  // All-users DB fallback: when authenticated user has no provider_settings,
+  // scan ALL users' settings to find any configured providers (e.g. LM Studio).
+  // This ensures non-admin users can see models their admin has provisioned
+  // even if they haven't configured their own provider settings.
+  if (userId && (!headerKeys.deepseek || !headerKeys.lmStudioUrl)) {
+    try {
+      runMigrations();
+      const db = getDb();
+      const allRows = db.prepare('SELECT settings_json FROM provider_settings').all();
+      for (const row of allRows) {
+        try {
+          const s = JSON.parse(row.settings_json);
+          if (!headerKeys.deepseek && s.deepseek) headerKeys.deepseek = s.deepseek;
+          if (!headerKeys.lmStudioUrl && s.lmStudioUrl) headerKeys.lmStudioUrl = s.lmStudioUrl;
+          if (!headerKeys.lmStudioUrl && s.lmStudioHost && s.lmStudioPort) {
+            headerKeys.lmStudioUrl = `http://${s.lmStudioHost}:${s.lmStudioPort}/v1`;
+          }
+          if (!headerKeys.lmStudioHost && s.lmStudioHost) headerKeys.lmStudioHost = String(s.lmStudioHost);
+          if (!headerKeys.lmStudioPort && s.lmStudioPort) headerKeys.lmStudioPort = String(s.lmStudioPort);
+          if (!headerKeys.lmStudioApiKey && s.lmStudioApiKey) headerKeys.lmStudioApiKey = s.lmStudioApiKey;
+          if (headerKeys.deepseek || headerKeys.lmStudioUrl) break;
+        } catch { /* skip malformed */ }
+      }
+    } catch (err) {
+      console.error('[Aurora] All-users DB fallback failed:', err.message);
+    }
+  }
+
   // Final fallback: server-side environment variables (.env.local)
   if (!headerKeys.deepseek && process.env.DEEPSEEK_API_KEY) headerKeys.deepseek = process.env.DEEPSEEK_API_KEY;
+  if (!headerKeys.lmStudioUrl && process.env.LMSTUDIO_URL) headerKeys.lmStudioUrl = process.env.LMSTUDIO_URL;
   if (!headerKeys.lmStudioHost && process.env.LM_STUDIO_HOST) headerKeys.lmStudioHost = process.env.LM_STUDIO_HOST;
   if (!headerKeys.lmStudioPort && process.env.LM_STUDIO_PORT) headerKeys.lmStudioPort = process.env.LM_STUDIO_PORT;
   if (!headerKeys.lmStudioApiKey && process.env.LMSTUDIO_API_KEY) headerKeys.lmStudioApiKey = process.env.LMSTUDIO_API_KEY;

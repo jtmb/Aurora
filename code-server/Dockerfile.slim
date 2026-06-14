@@ -25,7 +25,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     dumb-init \
     npm \
-  && rm -rf /var/lib/apt/lists/*
+    python3-pip \
+    python3-venv \
+    sudo \
+    chromium \
+    chromium-sandbox \
+  && rm -rf /var/lib/apt/lists/* \
+  && echo "coder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/coder \
+  && echo '#!/bin/sh' > /usr/local/bin/apt-get \
+  && echo 'sudo /usr/bin/apt-get "$@"' >> /usr/local/bin/apt-get \
+  && echo '#!/bin/sh' > /usr/local/bin/apt \
+  && echo 'sudo /usr/bin/apt "$@"' >> /usr/local/bin/apt \
+  && chmod +x /usr/local/bin/apt-get /usr/local/bin/apt \
+  && rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
 
 # ── Copy Aurora orchestration layer ───────────────────────────────────
 COPY scripts/ /opt/aurora/scripts/
@@ -61,8 +73,9 @@ RUN bash /opt/aurora/scripts/install-cline.sh || true
 
 # Preconfigure Cline settings (will be re-run at startup with actual env vars)
 RUN mkdir -p /home/coder/.local/share/code-server/User && \
+    mkdir -p /home/coder/.local/lib && \
     bash /opt/aurora/scripts/preconfigure-cline.sh || true && \
-    chown -R coder:coder /home/coder/.local/share/code-server
+    chown -R coder:coder /home/coder
 
 USER coder
 

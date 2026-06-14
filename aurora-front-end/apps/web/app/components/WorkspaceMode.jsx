@@ -1040,11 +1040,13 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
           src={`http://localhost:3090/?folder=/workspaces/${activeWorkspace.id}&token=${localStorage.getItem('auth_token') || ''}`}
           className="absolute inset-0 w-full h-full border-0"
           title="Code Server"
+          allow="clipboard-read; clipboard-write"
         />
       </div>
       {/* Bottom status bar — always visible, VS Code style */}
       <StatusBar
         workspaceId={activeWorkspace.id}
+        workspaceName={activeWorkspace.name}
         isGitRepo={activeWorkspace?.isGitRepo}
         activeFile={activeFile}
         openFiles={openFiles}
@@ -1071,7 +1073,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
 }
 
 // VS Code-style bottom status bar with branch switching
-function StatusBar({ workspaceId, isGitRepo, activeFile, openFiles, onRefreshTree }) {
+function StatusBar({ workspaceId, workspaceName, isGitRepo, activeFile, openFiles, onRefreshTree }) {
   const [gitStatus, setGitStatus] = useState(null);
   const [branches, setBranches] = useState([]);
   const [showBranchDropdown, setShowBranchDropdown] = useState(false);
@@ -1245,24 +1247,16 @@ function StatusBar({ workspaceId, isGitRepo, activeFile, openFiles, onRefreshTre
             )}
           </div>
         ) : (
-          <span className="flex items-center gap-1" title="Not a git repository">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-            </svg>
-          </span>
+          <span className="text-zinc-500">{workspaceName}: {workspaceId}</span>
         )}
         {gitStatus?.ahead > 0 && <span className="text-sky-400">↑{gitStatus.ahead}</span>}
         {gitStatus?.behind > 0 && <span className="text-orange-400">↓{gitStatus.behind}</span>}
         {changedCount > 0 && <span className="text-amber-400">{changedCount} changed</span>}
       </div>
 
-      {/* Right: File info */}
+      {/* Right: Powered by code-server */}
       <div className="flex items-center gap-3">
-        {activeFile && (
-          <span className="hover:text-zinc-300 cursor-default">{langLabel}</span>
-        )}
-        <span>UTF-8</span>
-        <span>Spaces: 2</span>
+        <span>Powered by code-server</span>
       </div>
     </div>
   );

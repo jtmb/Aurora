@@ -5,6 +5,7 @@
 
 import { createServer } from 'node:http';
 import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { parse } from 'node:url';
 import net from 'node:net';
 import { readFileSync, existsSync } from 'node:fs';
@@ -239,13 +240,66 @@ function proxyHtml(proxyRes, res, reqPath) {
 }
 
 function proxyPassthrough(proxyRes, res) {
-  res.writeHead(proxyRes.statusCode, proxyRes.headers);
+  const headers = { ...proxyRes.headers };
+  headers['permissions-policy'] = 'clipboard-read=(self), clipboard-write=(self)';
+  delete headers['content-security-policy'];
+  res.writeHead(proxyRes.statusCode, headers);
   proxyRes.pipe(res);
 }
 
 function badGateway(res) {
   if (!res.headersSent) res.writeHead(502);
   res.end('Bad Gateway');
+}
+
+// Direct passthrough to code-server (no user-specific rewriting)
+// Simple Browser proxy — handles /proxy/<port>[/<hostname>[/<path>]]
+// code-server's Simple Browser extension uses this endpoint for server-side
+// proxying of arbitrary URLs. Since code-server runs inside Docker, we handle
+// this on the host side so it can reach both host-localhost and external hosts.
+//
+// URL formats from code-server's Simple Browser:
+//   /proxy/<port>/                     → 127.0.0.1:<port>/
+//   /proxy/<port>/<hostname>/<path>    → <hostname>:<port>/<path>
+function handleSimpleBrowserProxy(req, res, url) {
+  // Match: /proxy/<port>[/<hostname>[/<remaining-path>]]
+  const proxyMatch = url.match(/^\/proxy\/(\d+)(?:\/([^/]+)(\/.*)?)?\/?$/);
+  if (!proxyMatch) {
+    badGateway(res);
+    return;
+  }
+  const targetPort = parseInt(proxyMatch[1], 10);
+  const targetHost = proxyMatch[2] || '127.0.0.1';   // omit hostname = localhost shortcut
+  const targetPath = proxyMatch[3] || '/';
+  const isHttps = targetPort === 443;
+
+  console.log(`[simple-browser] Proxy -> ${isHttps ? 'https' : 'http'}://${targetHost}:${targetPort}${targetPath}`);
+
+  // Build Host header without port for standard ports
+  let hostHeader = targetHost;
+  if (targetPort !== 80 && targetPort !== 443) hostHeader += `:${targetPort}`;
+
+  const proxyHeaders = { ...req.headers, host: hostHeader };
+  delete proxyHeaders['accept-encoding']; // avoid chunked/gzip issues
+
+  const requestFn = isHttps ? httpsRequest : httpRequest;
+  const proxyReq = requestFn(
+    { hostname: targetHost, port: targetPort, path: targetPath, method: req.method, headers: proxyHeaders, rejectUnauthorized: false },
+    (proxyRes) => {
+      // Strip CSP and framing headers so the response can render in the iframe
+      const headers = { ...proxyRes.headers };
+      delete headers['content-security-policy'];
+      delete headers['x-frame-options'];
+      delete headers['content-security-policy-report-only'];
+      res.writeHead(proxyRes.statusCode, headers);
+      proxyRes.pipe(res);
+    }
+  );
+  proxyReq.on('error', (err) => {
+    console.error(`[simple-browser] Error connecting to ${targetHost}:${targetPort}:`, err.message);
+    badGateway(res);
+  });
+  req.pipe(proxyReq);
 }
 
 // ── WebSocket upgrade handler (used by code-server proxy on port 3090) ──
@@ -367,6 +421,14 @@ const csServer = createServer((req, res) => {
       res.end();
       return;
     }
+    // Simple Browser proxy requests come from within the already-authenticated
+    // code-server iframe and don't carry auth tokens — allow them through.
+    // Handle the proxy ourselves since code-server runs in Docker and can't
+    // reach host localhost ports.
+    if (urlPath.startsWith('/proxy/')) {
+      handleSimpleBrowserProxy(req, res, url);
+      return;
+    }
     res.writeHead(401, { 'Content-Type': 'text/plain' });
     res.end('Unauthorized — please log in at /login');
     return;
@@ -450,6 +512,15 @@ csServer.listen(csProxyPort, () => {
 // ── Next.js server on port 3000 ──
 app.prepare().then(() => {
   const server = createServer((req, res) => {
+    // ── Simple Browser proxy: handle /proxy/<port>/<path> ourselves ──
+    // code-server's Simple Browser extension uses this to let users browse
+    // arbitrary URLs. Since code-server is in Docker, proxying from the host
+    // side lets it reach host-localhost ports correctly.
+    if (req.url && req.url.startsWith('/proxy/')) {
+      handleSimpleBrowserProxy(req, res, req.url);
+      return;
+    }
+
     // ── code-server resource proxy (catch-all for dynamic JS-loaded resources) ──
     // These may bypass the /code-server/ path prefix when loaded via code-server's
     // service worker / web worker contexts

@@ -43,7 +43,7 @@ export async function GET(request) {
   // Default LM Studio config (from env)
   const lmHost = process.env.LM_STUDIO_HOST || '';
   const lmPort = process.env.LM_STUDIO_PORT || '';
-  let lmStudioUrl = (lmHost && lmPort) ? `http://${lmHost}:${lmPort}/v1` : '';
+  let lmStudioUrl = process.env.LMSTUDIO_URL || ((lmHost && lmPort) ? `http://${lmHost}:${lmPort}/v1` : '');
 
   // Start with env-based providers (global defaults)
   let keys = {
@@ -53,6 +53,33 @@ export async function GET(request) {
     ollama: !!process.env.OLLAMA_BASE_URL,
     lmstudio: !!lmStudioUrl,
   };
+
+  // DB fallback for unauthenticated callers (e.g. code-server entrypoint).
+  // When env vars aren't set on the Next.js host, scan ALL users'
+  // provider_settings to detect which providers are available system-wide.
+  if (!userId) {
+    try {
+      runMigrations();
+      const db = getDb();
+      const allRows = db.prepare('SELECT settings_json FROM provider_settings').all();
+      for (const ar of allRows) {
+        try {
+          const s = JSON.parse(ar.settings_json);
+          if (!keys.lmstudio && (s.lmStudioUrl || (s.lmStudioHost && s.lmStudioPort))) {
+            keys.lmstudio = true;
+            lmStudioUrl = s.lmStudioUrl || `http://${s.lmStudioHost}:${s.lmStudioPort}/v1`;
+          }
+          if (!keys.deepseek && s.deepseek) keys.deepseek = true;
+          if (!keys.openai && s.openai) keys.openai = true;
+          if (!keys.anthropic && s.anthropic) keys.anthropic = true;
+          if (!keys.ollama && (s.ollamaHost || s.ollamaBase)) keys.ollama = true;
+          if (keys.lmstudio && keys.deepseek && keys.openai && keys.anthropic && keys.ollama) break;
+        } catch { /* skip malformed */ }
+      }
+    } catch (err) {
+      console.error('[Aurora] Unauthenticated DB fallback failed:', err.message);
+    }
+  }
 
   // If authenticated, load user-specific provider settings from DB
   // and OVERRIDE env defaults with user's configured providers.
@@ -118,6 +145,29 @@ export async function GET(request) {
             // Only disable if there are NO enabled models for this provider
             // Don't disable if user has api_keys for it
           }
+        }
+      }
+
+      // All-users DB fallback: when this user has no provider_settings row,
+      // scan ALL users' settings to find any configured providers (e.g. LM Studio).
+      // This ensures users can see providers their admin has configured system-wide.
+      if (!row && (!keys.lmstudio || !lmStudioUrl)) {
+        const allRows = db.prepare('SELECT settings_json FROM provider_settings').all();
+        for (const ar of allRows) {
+          try {
+            const s = JSON.parse(ar.settings_json);
+            if (s.lmStudioUrl) {
+              keys.lmstudio = true;
+              lmStudioUrl = s.lmStudioUrl;
+            } else if (s.lmStudioHost && s.lmStudioPort) {
+              keys.lmstudio = true;
+              lmStudioUrl = `http://${s.lmStudioHost}:${s.lmStudioPort}/v1`;
+            }
+            if (!keys.deepseek && s.deepseek) keys.deepseek = true;
+            if (!keys.openai && s.openai) keys.openai = true;
+            if (!keys.anthropic && s.anthropic) keys.anthropic = true;
+            if ((keys.lmstudio && lmStudioUrl) && keys.deepseek) break;
+          } catch { /* skip malformed */ }
         }
       }
     } catch (err) {

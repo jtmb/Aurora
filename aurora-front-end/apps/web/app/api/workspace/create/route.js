@@ -76,18 +76,10 @@ export async function POST(request) {
       const agentsMd = `# Workspace: ${name.trim()}
 
 ## Runtime Environment
-
-| Tool | Version |
-|------|---------|
-| Node.js | v22.22.3 |
-| npm | 10.9.8 |
-| Python | 3.12.3 |
-
 ## Universal Rules
 
-1. **Discover first**: Use \`list_dir\` and \`read_file\` to understand the project before writing code.
-2. **Respect existing tooling**: Use whatever package manager and build system the project already has.
-3. **Don't downgrade**: NEVER replace a framework project with a static HTML file because the dev server fails. Debug it instead.
+1. **Respect existing tooling**: Use whatever package manager and build system the project already has.
+2. **Check your work**: Always build the and deploy the project. Wait until app starts up and check logs, ensure application is functional.
 
 ## Next.js Project
 
@@ -99,13 +91,8 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 - **Version**: Use \`"next": "latest"\` in package.json (NOT "15.0.0"). Next 16+ works with React 19.
 - **React**: \`"react": "^19.0.0"\`, \`"react-dom": "^19.0.0"\`.
-- **App Router**: Use \`app/\` directory with \`page.tsx\`/\`layout.tsx\`, not \`pages/\`.
-- **🚫 NO src/ DIRECTORY**: Place ALL files at the project root (e.g., \`app/page.tsx\`, \`app/layout.tsx\`). Do NOT nest inside \`src/\` — this is OLD Next.js convention and WILL cause CSS/build failures.
 - **Dev command**: \`npm run dev\`
-- **Port**: Default 3000, auto-assigned to avoid conflicts.
-- **Deps**: \`npm install --legacy-peer-deps\` runs automatically if node_modules is missing.
-- **TypeScript**: Next.js auto-installs TypeScript deps when it detects \`tsconfig.json\`.
-- **Tailwind**: Use v3 (\`tailwindcss@^3\`), not v4. Requires \`postcss.config.js\` with \`tailwindcss\` and \`autoprefixer\` plugins. Tailwind v4 has completely different syntax — \`@tailwind\` directives and \`tailwind.config.ts\` files only work with v3.
+- **Port**: Default 6000, bvefore assigning check if port is available, if not available use next port up.
 `;
       fs.writeFileSync(path.join(wsDir, 'AGENTS.md'), agentsMd);
     }
@@ -189,6 +176,18 @@ If you need to remove a skill, delete its \`.md\` file.
     };
     
     fs.writeFileSync(path.join(wsDir, '.aurora', 'workspace.json'), JSON.stringify(metadata, null, 2));
+
+    // Create a flat symlink so code-server can always find the workspace
+    // even if the proxy's rewriteWorkspaceFolder doesn't fire (stale server, race, etc.)
+    const flatDir = path.join(getUserWorkspacesDir(userId), '..'); // ~/.aurora/workspaces
+    const flatLink = path.join(flatDir, workspaceId);
+    if (!fs.existsSync(flatLink)) {
+      try {
+        fs.symlinkSync(path.join(userId, workspaceId), flatLink);
+      } catch (e) {
+        console.warn('[workspace/create] Failed to create flat symlink:', e.message);
+      }
+    }
 
     // Checkpoint system removed — orchestrator handles file state via Cline CLI git
     
