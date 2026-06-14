@@ -467,6 +467,14 @@ const csServer = createServer((req, res) => {
   }
   const { userId, email } = auth;
 
+  // Simple Browser proxy requests — handle on the host side since
+  // code-server's Docker container can't reach host-localhost ports.
+  // These may carry the auth cookie, so check AFTER auth extraction.
+  if (urlPath.startsWith('/proxy/')) {
+    handleSimpleBrowserProxy(req, res, url);
+    return;
+  }
+
   // Parse query string once for both auth cookie and Cline auth update
   const queryIdxCookie = url.indexOf('?');
   const urlParams = queryIdxCookie >= 0 ? new URLSearchParams(url.slice(queryIdxCookie + 1)) : null;
