@@ -105,12 +105,14 @@ export async function GET(request) {
   const authHeader = request.headers.get('Authorization') || '';
   const authPreview = authHeader ? (authHeader.startsWith('Bearer ') ? `Bearer ${authHeader.substring(7, 30)}...` : authHeader.substring(0, 30)) : 'NONE';
   let userId = getUserId(request);
+  // Fallback: Cline sends aurora-no-key (no JWT). Use the active code-server
+  // user identity exposed by the cs-proxy (server.js) via globalThis.
   const fallbackUsed = !userId && !!globalThis.__aurora_cs_user_id;
   if (!userId && globalThis.__aurora_cs_user_id) {
     userId = globalThis.__aurora_cs_user_id;
   }
   const allowedModels = getUserAllowedModels(userId);
-  console.log(`[v1/models] auth=${authPreview} userId=${userId || 'null'} fallback=${fallbackUsed} ` +
+  console.log(`[v0/models] auth=${authPreview} userId=${userId || 'null'} fallback=${fallbackUsed} ` +
     `allowedModels=${allowedModels === null ? 'ALL' : `${allowedModels.size} entries`} ` +
     `globalThis=${globalThis.__aurora_cs_user_id || 'unset'}`);
 
@@ -136,7 +138,7 @@ export async function GET(request) {
   // return empty list to prevent leaking all models before auth is established.
   if (allowedModels === null) {
     if (!userId && !globalThis.__aurora_cs_user_id) {
-      console.log('[v1/models] No auth available — returning empty model list until auth is established');
+      console.log('[v0/models] No auth available — returning empty model list until auth is established');
       return NextResponse.json({ object: 'list', data: [] });
     }
     return NextResponse.json({ object: 'list', data: allModels });

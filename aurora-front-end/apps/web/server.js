@@ -442,11 +442,24 @@ const csServer = createServer((req, res) => {
   // Debounced: only fires when the userId has changed since last request.
   if (csLastAuthUser !== userId) {
     csLastAuthUser = userId;
+    // Expose the active code-server user to API routes via globalThis.
+    // Cline sends aurora-no-key (no JWT), so v1 routes can't identify the
+    // user from the Authorization header. This bridge lets them apply
+    // per-user model access restrictions even for unauthenticated calls.
+    globalThis.__aurora_cs_user_id = userId;
+    // Try multiple token sources: Authorization header, URL param, or cookie
+    const cookieHeader = req.headers['cookie'] || '';
+    const cookieMatch = cookieHeader.match(/aurora_cs_token=([^;]+)/);
+    const cookieToken = cookieMatch ? decodeURIComponent(cookieMatch[1]) : '';
     const token = req.headers['authorization']?.startsWith('Bearer ')
       ? req.headers['authorization'].substring(7)
-      : urlToken || '';
+      : urlToken || cookieToken || '';
     if (token) {
       updateClineAuth(userId, token).catch(() => {});
+    } else {
+      // No token available yet — still update Cline config with just userId.
+      // The orchestrator will skip secrets.json when apiKey is empty.
+      updateClineAuth(userId, '').catch(() => {});
     }
   }
 

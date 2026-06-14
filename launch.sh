@@ -59,7 +59,8 @@ info "Dependencies installed"
 # ── Step 5: Start Next.js + code-server proxy ──────────────────────
 info "Starting Next.js + code-server proxy..."
 cd "$FRONTEND_DIR/apps/web"
-node server.js &
+# LMSTUDIO_URL needed for v0/v1/models to fetch dynamic model list from LM Studio
+LMSTUDIO_URL="${LMSTUDIO_URL:-http://192.168.0.13:1234/v1}" node server.js &
 NEXT_PID=$!
 info "Next.js + code-server proxy running (PID $NEXT_PID)"
 

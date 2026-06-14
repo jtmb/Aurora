@@ -63,8 +63,8 @@ with open('$MACHINE_SETTINGS_FILE', 'r') as f:
     s = json.load(f)
 s['chat.disableAIFeatures'] = True
 s['workbench.colorTheme'] = 'Dark 2026'
-with open('$MACHINE_SETTINGS_FILE', 'w') as f:
-    json.dump(s, f, indent=4)
+    with open('$MACHINE_SETTINGS_FILE', 'w') as f:
+        json.dump(s, f, indent=4)
 " && echo "  ✓ Updated existing Machine settings with defaults"
 else
   cat > "$MACHINE_SETTINGS_FILE" << 'EOF'
@@ -76,37 +76,59 @@ EOF
   echo "  ✓ Created Machine settings with defaults"
 fi
 
-# ── Step 6: Pre-populate global state (Cline → secondary sidebar) ───────
+# ── Step 5b: Write argv.json — extension host heap limit ─────────────────
+# code-server does NOT pass NODE_OPTIONS to the extension host process,
+# so we must set --max-old-space-size via VS Code's argv.json mechanism.
+# Without this, Cline 3.89.2 causes OOM crashes in the extension host.
+ARGV_FILE="${CODE_SERVER_DATA_DIR}/argv.json"
+MAX_MEMORY_MB="${CODE_SERVER_MAX_MEMORY:-6144}"
+cat > "$ARGV_FILE" << EOF
+{
+    "max-memory": ${MAX_MEMORY_MB},
+    "js-flags": "--max-old-space-size=${MAX_MEMORY_MB}"
+}
+EOF
+echo "  ✓ Written argv.json (extension host max-old-space-size=${MAX_MEMORY_MB}MB)"
+
+# ── Step 6: Move Cline to right secondary sidebar ───────────────────
+# The VS Code web frontend uses browser IndexedDB for view container state,
+# NOT the server-side SQLite state.vscdb. Writing views.customizations to
+# SQLite has no effect on the browser frontend.
+#
+# Instead, we modify Cline's package.json to register its viewsContainers
+# under "secondarySidebar" instead of "activitybar". This is the only
+# reliable way to place a view container in the right sidebar.
 echo ""
-echo "[6/7] Pre-populating global state defaults..."
-STATE_DB_DIR="${CODE_SERVER_DATA_DIR}/User/globalStorage"
-STATE_DB_FILE="${STATE_DB_DIR}/state.vscdb"
-mkdir -p "$STATE_DB_DIR"
-python3 -c "
-import sqlite3, json, os
+echo "[6/7] Moving Cline to right secondary sidebar..."
+CLINE_PKG_DIR="${HOME}/.local/share/code-server/extensions/saoudrizwan.claude-dev-"*
+CLINE_PKG="${CLINE_PKG_DIR}/package.json"
+if [ -f "$CLINE_PKG" ]; then
+  python3 -c "
+import json, os
 
-db_path = '$STATE_DB_FILE'
-conn = sqlite3.connect(db_path)
-conn.execute('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)')
+pkg_path = '${CLINE_PKG}'
+with open(pkg_path, 'r') as f:
+    pkg = json.load(f)
 
-# Set Cline view container → secondary (right) sidebar
-c = conn.execute(\"SELECT value FROM ItemTable WHERE key='viewContainerLocation'\")
-row = c.fetchone()
-locations = json.loads(row[0]) if row and row[0] else {}
-locations['claude-dev-ActivityBar'] = 'secondarySideBar'
-conn.execute(\"INSERT OR REPLACE INTO ItemTable(key, value) VALUES('viewContainerLocation', ?)\",
-             (json.dumps(locations),))
-
-c = conn.execute(\"SELECT value FROM ItemTable WHERE key='views.cachedViewContainerLocations'\")
-row = c.fetchone()
-cached = json.loads(row[0]) if row and row[0] else {}
-cached['claude-dev-ActivityBar'] = 'secondarySideBar'
-conn.execute(\"INSERT OR REPLACE INTO ItemTable(key, value) VALUES('views.cachedViewContainerLocations', ?)\",
-             (json.dumps(cached),))
-
-conn.commit()
-conn.close()
-" && echo "  ✓ Cline set to open in secondary (right) sidebar"
+views_containers = pkg.get('contributes', {}).get('viewsContainers', {})
+# Only change if still using activitybar
+if 'activitybar' in views_containers:
+    views_containers['secondarySidebar'] = views_containers.pop('activitybar')
+    # Backup original if not already backed up
+    bak_path = pkg_path + '.orig-sidebar'
+    if not os.path.exists(bak_path):
+        with open(bak_path, 'w') as bf:
+            json.dump(pkg, bf, indent=2)  # write original before modification
+    with open(pkg_path, 'w') as f:
+        json.dump(pkg, f, indent=2)
+    print('  ✓ Moved Cline viewsContainers from activitybar → secondarySidebar')
+else:
+    loc = 'secondarySidebar' if 'secondarySidebar' in views_containers else 'unknown'
+    print(f'  ✓ Cline already in {loc}, no change needed')
+"
+else
+  echo "  ⚠ Cline package.json not found at $CLINE_PKG"
+fi
 echo ""
 
 # ── Step 7: Start code-server ────────────────────────────────────────────

@@ -729,7 +729,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                 <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">Create New</h2>
                 <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={() => { setCreationType('code'); setCreationMode('vibe'); setCreationStep('form'); }}
+                    onClick={() => { setCreationMode('vibe'); setCreationStep('form'); }}
                     className="group relative bg-zinc-900/60 border border-zinc-800/60 hover:border-purple-500/40 rounded-xl p-4 text-left transition-all hover:bg-zinc-800/60"
                   >
                     <div className="w-9 h-9 rounded-lg bg-purple-500/10 flex items-center justify-center mb-3 group-hover:bg-purple-500/20 transition-colors">
@@ -741,7 +741,7 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
                     <p className="text-[11px] text-zinc-400">Chat with AI to build your app</p>
                   </button>
                   <button
-                    onClick={() => { setCreationType('code'); setCreationMode('full'); setCreationStep('form'); }}
+                    onClick={() => { setCreationMode('full'); setCreationStep('form'); }}
                     className="group relative bg-zinc-900/60 border border-zinc-800/60 hover:border-indigo-500/40 rounded-xl p-4 text-left transition-all hover:bg-zinc-800/60"
                   >
                     <div className="w-9 h-9 rounded-lg bg-indigo-500/10 flex items-center justify-center mb-3 group-hover:bg-indigo-500/20 transition-colors">

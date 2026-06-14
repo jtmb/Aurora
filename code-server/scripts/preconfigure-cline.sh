@@ -63,14 +63,19 @@ if curl -s --max-time 5 "${AURORA_GATEWAY_BASE}/api/v1/providers" > "$PROVIDERS_
 else
   echo "  ⚠ Could not reach Aurora API — using env-var fallback"
   # Fallback: use env vars to determine providers
+  DEEPSEEK_AVAIL=false; [ -n "${DEEPSEEK_API_KEY:-}" ] && DEEPSEEK_AVAIL=true
+  LMSTUDIO_AVAIL=false; [ -n "${LMSTUDIO_URL:-}" ] && LMSTUDIO_AVAIL=true
+  OPENAI_AVAIL=false; [ -n "${OPENAI_API_KEY:-}" ] && OPENAI_AVAIL=true
+  ANTHROPIC_AVAIL=false; [ -n "${ANTHROPIC_API_KEY:-}" ] && ANTHROPIC_AVAIL=true
+  OLLAMA_AVAIL=false; [ -n "${OLLAMA_BASE_URL:-}" ] && OLLAMA_AVAIL=true
   cat > "$PROVIDERS_TMP" << EOF
 {
   "providers": {
-    "deepseek": ${DEEPSEEK_API_KEY:+true}${DEEPSEEK_API_KEY:-false},
-    "lmstudio": ${LMSTUDIO_URL:+true}${LMSTUDIO_URL:-false},
-    "openai": ${OPENAI_API_KEY:+true}${OPENAI_API_KEY:-false},
-    "anthropic": ${ANTHROPIC_API_KEY:+true}${ANTHROPIC_API_KEY:-false},
-    "ollama": ${OLLAMA_BASE_URL:+true}${OLLAMA_BASE_URL:-false}
+    "deepseek": $DEEPSEEK_AVAIL,
+    "lmstudio": $LMSTUDIO_AVAIL,
+    "openai": $OPENAI_AVAIL,
+    "anthropic": $ANTHROPIC_AVAIL,
+    "ollama": $OLLAMA_AVAIL
   },
   "models": {
     "deepseek": [{"id":"deepseek-chat","name":"DeepSeek Chat"},{"id":"deepseek-v4-pro","name":"DeepSeek V4 Pro"}],
@@ -81,7 +86,7 @@ else
   }
 }
 EOF
-  PROVIDERS_JSON=$(cat /tmp/aurora-providers.json)
+  PROVIDERS_JSON=$(cat "$PROVIDERS_TMP")
 fi
 
 # Parse provider availability & models
@@ -189,32 +194,12 @@ done
 echo "  Visible providers: $VISIBLE_PROVIDERS"
 
 # ── Step 4: Write secrets.json ─────────────────────────────────────────
+# SKIPPED: The orchestrator API server handles secrets.json (writes a valid
+# JWT on startup and updates it on every auth/update call).
+# Writing aurora-no-key here would overwrite the orchestrator's JWT and
+# cause Cline to bypass per-user model filtering.
 echo ""
-echo "[2/6] Writing Cline secrets..."
-
-SECRETS_FILE="${CLINE_DATA_DIR}/secrets.json"
-python3 -c "
-import json, os
-secrets = {}
-path = '$SECRETS_FILE'
-if os.path.exists(path):
-    try:
-        with open(path) as f:
-            secrets = json.load(f)
-    except:
-        pass
-
-# Write API key for every configured provider (Cline reads from secrets.json)
-# All providers route through Aurora gateway, so same key works for all
-secrets['deepSeekApiKey'] = '$CLINE_API_KEY'
-secrets['lmStudioApiKey'] = '$CLINE_API_KEY'
-secrets['openAiApiKey'] = '$CLINE_API_KEY'
-secrets['apiKey'] = '$CLINE_API_KEY'
-
-with open(path, 'w') as f:
-    json.dump(secrets, f, indent=2)
-print('  ✓ Written secrets.json')
-"
+echo "[2/6] Skipping secrets.json (managed by orchestrator)"
 
 # ── Step 5: Write providers.json ───────────────────────────────────────
 echo ""
@@ -297,11 +282,24 @@ with open('${PROVIDERS_FILE}', 'w') as f:
 print('  ✓ Written providers.json with: ' + ', '.join(available.keys()))
 PYEOF
 
+# Save a pristine backup so the orchestrator can always restore the full
+# provider list before applying per-user filtering. Without this, a
+# zero-access user clearing all providers would permanently brick the list
+# for subsequent users.
+cp "${PROVIDERS_FILE}" "${PROVIDERS_FILE}.orig"
+echo "  ✓ Saved providers.json.orig backup"
+
+# Clear the active providers.json so Cline starts with nothing until
+# auth/update populates it per-user. This prevents model leaks at startup.
+echo '{"version":1,"lastUsedProvider":"","providers":{}}' > "${PROVIDERS_FILE}"
+echo "  ✓ Cleared active providers.json (starts empty, auth/update populates it)"
+
 # ── Step 6: Write globalState.json ─────────────────────────────────────
 echo ""
 echo "[4/6] Writing Cline global state..."
 
 GLOBAL_STATE_FILE="${CLINE_DATA_DIR}/globalState.json"
+SECRETS_FILE="${CLINE_DATA_DIR}/secrets.json"
 
 python3 << PYEOF
 import json, os
@@ -320,32 +318,21 @@ state['welcomeViewCompleted'] = True
 state['__vscodeMigrationVersion'] = state.get('__vscodeMigrationVersion', 1)
 state['clineVersion'] = state.get('clineVersion', '3.89.2')
 
-# Primary provider — use STRING name, not int32 (Cline maps strings internally)
-state['planModeApiProvider'] = '${PRIMARY_PROVIDER}'
-state['actModeApiProvider'] = '${PRIMARY_PROVIDER}'
+# Primary provider — NOT set at startup. The orchestrator's auth/update
+# sets the correct provider when a user connects. Starting with no provider
+# prevents leaking models (e.g., DeepSeek) to users with zero access.
+state.pop('planModeApiProvider', None)
+state.pop('actModeApiProvider', None)
 state['planActSeparateModelsSetting'] = False
 
-# Provider-specific model IDs
-if '${HAS_DEEPSEEK}' == 'true':
-    state['deepseekBaseUrl'] = '${AURORA_GATEWAY_URL}'
-    state['planModeDeepSeekModelId'] = '${DEFAULT_DEEPSEEK_MODEL}'
-    state['actModeDeepSeekModelId'] = '${DEFAULT_DEEPSEEK_MODEL}'
+# Provider-specific model IDs — NOT set at startup.
+# The orchestrator's auth/update populates these per-user.
+# Clearing them at startup prevents model leaks for zero-access users.
+for key in list(state.keys()):
+    if 'ModelId' in key or 'BaseUrl' in key:
+        del state[key]
 
-if '${HAS_LMSTUDIO}' == 'true':
-    state['lmStudioBaseUrl'] = '${LMSTUDIO_BASE}'
-    state['planModeLmStudioModelId'] = '${DEFAULT_LMSTUDIO_MODEL}'
-    state['actModeLmStudioModelId'] = '${DEFAULT_LMSTUDIO_MODEL}'
-    state['lmStudioMaxTokens'] = 8192
-
-if '${HAS_OPENAI}' == 'true':
-    state['openAiBaseUrl'] = '${AURORA_GATEWAY_URL}'
-    state['planModeOpenAiModelId'] = '${DEFAULT_OPENAI_MODEL}'
-    state['actModeOpenAiModelId'] = '${DEFAULT_OPENAI_MODEL}'
-
-if '${HAS_ANTHROPIC}' == 'true':
-    state['anthropicBaseUrl'] = '${AURORA_GATEWAY_URL}'
-    state['planModeAnthropicModelId'] = '${DEFAULT_ANTHROPIC_MODEL}'
-    state['actModeAnthropicModelId'] = '${DEFAULT_ANTHROPIC_MODEL}'
+# Keep the model info objects (used for pricing display, not model listing)
 
 # Browser settings — enable browser tool by default with Chromium
 if 'browserSettings' not in state:
@@ -366,7 +353,7 @@ state['autoApprovalSettings']['actions']['useBrowser'] = True
 
 with open(path, 'w') as f:
     json.dump(state, f, indent=2)
-print('  ✓ Written globalState.json — primary: ${PRIMARY_PROVIDER} / ${PRIMARY_MODEL}')
+print('  ✓ Written globalState.json (no primary — auth/update sets it per-user)')
 PYEOF
 
 # ── Step 7: Purge old caches and Copilot artifacts ─────────────────────
@@ -455,10 +442,13 @@ visible = [v for v in ['deepseek','lmstudio','openai','anthropic','ollama'] if v
 marker_dir = '${CLINE_DATA_DIR}'
 os.makedirs(marker_dir, exist_ok=True)
 
-# Write hidden_providers.json with remoteConfiguredProviders (visible list)
+# Write hidden_providers.json — SAFE DEFAULT: only lmstudio visible.
+# auth/update (called by proxy middleware on user connect) will override
+# this with the user's actual allowed providers. The cline-provider-filter.cjs
+# getter re-reads the file on every access, so no restart is needed.
 with open(os.path.join(marker_dir, 'hidden_providers.json'), 'w') as f:
-    json.dump({'remoteConfiguredProviders': visible}, f, indent=2)
-print(f'  ✓ Written hidden_providers.json: visible={visible}, hidden={hidden_set}')
+    json.dump({'remoteConfiguredProviders': ['lmstudio']}, f, indent=2)
+print(f'  ✓ Written hidden_providers.json: visible=["lmstudio"] (safe default)')
 
 # Prepend require() hook to extension.js
 ext_path = '${EXT_JS}'
@@ -492,7 +482,7 @@ with open(path, 'rb') as f:
 # Replace the xqt arrow function body to use globalThis.__aurora_providers
 # instead of remoteConfiguredProviders from StateManager.
 # Original: xqt=(t,e)=>{let r=e?.remoteConfiguredProviders??\$i.get().getRemoteConfigSettings().remoteConfiguredProviders;return!r||!r.length?!0:t&&r.includes(t)}
-# New:      xqt=(t,e)=>{let r=globalThis.__aurora_providers||["deepseek","lmstudio","ollama"];return r.includes(t)}
+# New:      xqt=(t,e)=>{let r=globalThis.__aurora_providers||["lmstudio"];return r.includes(t)}
 xqt_marker = b'xqt=(t,e)=>{let r=e?.remoteConfiguredProviders??\$i.get()'
 xqt_idx = c.find(xqt_marker)
 if xqt_idx >= 0:
@@ -504,9 +494,8 @@ if xqt_idx >= 0:
         brace_close = c.find(b'}', brace_open + 1)
     if brace_open >= 0 and brace_close >= 0:
         original_body = bytes(c[brace_open+1:brace_close])
-        # Build replacement: use globalThis var with hardcoded fallback
-        providers_list = '${VISIBLE_PROVIDERS}'
-        new_body_str = 'let r=globalThis.__aurora_providers||[' + providers_list + '];return r.includes(t)'
+        # Build replacement: use globalThis var with safe fallback (lmstudio only)
+        new_body_str = 'let r=globalThis.__aurora_providers||["lmstudio"];return r.includes(t)'
         new_body = new_body_str.encode('latin-1')
         if len(new_body) < len(original_body):
             new_body += b';' * (len(original_body) - len(new_body))
@@ -549,32 +538,33 @@ PYEOF
   echo "  ✓ Binary patches applied"
 
   # ── Move Cline to the secondary (right) side panel ─────────────
-  # code-server 4.x (VS Code 1.123) supports secondarySideBar but
-  # the viewsContainers manifest key alone may not render the icon.
-  # Instead, we write the view container location override directly
-  # into the workbench state database so Cline opens on the right.
+  # VS Code persists view container locations in the 'views.customizations'
+  # global storage key (state.vscdb). Location enum: 0=Sidebar, 1=Panel,
+  # 2=AuxiliaryBar. The package.json stays as activitybar so the icon renders.
   GLOBAL_STATE_DB="${HOME}/.local/share/code-server/User/globalStorage/state.vscdb"
+  mkdir -p "$(dirname "$GLOBAL_STATE_DB")"
   python3 -c "
 import json, os, sqlite3
 
 db_path = '${GLOBAL_STATE_DB}'
-os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
 conn = sqlite3.connect(db_path)
 conn.execute('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value BLOB)')
 
-locations = {'claude-dev-ActivityBar': 'secondarySideBar'}
-loc_json = json.dumps(locations)
+customizations = {
+    'viewContainerLocations': {'claude-dev-ActivityBar': 2},
+    'viewLocations': {},
+    'viewContainerBadgeEnablementStates': {}
+}
+conn.execute('INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)',
+             ('views.customizations', json.dumps(customizations)))
 
-for key in ['viewContainerLocation', 'views.cachedViewContainerLocations']:
-    conn.execute('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)', (key, loc_json))
-
-# Ensure secondary side bar is not hidden
-conn.execute('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)', ('auxiliaryBar.hidden', 'false'))
+# Ensure the secondary (right) side bar is visible
+conn.execute('INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)',
+             ('auxiliaryBar.hidden', 'false'))
 
 conn.commit()
 conn.close()
-print('  ✓ Cline moved to secondary (right) side panel')
+print('  ✓ Cline set to secondary (right) side bar (views.customizations)')
 " 2>&1
 
   # ── Webview provider dropdown filter ──────────────────────────────

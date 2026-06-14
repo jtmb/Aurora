@@ -4,6 +4,12 @@
 # Mode 2: "orchestrator" — Run headless autonomous build loop
 set -euo pipefail
 
+# ── Fix volume mount permissions (named volumes are root-owned by default) ──
+sudo mkdir -p /home/coder/.cline/data /home/coder/.cline/settings 2>/dev/null || true
+sudo chown -R coder:coder /home/coder/.cline 2>/dev/null || true
+sudo mkdir -p /workspaces 2>/dev/null || true
+sudo chown -R coder:coder /workspaces 2>/dev/null || true
+
 MODE="${1:-server}"
 
 case "$MODE" in
@@ -16,7 +22,8 @@ case "$MODE" in
     exec /opt/aurora/scripts/entrypoint.sh \
       --auth none \
       --user-data-dir "${CODE_SERVER_DATA_DIR}" \
-      --bind-addr "0.0.0.0:${CODE_SERVER_PORT:-8080}"
+      --bind-addr "0.0.0.0:${CODE_SERVER_PORT:-8080}" \
+      --max-memory 6144
     ;;
 
   orchestrator|headless)
