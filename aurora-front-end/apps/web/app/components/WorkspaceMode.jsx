@@ -93,9 +93,22 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     loadWorkspaces();
   }, []);
 
+  // Track previous pendingWorkspace to detect clearing (workspace not found)
+  const prevPendingRef = useRef(pendingWorkspace);
+
   // Open workspace from sidebar navigation
   useEffect(() => {
-    if (!pendingWorkspace) return;
+    // If pendingWorkspace was just cleared (set to null), clean up any stale loading state
+    if (!pendingWorkspace) {
+      if (prevPendingRef.current && codeMode === '_loading') {
+        setActiveWorkspace(null);
+        setCodeMode('full');
+        setError('This workspace no longer exists. It may have been deleted.');
+      }
+      prevPendingRef.current = pendingWorkspace;
+      return;
+    }
+    prevPendingRef.current = pendingWorkspace;
     openWorkspace(pendingWorkspace);
     onWorkspaceOpened?.();
   }, [pendingWorkspace]);
@@ -989,12 +1002,42 @@ export default function WorkspaceMode({ onWorkspaceDeleted, pendingWorkspace, on
     );
   }
 
+  // Validating workspace before rendering iframe — prevents code-server
+  // "Workspace does not exist" error when the folder is missing on disk
+  if (isLoading) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-zinc-950">
+        <div className="flex items-center gap-3 text-zinc-500">
+          <div className="w-5 h-5 border-2 border-zinc-600 border-t-indigo-500 rounded-full animate-spin" />
+          <span className="text-sm">Opening workspace…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-zinc-950">
+        <div className="text-center">
+          <div className="text-red-400 text-lg font-medium mb-2">Workspace does not exist</div>
+          <div className="text-zinc-500 text-sm mb-4">{error}</div>
+          <button
+            onClick={() => { setActiveWorkspace(null); setError(''); loadWorkspaces(); }}
+            className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-sm transition-colors"
+          >
+            Back to workspaces
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Code-server iframe — native VS Code with Cline */}
       <div className="flex-1 min-h-0 relative">
         <iframe
-          src={`http://localhost:3090/?folder=/workspaces/${activeWorkspace.id}`}
+          src={`http://localhost:3090/?folder=/workspaces/${activeWorkspace.id}&token=${localStorage.getItem('auth_token') || ''}`}
           className="absolute inset-0 w-full h-full border-0"
           title="Code Server"
         />

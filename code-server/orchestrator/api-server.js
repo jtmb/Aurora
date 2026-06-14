@@ -24,6 +24,9 @@ import {
   scheduleDisconnectStop,
   cancelDisconnectStop,
 } from "./job-manager.js";
+import fs from "fs";
+import path from "path";
+import os from "os";
 
 const PORT = parseInt(process.env.CODE_SERVER_API_PORT || "3001", 10);
 const CORS_ORIGIN = process.env.ORCHESTRATOR_CORS_ORIGIN || "*";
@@ -70,6 +73,41 @@ app.get("/api/health", (req, res) => {
     activeJobs: active,
     totalJobs: jobs.length,
   });
+});
+
+// Update Cline auth for the current user (called by proxy on user switch)
+app.post("/api/auth/update", (req, res) => {
+  try {
+    const { userId, apiKey } = req.body;
+    if (!userId || !apiKey) {
+      return res.status(400).json({ error: "userId and apiKey are required" });
+    }
+
+    const homeDir = os.homedir();
+    const clineDataDir = path.join(homeDir, '.cline', 'data');
+    const secretsFile = path.join(clineDataDir, 'secrets.json');
+
+    // Read existing secrets
+    let secrets = {};
+    if (fs.existsSync(secretsFile)) {
+      try { secrets = JSON.parse(fs.readFileSync(secretsFile, 'utf-8')); } catch {}
+    }
+
+    // Update auth keys for the current user
+    secrets.deepSeekApiKey = apiKey;
+    secrets.lmStudioApiKey = apiKey;
+    secrets.openAiApiKey = apiKey;
+    secrets.apiKey = apiKey;
+
+    fs.mkdirSync(clineDataDir, { recursive: true });
+    fs.writeFileSync(secretsFile, JSON.stringify(secrets, null, 2));
+
+    console.log(`[api] Updated Cline auth for user: ${userId}`);
+    res.json({ status: 'ok', userId });
+  } catch (err) {
+    console.error(`[api] POST /api/auth/update error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Start a new job

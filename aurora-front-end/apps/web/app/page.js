@@ -46,6 +46,7 @@ export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceList, setWorkspaceList] = useState([]);
   const [pendingWorkspace, setPendingWorkspace] = useState(null);
+  const [workspaceKey, setWorkspaceKey] = useState(0); // bump to force WorkspaceMode remount
 
   // Provider icons for model selector — size variant
   const providerIcons = (source, size = 'w-3.5 h-3.5') => {
@@ -348,6 +349,18 @@ export default function Home() {
               localStorage.setItem('aurora_ws_meta_cache', JSON.stringify(cache));
             } catch {}
             setPendingWorkspace(fresh);
+          } else {
+            // Workspace no longer exists — clear pending and clean URL param
+            setPendingWorkspace(null);
+            try {
+              const cache = JSON.parse(localStorage.getItem('aurora_ws_meta_cache') || '{}');
+              delete cache[workspaceId];
+              localStorage.setItem('aurora_ws_meta_cache', JSON.stringify(cache));
+            } catch {}
+            // Remove workspace param from URL without page reload
+            const url = new URL(window.location);
+            url.searchParams.delete('workspace');
+            window.history.replaceState({}, '', url);
           }
         }).catch(() => {});
       }
@@ -653,6 +666,27 @@ export default function Home() {
     };
     if (badges[lang]) return badges[lang];
     return <svg className="w-[1.2rem] h-[1.2rem] flex-shrink-0 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>;
+  };
+
+  const handleDeleteWorkspace = async (wsId) => {
+    const token = localStorage.getItem('auth_token');
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/workspace/${wsId}/delete`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        // Force WorkspaceMode remount to clear any active iframe for this workspace
+        setWorkspaceKey(k => k + 1);
+        if (pendingWorkspace?.id === wsId) {
+          setPendingWorkspace(null);
+        }
+        await loadWorkspacesForSidebar();
+      }
+    } catch (err) {
+      console.error('Delete workspace error:', err);
+    }
   };
 
   const loadChats = async () => {
@@ -1295,6 +1329,7 @@ export default function Home() {
   const [files, setFiles] = useState([]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [hoveredChatId, setHoveredChatId] = useState(null);
+  const [hoveredWsId, setHoveredWsId] = useState(null);
   const [renamingChatId, setRenamingChatId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
   const [modelOverlayOpen, setModelOverlayOpen] = useState(false);
@@ -1680,25 +1715,42 @@ export default function Home() {
                     <p className="px-4 py-2 text-xs text-zinc-600">No workspaces yet. Create one!</p>
                   ) : (
                     workspaceList.map((ws) => (
-                      <button
+                      <div
                         key={ws.id}
-                        onClick={() => { setPendingWorkspace(ws); setAppMode('workspace'); }}
-                        className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20"
-                        title={`Open workspace: ${ws.name}`}
+                        className="relative group"
+                        onMouseEnter={() => setHoveredWsId(ws.id)}
+                        onMouseLeave={() => setHoveredWsId(null)}
                       >
-                        {getLanguageIcon(ws)}
-                        <div className="flex-1 min-w-0">
-                          <p className="truncate text-sm">{ws.name}</p>
-                          <div className="flex items-center gap-1.5 mt-0.5">
-                            {ws.codeMode === 'vibe' && (
-                              <span className="text-[10px] px-1 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10">Vibe</span>
-                            )}
-                            {ws.isGitRepo && (
-                              <span className="text-[10px] text-zinc-600">Git</span>
-                            )}
+                        <button
+                          onClick={() => { setPendingWorkspace(ws); setAppMode('workspace'); }}
+                          className="w-full flex items-center gap-3 px-4 py-[calc(0.75rem+6px)] rounded-lg text-sm text-left transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/20"
+                          title={`Open workspace: ${ws.name}`}
+                        >
+                          {getLanguageIcon(ws)}
+                          <div className="flex-1 min-w-0">
+                            <p className="truncate text-sm">{ws.name}</p>
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              {ws.codeMode === 'vibe' && (
+                                <span className="text-[10px] px-1 py-0.5 rounded font-medium text-purple-400 bg-purple-500/10">Vibe</span>
+                              )}
+                              {ws.isGitRepo && (
+                                <span className="text-[10px] text-zinc-600">Git</span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      </button>
+                        </button>
+                        {hoveredWsId === ws.id && (
+                          <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-zinc-900/90 backdrop-blur-sm rounded-lg px-1 py-0.5">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleDeleteWorkspace(ws.id); }}
+                              className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-colors"
+                              title="Delete workspace"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     ))
                   )}
                 </nav>
@@ -1827,7 +1879,7 @@ export default function Home() {
         {/* Conditional content: Chat vs Workspace */}
         {appMode === 'workspace' ? (
           <div className="flex-1 mt-[50px] flex min-h-0">
-            <WorkspaceMode onWorkspaceDeleted={loadWorkspacesForSidebar} pendingWorkspace={pendingWorkspace} onWorkspaceOpened={() => setPendingWorkspace(null)} />
+            <WorkspaceMode key={workspaceKey} onWorkspaceDeleted={loadWorkspacesForSidebar} pendingWorkspace={pendingWorkspace} onWorkspaceOpened={() => setPendingWorkspace(null)} />
           </div>
         ) : (
         <>

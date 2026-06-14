@@ -8,9 +8,9 @@ import { request as httpRequest } from 'node:http';
 import { parse } from 'node:url';
 import net from 'node:net';
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import next from 'next';
+import { resolve, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';import crypto from 'node:crypto';import next from 'next';
+import { homedir } from 'node:os';
 
 // Load .env.local into process.env (Next.js does this for the app, but server.js runs standalone)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -35,6 +35,153 @@ process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT:', err);
   process.exit(1);
 });
+
+// ── JWT verification (inline, avoids bundler issues with shared packages) ──
+const JWT_SECRET = process.env.JWT_SECRET || 'aurora-dev-secret-change-in-production-minimum-32-chars';
+function base64UrlDecode(str) {
+  return Buffer.from(str.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8');
+}
+function verifyJwt(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const header = JSON.parse(base64UrlDecode(parts[0]));
+    const payload = JSON.parse(base64UrlDecode(parts[1]));
+    // Verify signature
+    const unsigned = `${parts[0]}.${parts[1]}`;
+    const expectedSig = crypto
+      .createHmac('sha256', JWT_SECRET)
+      .update(unsigned)
+      .digest('base64')
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    if (expectedSig !== parts[2]) return null;
+    // Check expiration
+    if (payload.exp && payload.exp * 1000 < Date.now()) return null;
+    return payload;
+  } catch { return null; }
+}
+
+/**
+ * Extract userId from an incoming proxy request. Checks:
+ * 1. `token` query parameter (primary — for iframe src)
+ * 2. `Authorization: Bearer <token>` header (fallback — for API clients)
+ * 3. `aurora_cs_token` cookie (subsequent iframe requests after initial auth)
+ * Returns { userId, email } or null if no valid auth.
+ */
+function extractUserId(req) {
+  // 1. Check query parameter token
+  const url = req.url || '/';
+  const queryIdx = url.indexOf('?');
+  if (queryIdx >= 0) {
+    const qs = url.slice(queryIdx + 1);
+    const params = new URLSearchParams(qs);
+    const tokenParam = params.get('token');
+    if (tokenParam) {
+      const payload = verifyJwt(tokenParam);
+      if (payload) return { userId: payload.userId, email: payload.email || payload.sub };
+    }
+  }
+  // 2. Check Authorization header
+  const authHeader = req.headers['authorization'] || '';
+  if (authHeader.startsWith('Bearer ')) {
+    const payload = verifyJwt(authHeader.substring(7));
+    if (payload) return { userId: payload.userId, email: payload.email || payload.sub };
+  }
+  // 3. Check aurora_cs_token cookie (set on first authenticated request)
+  const cookies = req.headers['cookie'] || '';
+  const cookieMatch = cookies.match(/(?:^|;\s*)aurora_cs_token=([^;]+)/);
+  if (cookieMatch) {
+    const payload = verifyJwt(cookieMatch[1]);
+    if (payload) return { userId: payload.userId, email: payload.email || payload.sub };
+  }
+  return null;
+}
+
+/**
+ * Strip auth-sensitive params from a URL before forwarding to code-server.
+ * Removes: token, userId
+ * NOTE: Uses manual string manipulation instead of URLSearchParams.toString()
+ * because URLSearchParams encodes / to %2F, which breaks code-server's
+ * workspace folder path resolution.
+ */
+function stripAuthParams(url) {
+  const queryIdx = url.indexOf('?');
+  if (queryIdx < 0) return url;
+  // Remove token=... and userId=... params using regex to preserve original encoding
+  let qs = url.slice(queryIdx + 1);
+  qs = qs.replace(/([?&])token=[^&]*&?/g, '$1').replace(/&token=[^&]*$/, '');
+  qs = qs.replace(/([?&])userId=[^&]*&?/g, '$1').replace(/&userId=[^&]*$/, '');
+  // Clean up trailing & and leading &
+  qs = qs.replace(/^&/, '').replace(/&$/, '');
+  return qs ? `${url.slice(0, queryIdx)}?${qs}` : url.slice(0, queryIdx);
+}
+
+/**
+ * Rewrite workspace folder path to be per-user.
+ * /workspaces/myProject → /workspaces/{userId}/myProject
+ *
+ * Only rewrites if the per-user workspace directory actually exists on disk.
+ * Flat (legacy) workspaces stored at /workspaces/{uuid}/ are left unchanged so
+ * the proxy doesn't break old workspaces during the migration period.
+ */
+function rewriteWorkspaceFolder(url, userId) {
+  const folderPattern = /folder=\/workspaces\/([^/&?\s]+)/;
+  const match = url.match(folderPattern);
+  if (match && !match[1].startsWith(userId + '/')) {
+    const workspaceName = match[1];
+    // Check if this workspace exists in the per-user directory
+    const wsDir = join(homedir(), '.aurora', 'workspaces');
+    const perUserPath = join(wsDir, userId, workspaceName);
+    if (existsSync(perUserPath)) {
+      return url.replace(match[0], `folder=/workspaces/${userId}/${workspaceName}`);
+    }
+    // Flat workspace — leave path unchanged
+  }
+  return url;
+}
+
+// Track last authenticated user to avoid redundant auth updates
+let csLastAuthUser = null;
+
+/**
+ * Notify the code-server orchestrator to update Cline's secrets.json
+ * with the current user's API key. This ensures Cline sends the user's
+ * identity in API calls to the Aurora gateway.
+ */
+async function updateClineAuth(userId, jwtToken) {
+  const orchHost = process.env.CODE_SERVER_HOST || 'localhost';
+  const orchPort = process.env.CODE_SERVER_API_PORT || '3001';
+  try {
+    const { request } = await import('node:http');
+    const postData = JSON.stringify({ userId, apiKey: jwtToken });
+    const options = {
+      hostname: orchHost,
+      port: parseInt(orchPort, 10),
+      path: '/api/auth/update',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+      timeout: 3000,
+    };
+    await new Promise((resolve, reject) => {
+      const req = request(options, (res) => {
+        let body = '';
+        res.on('data', (chunk) => body += chunk);
+        res.on('end', () => resolve());
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+      req.write(postData);
+      req.end();
+    });
+    console.log('[cs-proxy] Updated Cline auth for user:', userId);
+  } catch (err) {
+    // Non-critical — Cline will use build-time configured key
+    console.warn('[cs-proxy] Failed to update Cline auth:', err.message);
+  }
+}
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
@@ -103,8 +250,27 @@ function badGateway(res) {
 
 // ── WebSocket upgrade handler (used by code-server proxy on port 3090) ──
 function handleCodeServerUpgrade(req, socket, head) {
-  const path = req.url || '/';
-  console.log('[cs-ws] Upgrade request for', path);
+  const url = req.url || '/';
+
+  // Auth check for WebSocket connections
+  const auth = extractUserId(req);
+  if (!auth) {
+    // Write HTTP 401 response and destroy
+    const safeWrite = (sock, data) => {
+      if (!sock.destroyed && !sock.writableEnded) {
+        try { sock.write(data); } catch (_) {}
+      }
+    };
+    safeWrite(socket, 'HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  const { userId } = auth;
+
+  // Rewrite workspace folder for this user
+  const rewrittenPath = rewriteWorkspaceFolder(url, userId);
+  const cleanPath = stripAuthParams(rewrittenPath);
+  const path = cleanPath;
 
   // Prevent EPIPE crashes — Node will throw if we write to a destroyed socket
   const safeWrite = (sock, data) => {
@@ -192,6 +358,55 @@ const csServer = createServer((req, res) => {
   let url = req.url || '/';
   const urlPath = url.split('?')[0];
 
+  // ── Auth check ──
+  const auth = extractUserId(req);
+  if (!auth) {
+    // Redirect to login page for browser requests, return 401 for API
+    if (urlPath === '/' || urlPath.startsWith('/?')) {
+      res.writeHead(302, { Location: '/login?redirect=/code-server' });
+      res.end();
+      return;
+    }
+    res.writeHead(401, { 'Content-Type': 'text/plain' });
+    res.end('Unauthorized — please log in at /login');
+    return;
+  }
+  const { userId, email } = auth;
+
+  // Parse query string once for both auth cookie and Cline auth update
+  const queryIdxCookie = url.indexOf('?');
+  const urlParams = queryIdxCookie >= 0 ? new URLSearchParams(url.slice(queryIdxCookie + 1)) : null;
+  const urlToken = urlParams ? urlParams.get('token') : null;
+
+  // Notify orchestrator to update Cline secrets for this user
+  // This ensures the API key Cline uses is scoped to the current user.
+  // Debounced: only fires when the userId has changed since last request.
+  if (csLastAuthUser !== userId) {
+    csLastAuthUser = userId;
+    const token = req.headers['authorization']?.startsWith('Bearer ')
+      ? req.headers['authorization'].substring(7)
+      : urlToken || '';
+    if (token) {
+      updateClineAuth(userId, token).catch(() => {});
+    }
+  }
+
+  // Set a session cookie so subsequent iframe requests (which lack token param)
+  // still authenticate. Cookies are domain-scoped (not port-scoped), so this
+  // works across port 3000 and 3090 on the same host.
+  if (urlToken) {
+    const tokenForCookie = req.headers['authorization']?.startsWith('Bearer ')
+      ? req.headers['authorization'].substring(7)
+      : urlToken;
+    const cookieValue = `aurora_cs_token=${tokenForCookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${24 * 60 * 60}`;
+    res.setHeader('Set-Cookie', cookieValue);
+  }
+
+  // ── Rewrite workspace folder for this user ──
+  url = rewriteWorkspaceFolder(url, userId);
+  // Strip auth params before forwarding to code-server
+  url = stripAuthParams(url);
+
   // Capture stable hash from any request for later webview SW rewriting
   if (csStableHash === '' && urlPath.startsWith('/stable-')) {
     captureStableHash(urlPath);
@@ -210,6 +425,7 @@ const csServer = createServer((req, res) => {
 
   const proxyHeaders = { ...req.headers, host: `${CS_HOST}:${CS_PORT}` };
   proxyHeaders['accept-encoding'] = 'identity';
+  proxyHeaders['x-internal-user-id'] = userId;
 
   const proxyReq = httpRequest(
     { hostname: CS_HOST, port: CS_PORT, path: url, method: req.method, headers: proxyHeaders },

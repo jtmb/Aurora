@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { simpleGit } from 'simple-git';
-import { getWorkspaceDir, ensureWorkspacesDir } from '../../../../lib/workspace-utils';
+import { getUserWorkspaceDir, getUserWorkspacesDir, ensureWorkspacesDir } from '../../../../lib/workspace-utils';
 import { getUserId } from '../../../../lib/auth-utils';
 
 export async function POST(request) {
@@ -34,11 +34,16 @@ export async function POST(request) {
     }
     
     ensureWorkspacesDir();
+    // Ensure per-user workspace directory exists
+    const userWsDir = getUserWorkspacesDir(userId);
+    if (!fs.existsSync(userWsDir)) {
+      fs.mkdirSync(userWsDir, { recursive: true });
+    }
 
     // Generate a unique ID — directory names use UUID so two users can have
     // workspaces with the same display name without collision.
     const workspaceId = crypto.randomUUID();
-    const wsDir = getWorkspaceDir(workspaceId);
+    const wsDir = getUserWorkspaceDir(userId, workspaceId);
     
     const createdAt = new Date().toISOString();
     let cloneSuccess = false;

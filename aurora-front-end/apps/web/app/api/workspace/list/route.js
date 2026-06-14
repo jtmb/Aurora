@@ -1,9 +1,9 @@
-// @aurora/api/workspace/list - List user's workspaces (ownership-scoped)
+// @aurora/api/workspace/list - List user's workspaces (ownership-scoped, per-user dirs)
 
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { getWorkspacesDir, ensureWorkspacesDir } from '../../../../lib/workspace-utils';
+import { getWorkspacesDir, getUserWorkspacesDir } from '../../../../lib/workspace-utils';
 import { getUserId } from '../../../../lib/auth-utils';
 
 export async function GET(request) {
@@ -13,34 +13,25 @@ export async function GET(request) {
       return NextResponse.json({ error: { message: 'Unauthorized' } }, { status: 401 });
     }
 
-    const dir = ensureWorkspacesDir();
-    
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const userDir = getUserWorkspacesDir(userId);
     const workspaces = [];
-    
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const wsPath = path.join(dir, entry.name);
-      
-      // Read metadata if available (check ownership)
+    const seenIds = new Set();
+
+    // Helper to build a workspace entry from a directory path
+    const buildEntry = (wsPath, dirName) => {
       let metadata = {};
       const metaPath = path.join(wsPath, '.aurora', 'workspace.json');
       if (fs.existsSync(metaPath)) {
-        try {
-          metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        } catch {}
+        try { metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8')); } catch {}
       }
       
-      // Skip workspaces owned by a different user
-      if (metadata.ownerId && metadata.ownerId !== userId) continue;
-      
-      // Get last modified time from git config or directory
       let lastOpened = metadata.lastOpened;
       const stat = fs.statSync(wsPath);
       
       // Detect primary language from key files
-      const files = fs.readdirSync(wsPath);
       let primaryLanguage = null;
+      let files = [];
+      try { files = fs.readdirSync(wsPath); } catch {}
       if (files.includes('package.json')) {
         primaryLanguage = fs.existsSync(path.join(wsPath, 'tsconfig.json')) ? 'typescript' : 'javascript';
       } else if (files.includes('pyproject.toml') || files.includes('requirements.txt') || files.includes('setup.py') || files.includes('Pipfile')) {
@@ -65,9 +56,9 @@ export async function GET(request) {
         primaryLanguage = 'html';
       }
 
-      workspaces.push({
-        id: entry.name,
-        name: metadata.name || entry.name,
+      return {
+        id: dirName,
+        name: metadata.name || dirName,
         repoUrl: metadata.repoUrl || null,
         type: metadata.type || 'blank',
         codeMode: metadata.codeMode || 'full',
@@ -76,9 +67,51 @@ export async function GET(request) {
         createdAt: metadata.createdAt || stat.birthtime?.toISOString() || stat.mtime.toISOString(),
         lastOpened: lastOpened || null,
         isGitRepo: fs.existsSync(path.join(wsPath, '.git'))
-      });
+      };
+    };
+
+    // 1. List workspaces in the user's per-user directory
+    if (fs.existsSync(userDir)) {
+      const entries = fs.readdirSync(userDir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name === '.aurora') continue; // skip metadata dirs at user level
+        
+        const wsPath = path.join(userDir, entry.name);
+        // Must have workspace metadata to be a workspace
+        if (!fs.existsSync(path.join(wsPath, '.aurora', 'workspace.json'))) continue;
+        
+        workspaces.push(buildEntry(wsPath, entry.name));
+        seenIds.add(entry.name);
+      }
     }
-    
+
+    // 2. Fallback: scan flat workspace directory for legacy workspaces owned by this user
+    //    Only include workspaces not already found in the per-user directory.
+    const flatDir = getWorkspacesDir();
+    if (fs.existsSync(flatDir)) {
+      const flatEntries = fs.readdirSync(flatDir, { withFileTypes: true });
+      
+      for (const entry of flatEntries) {
+        if (!entry.isDirectory()) continue;
+        if (seenIds.has(entry.name)) continue; // Already in per-user dir
+        
+        const wsPath = path.join(flatDir, entry.name);
+        const metaPath = path.join(wsPath, '.aurora', 'workspace.json');
+        if (!fs.existsSync(metaPath)) continue; // Not a legacy workspace
+        
+        // Check ownership — only show if owned by this user
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+          if (meta.ownerId && meta.ownerId !== userId) continue; // Not owned by this user
+        } catch { continue; }
+        
+        workspaces.push(buildEntry(wsPath, entry.name));
+        seenIds.add(entry.name);
+      }
+    }
+
     // Sort by lastOpened desc, then name
     workspaces.sort((a, b) => {
       if (a.lastOpened && b.lastOpened) return b.lastOpened.localeCompare(a.lastOpened);

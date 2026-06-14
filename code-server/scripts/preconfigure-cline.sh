@@ -32,41 +32,23 @@ echo "=== Cline Native Provider Configuration ==="
 echo "  Gateway:   $AURORA_GATEWAY_BASE"
 echo "  Data dir:  $CLINE_DATA_DIR"
 
-# ── Step 0: Generate JWT for Aurora auth ─────────────────────────────
-if [ "$CLINE_API_KEY" = "aurora-no-key" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+# ── Step 0: Use env-var API keys (no hardcoded user JWT) ──────────────────
+# Per-user provider isolation happens at the Aurora gateway level.
+# Cline uses the actual provider API keys from env vars, not a shared JWT.
+# When a user authenticates through the Aurora front-end, the gateway
+# applies per-user restrictions on top of the provider keys.
+if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   CLINE_API_KEY="$DEEPSEEK_API_KEY"
   echo "  Using DEEPSEEK_API_KEY for Cline authentication"
-fi
-
-if [ "$CLINE_API_KEY" = "aurora-no-key" ]; then
-  echo "  Generating JWT for Aurora user authentication..."
-  CLINE_API_KEY=$(python3 -c "
-import hmac, hashlib, base64, json, time
-
-def b64url_encode(data):
-    return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
-
-secret = b'aurora-dev-secret-change-in-production-minimum-32-chars'
-header = {'alg':'HS256','typ':'JWT'}
-payload = {
-    'userId': 'b986d83c-65e3-4716-ab67-0c5354ca83fc',
-    'email': 'james.branco@gmail.com',
-    'role': 'admin',
-    'iat': int(time.time()),
-    'exp': int(time.time()) + 31536000
-}
-h = b64url_encode(json.dumps(header, separators=(',',':')).encode())
-p = b64url_encode(json.dumps(payload, separators=(',',':')).encode())
-msg = f'{h}.{p}'.encode()
-sig = b64url_encode(hmac.new(secret, msg, hashlib.sha256).digest())
-print(f'{h}.{p}.{sig}')
-" 2>/dev/null)
-  if [ -n "$CLINE_API_KEY" ]; then
-    echo "  ✓ Generated JWT (expires in 365 days)"
-  else
-    echo "  ⚠ WARNING: Failed to generate JWT, using default key"
-    CLINE_API_KEY="aurora-no-key"
-  fi
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+  CLINE_API_KEY="$OPENAI_API_KEY"
+  echo "  Using OPENAI_API_KEY for Cline authentication"
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  CLINE_API_KEY="$ANTHROPIC_API_KEY"
+  echo "  Using ANTHROPIC_API_KEY for Cline authentication"
+else
+  echo "  ⚠ WARNING: No API key env vars set — Cline will have no auth"
+  CLINE_API_KEY="aurora-no-key"
 fi
 
 # ── Step 1: Detect available Aurora providers ─────────────────────────
@@ -548,6 +530,35 @@ with open(path, 'wb') as f:
 PYEOF
 
   echo "  ✓ Binary patches applied"
+
+  # ── Move Cline to the secondary (right) side panel ─────────────
+  # code-server 4.x (VS Code 1.123) supports secondarySideBar but
+  # the viewsContainers manifest key alone may not render the icon.
+  # Instead, we write the view container location override directly
+  # into the workbench state database so Cline opens on the right.
+  GLOBAL_STATE_DB="${HOME}/.local/share/code-server/User/globalStorage/state.vscdb"
+  python3 -c "
+import json, os, sqlite3
+
+db_path = '${GLOBAL_STATE_DB}'
+os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+conn = sqlite3.connect(db_path)
+conn.execute('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value BLOB)')
+
+locations = {'claude-dev-ActivityBar': 'secondarySideBar'}
+loc_json = json.dumps(locations)
+
+for key in ['viewContainerLocation', 'views.cachedViewContainerLocations']:
+    conn.execute('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)', (key, loc_json))
+
+# Ensure secondary side bar is not hidden
+conn.execute('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)', ('auxiliaryBar.hidden', 'false'))
+
+conn.commit()
+conn.close()
+print('  ✓ Cline moved to secondary (right) side panel')
+" 2>&1
 
   # ── Webview provider dropdown filter ──────────────────────────────
   # The webview UI (ApiOptions.tsx) imports providers.json and renders

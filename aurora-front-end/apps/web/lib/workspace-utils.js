@@ -9,9 +9,19 @@ export function getWorkspacesDir() {
   return path.join(os.homedir(), '.aurora', 'workspaces');
 }
 
+/** Directory where a specific user's workspaces are stored */
+export function getUserWorkspacesDir(userId) {
+  return path.join(getWorkspacesDir(), userId);
+}
+
 /** Get the absolute path to a specific workspace */
 export function getWorkspaceDir(workspaceId) {
   return path.join(getWorkspacesDir(), workspaceId);
+}
+
+/** Get the absolute path to a specific user's workspace */
+export function getUserWorkspaceDir(userId, workspaceId) {
+  return path.join(getUserWorkspacesDir(userId), workspaceId);
 }
 
 /**
@@ -143,33 +153,50 @@ export function walkDirectory(dirPath, maxDepth = 4, currentDepth = 0) {
 
 /**
  * Validate workspace exists and return its path.
- * When userId is provided, also checks workspace ownership.
- * Workspaces without an ownerId (legacy) are accessible to all users.
+ * When userId is provided, looks in the user's per-user workspace directory.
+ * Falls back to the flat (legacy) directory for backward compatibility during migration.
  * Returns null if workspace doesn't exist or user doesn't own it.
  */
 export function validateWorkspace(workspaceId, userId) {
-  const dir = getWorkspaceDir(workspaceId);
-  if (!fs.existsSync(dir)) return null;
-  // Ownership check (only when userId is provided)
   if (userId) {
-    const metaPath = path.join(dir, '.aurora', 'workspace.json');
+    // Primary: per-user directory
+    const userDir = getUserWorkspaceDir(userId, workspaceId);
+    if (fs.existsSync(userDir)) return userDir;
+  }
+  // Fallback: legacy flat directory (pre-per-user migration)
+  const flatDir = getWorkspaceDir(workspaceId);
+  if (fs.existsSync(flatDir)) {
+    // Check ownership metadata for flat legacy workspaces
+    const metaPath = path.join(flatDir, '.aurora', 'workspace.json');
     if (fs.existsSync(metaPath)) {
       try {
         const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        // If ownerId is set and doesn't match, deny access
-        if (metadata.ownerId && metadata.ownerId !== userId) return null;
+        if (metadata.ownerId && userId && metadata.ownerId !== userId) return null;
       } catch { /* corrupt metadata — allow access */ }
     }
-    // No metadata or no ownerId set → allow (backward compat with pre-ownership workspaces)
+    return flatDir;
   }
-  return dir;
+  return null;
 }
 
 /**
  * Read workspace metadata from .aurora/workspace.json.
+ * Looks in per-user directory first, falls back to flat directory.
  * Returns {} if no metadata file exists, null if workspace doesn't exist.
  */
-export function readWorkspaceMetadata(workspaceId) {
+export function readWorkspaceMetadata(workspaceId, userId) {
+  // Try per-user directory first
+  if (userId) {
+    const userDir = getUserWorkspaceDir(userId, workspaceId);
+    if (fs.existsSync(userDir)) {
+      const metaPath = path.join(userDir, '.aurora', 'workspace.json');
+      if (fs.existsSync(metaPath)) {
+        try { return JSON.parse(fs.readFileSync(metaPath, 'utf-8')); } catch { return {}; }
+      }
+      return {};
+    }
+  }
+  // Fallback to flat directory
   const dir = getWorkspaceDir(workspaceId);
   if (!fs.existsSync(dir)) return null;
   const metaPath = path.join(dir, '.aurora', 'workspace.json');
@@ -183,10 +210,11 @@ export function readWorkspaceMetadata(workspaceId) {
 
 /**
  * Write workspace metadata to .aurora/workspace.json.
+ * Writes to per-user directory when userId is provided.
  * Creates the .aurora directory if it doesn't exist.
  */
-export function writeWorkspaceMetadata(workspaceId, metadata) {
-  const dir = getWorkspaceDir(workspaceId);
+export function writeWorkspaceMetadata(workspaceId, metadata, userId) {
+  const dir = userId ? getUserWorkspaceDir(userId, workspaceId) : getWorkspaceDir(workspaceId);
   if (!fs.existsSync(dir)) return false;
   const auroraDir = path.join(dir, '.aurora');
   if (!fs.existsSync(auroraDir)) {
